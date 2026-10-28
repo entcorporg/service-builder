@@ -1,0 +1,18 @@
+[package]
+name = "service-builder"
+description = "Visual builder for event-driven Rust backends (gRPC + Kafka)"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "service_builder_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+sb-app = { path = "../crates/sb-app" }
+sb-model = { path = "../crates/sb-model" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"

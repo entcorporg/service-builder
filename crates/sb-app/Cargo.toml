@@ -1,0 +1,15 @@
+[package]
+name = "sb-app"
+description = "Application services shared by the desktop app and the CLI: analyze, open, save, export."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sb-codegen = { path = "../sb-codegen" }
+sb-model = { path = "../sb-model" }
+serde.workspace = true
+serde_json.workspace = true
+
+[[bin]]
+name = "sb"
+path = "src/bin/sb.rs"

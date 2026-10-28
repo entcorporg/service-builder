@@ -1,0 +1,11 @@
+[package]
+name = "sb-codegen"
+description = "Turns a Service Builder project into a Cargo workspace of Kafka + gRPC services."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sb-model = { path = "../sb-model" }
+serde.workspace = true
+thiserror.workspace = true
+syn = { version = "3", features = ["full"] }
