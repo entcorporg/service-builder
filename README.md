@@ -82,8 +82,8 @@ lancement et signalée quand on clique. Sous Linux, seul l'AppImage se met à jo
 
 **Dans la CI** (`.github/workflows/ci.yml`). Deux règles :
 
-1. **Chaque changement annonce son type de mise à jour**, par une mention dans le titre ou la description de la PR,
-   ou dans un message de commit : `[minor]` (0.0.**X**), `[normal]` (0.**X**.0) ou `[major]` (**X**.0.0). Une PR sans
+1. **Chaque changement annonce son type de mise à jour**, par une mention dans le titre de la PR ou la première
+   ligne d'un message de commit (le reste du message n'est pas lu, pour pouvoir parler des mentions sans déclencher de release) : `[minor]` (0.0.**X**), `[normal]` (0.**X**.0) ou `[major]` (**X**.0.0). Une PR sans
    mention échoue ; si plusieurs mentions coexistent, la plus forte l'emporte.
 2. **Un push sur `main` avec mention incrémente la version**, une fois tous les tests passés : `0.1.0` + `[normal]`
    donne `0.2.0` (les nombres à droite repartent à zéro). La CI écrit la nouvelle version dans `Cargo.toml`,

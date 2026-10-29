@@ -8,7 +8,9 @@ permissions:
   contents: read
 
 jobs:
-  # Rule 1 — every change names its update type: [minor] 0.0.X, [normal] 0.X.0, [major] X.0.0.
+  # Rule 1 — every change names its update type: [minor] 0.0.X, [normal] 0.X.0, [major] X.0.0,
+  # in the title of the pull request or in the subject line (first line) of a commit. Only titles
+  # count: a description or commit body that merely talks about the mentions must not release.
   # A pull request without the mention fails here; a push to main reads it to decide the release.
   update-type:
     runs-on: ubuntu-24.04
@@ -24,25 +26,24 @@ jobs:
           EVENT: ${{ github.event_name }}
           BRANCH: ${{ github.ref_name }}
           PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
           BEFORE: ${{ github.event.before }}
           SHA: ${{ github.sha }}
         run: |
           if [ "$EVENT" = pull_request ]; then
-            text="$PR_TITLE"$'\n'"$PR_BODY"$'\n'"$(git log --format=%B "$PR_BASE..$PR_HEAD")"
+            text="$PR_TITLE"$'\n'"$(git log --format=%s "$PR_BASE..$PR_HEAD")"
           elif git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
-            text="$(git log --format=%B "$BEFORE..$SHA")"
+            text="$(git log --format=%s "$BEFORE..$SHA")"
           else
-            text="$(git log -1 --format=%B "$SHA")"
+            text="$(git log -1 --format=%s "$SHA")"
           fi
           level="$(printf '%s' "$text" | node scripts/release.mjs detect)"
           echo "level=$level" >> "$GITHUB_OUTPUT"
           if [ -n "$level" ]; then
             echo "Update type: $level"
           elif [ "$EVENT" = pull_request ]; then
-            echo "::error title=Update type missing::Mention [minor] (0.0.X), [normal] (0.X.0) or [major] (X.0.0) in the PR title, description or a commit message."
+            echo "::error title=Update type missing::Mention [minor] (0.0.X), [normal] (0.X.0) or [major] (X.0.0) in the PR title or in the first line of a commit."
             exit 1
           elif [ "$BRANCH" = main ]; then
             echo "::notice title=No release::No [minor], [normal] or [major] mention in this push: the version is left as is."

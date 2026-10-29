@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, it } from 'node:test'
-import { bump, bumpVersion, currentVersion, detectLevel } from './release.mjs'
+import { bump, bumpVersion, currentVersion, detectLevel, setVersion } from './release.mjs'
 
 describe('detectLevel', () => {
   it('reads the three mentions, case-insensitively', () => {
@@ -73,6 +73,16 @@ describe('bump', () => {
     assert.match(lock, /name = "a"\nversion = "0\.1\.1"/)
     assert.match(lock, /name = "b"\nversion = "0\.1\.1"/)
     assert.match(lock, /name = "serde"\nversion = "0\.1\.0"\nsource/)
+    fs.rmSync(dir, { recursive: true })
+  })
+
+  it('sets an exact version everywhere, including a lower one', () => {
+    const { dir, read } = fixture()
+    bump('major', dir)
+    assert.equal(setVersion('0.1.0', dir), '0.1.0')
+    assert.equal(currentVersion(dir), '0.1.0')
+    assert.match(read('Cargo.lock'), /name = "a"\nversion = "0\.1\.0"/)
+    assert.throws(() => setVersion('latest', dir))
     fs.rmSync(dir, { recursive: true })
   })
 
