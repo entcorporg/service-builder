@@ -98,7 +98,7 @@ export function SqlBody(props: { step: SqlStep; update: (fn: (s: SqlStep) => voi
         ))}
       </div>
 
-      <label className="inline">
+      <label className="form-row">
         <span>Table</span>
         <select aria-label="Table" value={step.table} onChange={(e) => setTable(e.target.value)}>
           {!table && <option value={step.table}>{step.table || 'Choisir…'}</option>}
@@ -110,7 +110,7 @@ export function SqlBody(props: { step: SqlStep; update: (fn: (s: SqlStep) => voi
 
       {table && step.op === 'select' && (
         <>
-          <div className="inline">
+          <div className="form-row">
             <span>Résultat</span>
             <input className="mono" aria-label="Nom de la variable" value={step.bind ?? ''} spellCheck={false} onChange={(e) => u((s) => (s.bind = e.target.value))} />
             <label className="check" title="Toutes les lignes qui correspondent (une liste) au lieu d’une seule">
@@ -130,7 +130,7 @@ export function SqlBody(props: { step: SqlStep; update: (fn: (s: SqlStep) => voi
             ))}
           </fieldset>
 
-          <label className="inline">
+          <label className="form-row">
             <span>Vers un schéma</span>
             <select aria-label="Convertir en schéma" value={step.into ?? ''} onChange={(e) => u((s) => (s.into = e.target.value || null))}>
               <option value="">aucun : une ligne typée par les colonnes</option>
@@ -225,7 +225,7 @@ export function SqlBody(props: { step: SqlStep; update: (fn: (s: SqlStep) => voi
       )}
 
       {table && step.op === 'select' && step.many && (
-        <div className="inline">
+        <div className="form-row">
           <span>Tri</span>
           <select aria-label="Trier par" value={step.orderBy ?? ''} onChange={(e) => u((s) => (s.orderBy = e.target.value || null))}>
             <option value="">aucun</option>

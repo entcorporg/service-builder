@@ -10,6 +10,7 @@ export function CommitInput(props: {
   label?: string
   /** Lets the value be cleared (renames never can be empty). */
   allowEmpty?: boolean
+  className?: string
 }) {
   const [draft, setDraft] = useState(props.value)
   const cancelled = useRef(false)
@@ -22,7 +23,7 @@ export function CommitInput(props: {
   }
   return (
     <input
-      className={props.mono ? 'mono' : undefined}
+      className={[props.mono && 'mono', props.className].filter(Boolean).join(' ') || undefined}
       value={draft}
       placeholder={props.placeholder}
       aria-label={props.label}
