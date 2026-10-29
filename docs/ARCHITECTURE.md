@@ -246,10 +246,16 @@ sur mesure vit dans les étapes *Code Rust* du projet.
 par l'application elle-même (`service-builder mcp <fichier>`, traité dans `main.rs` avant d'ouvrir une fenêtre, ce qui
 évite de livrer un second binaire). Les outils travaillent sur le *fichier* : chaque appel le relit, chaque édition le
 réécrit. `patch_project` applique add / replace / remove (RFC 6902) sur le JSON, vérifie que le résultat est un projet,
-puis seulement l'enregistre, donc un échec à mi-chemin ne laisse rien. `get_schema` sert le JSON Schema du projet, **dérivé des types** (`schemars`, les commentaires de doc deviennent des
-descriptions) : il ne peut pas diverger du modèle, et un test valide le projet d'exemple contre ce schéma. Sans
-argument il liste les définitions ; avec `definition=Step` il renvoie celle-ci et ce qu'elle référence, pour ne pas
-payer le schéma entier. Un échec d'outil est un résultat `isError` que le
+puis seulement l'enregistre, donc un échec à mi-chemin ne laisse rien. Après une édition, la réponse ne détaille que les diagnostics *nouveaux* et *résolus* (deux diagnostics sont les
+mêmes si code et message le sont : le chemin bouge quand on insère un élément avant), plus le total ; `validate` liste
+tout. Les opérations d'un même appel sont validées une seule fois : c'est le mode « lot ». Les chemins acceptent des
+sélecteurs `clé=valeur` dans les tableaux (`/services/name=Orders/rpcs/name=CreateOrder/steps/id=h2`), plus stables que
+des index qui glissent à chaque insertion ; `insert_before` et `insert_after` posent une valeur à côté d'un élément
+repéré ainsi, et `describe_project` liste les ids d'étapes. Un sélecteur sans résultat dit ce qui existe, un sélecteur
+ambigu est refusé. `get_schema` sert le JSON Schema du projet, **dérivé des types** (`schemars`, les commentaires de doc
+deviennent des descriptions) : il ne peut pas diverger du modèle, et un test valide le projet d'exemple contre ce
+schéma. Sans argument il liste les définitions ; avec `definition=Step` il renvoie celle-ci et ce qu'elle référence,
+pour ne pas payer le schéma entier. Un échec d'outil est un résultat `isError` que le
 modèle lit, pas une erreur de protocole. Stdout ne porte que le protocole.
 
 L'activation écrit l'entrée dans le `.mcp.json` du dossier du projet (la configuration par projet de Claude Code) en
