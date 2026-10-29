@@ -55,6 +55,12 @@ const TOOLS: &[ToolDef] = &[
         required: &[],
     },
     ToolDef {
+        name: "get_schema",
+        description: "JSON Schema of the project file, derived from the model itself: every step type, field, enum value and operator. Without `definition` it lists the definitions; with one (for example Step, Expr, Condition, SqlCondition) it returns that definition with the ones it references.",
+        properties: || json!({ "definition": { "type": "string", "description": "Name of a definition, as listed by get_schema without argument." } }),
+        required: &[],
+    },
+    ToolDef {
         name: "get_example_project",
         description: "A complete example project (Orders, Payments, Notifications) to copy the JSON structure from. Does not touch the project file.",
         properties: no_properties,
@@ -245,6 +251,7 @@ fn call_tool(project: &Path, name: &str, args: &Value) -> Result<String, String>
     match name {
         "describe_project" => Ok(pretty(&outline(&load_project(project)?))),
         "get_project" => Ok(pretty(&load_project(project)?)),
+        "get_schema" => schema_tool(args.get("definition").and_then(Value::as_str)),
         "get_example_project" => Ok(pretty(&sb_model::sample::orders())),
         "patch_project" => {
             let operations = args
@@ -290,6 +297,80 @@ fn call_tool(project: &Path, name: &str, args: &Value) -> Result<String, String>
             Ok(format!("wrote {} files to {}", report.files, report.dir))
         }
         _ => Err(format!("unknown tool {name}")),
+    }
+}
+
+fn schema_tool(definition: Option<&str>) -> Result<String, String> {
+    let schema = sb_model::json_schema();
+    let definitions = schema
+        .get("$defs")
+        .and_then(Value::as_object)
+        .ok_or("the schema has no definitions")?;
+    let Some(name) = definition else {
+        let listing: Vec<String> = definitions
+            .iter()
+            .map(
+                |(name, d)| match d.get("description").and_then(Value::as_str) {
+                    Some(text) => format!("{name}: {}", first_sentence(text)),
+                    None => name.clone(),
+                },
+            )
+            .collect();
+        return Ok(format!(
+            "Root: Project. Pass one of these as `definition` to get it:\n{}",
+            listing.join("\n")
+        ));
+    };
+    if !definitions.contains_key(name) {
+        let known: Vec<&str> = definitions.keys().map(String::as_str).collect();
+        return Err(format!("no definition {name}; known: {}", known.join(", ")));
+    }
+    // The definition, then everything it refers to (transitively), so it can be read on its own.
+    let mut wanted = vec![name.to_string()];
+    let mut at = 0;
+    while at < wanted.len() {
+        let mut found = Vec::new();
+        collect_refs(&definitions[&wanted[at]], &mut found);
+        for r in found {
+            if !wanted.contains(&r) {
+                wanted.push(r);
+            }
+        }
+        at += 1;
+    }
+    let picked: serde_json::Map<String, Value> = wanted
+        .iter()
+        .map(|n| (n.clone(), definitions[n].clone()))
+        .collect();
+    Ok(pretty(&json!({ "definition": name, "$defs": picked })))
+}
+
+/// The first sentence of a doc comment, on one line.
+fn first_sentence(text: &str) -> String {
+    let paragraph = text.split("\n\n").next().unwrap_or("");
+    let flat = paragraph.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.find(". ") {
+        Some(end) => flat[..=end].to_string(),
+        None => flat,
+    }
+}
+
+fn collect_refs(value: &Value, into: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, v) in map {
+                match (key.as_str(), v.as_str()) {
+                    ("$ref", Some(target)) => {
+                        if let Some(name) = target.strip_prefix("#/$defs/") {
+                            into.push(name.to_string());
+                        }
+                    }
+                    _ => collect_refs(v, into),
+                }
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|v| collect_refs(v, into)),
+        _ => {}
     }
 }
 
@@ -993,6 +1074,41 @@ mod tests {
         assert!(
             apply_operation(&mut doc, &json!({ "op": "move", "path": "/a", "value": 1 })).is_err()
         );
+    }
+
+    #[test]
+    fn get_schema_lists_definitions_and_returns_one_with_what_it_references() {
+        let f = Fixture::new("schema");
+        let (list, err) = f.call("get_schema", json!({}));
+        assert!(!err);
+        assert!(list.contains("\nStep: One block of a handler"), "{list}");
+        // Every line is one whole sentence, not a doc comment cut at the line wrap.
+        assert!(list.lines().skip(1).all(|l| !l.ends_with(':')), "{list}");
+
+        let (step, err) = f.call("get_schema", json!({ "definition": "Step" }));
+        assert!(!err);
+        let schema: Value = serde_json::from_str(&step).unwrap();
+        let defs = schema["$defs"].as_object().unwrap();
+        for name in [
+            "Step",
+            "Expr",
+            "Condition",
+            "CmpOp",
+            "SqlOp",
+            "SqlCondition",
+        ] {
+            assert!(
+                defs.contains_key(name),
+                "{name} missing from {:?}",
+                defs.keys().collect::<Vec<_>>()
+            );
+        }
+        assert!(!defs.contains_key("Project"));
+        assert!(step.contains("\"sql\"") && step.contains("\"branch\""));
+
+        let (text, err) = f.call("get_schema", json!({ "definition": "Nope" }));
+        assert!(err);
+        assert!(text.contains("known:") && text.contains("Step"), "{text}");
     }
 
     #[test]
