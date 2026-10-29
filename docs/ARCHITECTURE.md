@@ -237,6 +237,19 @@ sur mesure vit dans les étapes *Code Rust* du projet.
   contient les diagnostics et, si le projet est valide, les fichiers générés. Les réponses arrivées dans le
   désordre sont ignorées. Quand le projet est invalide, la dernière version valide du code reste affichée,
   marquée comme périmée.
+- **Styles (migration vers Tailwind en cours)** : `ui/src/app.css` est le point d'entrée. Les couches CSS vont de la
+  moins à la plus prioritaire : `theme`, `xyflow`, `legacy` (l'ancien `styles.css`), `utilities`. Un utilitaire bat donc
+  toujours une règle héritée (y compris `input`, `button`…), et aucune règle héritée ne peut défaire un utilitaire. Le
+  `preflight` de Tailwind n'est pas chargé : les vues non migrées comptent sur les styles par défaut du navigateur ; il
+  entrera avec la dernière vue. Les tailles sont en px (la racine fait 13 px) et la palette pointe sur les variables de
+  `:root` (`bg-panel`, `text-muted`, `border-line`, `text-ok`…), qui deviendront les jetons du thème à la fin.
+  Règles pour migrer un composant : remplacer **toutes** ses classes héritées (une règle héritée qui subsiste est
+  invisible derrière l'utilitaire, mais continue de s'appliquer à d'autres éléments), traduire les règles une à une
+  (`text-xs` = 11 px, `text-sm` = 12 px), supprimer les règles CSS devenues inutiles, et remplacer les sélecteurs e2e
+  qui visaient ses classes par des rôles ARIA ou `data-testid`. Un test (`no-utility-clash`) échoue si une classe de
+  `styles.css` s'écrit comme un utilitaire (`.inline`, `.block`…) : Tailwind scanne tout le code et générerait cet
+  utilitaire à partir de l'ancien balisage. Vérification de non-régression visuelle : captures des mêmes scénarios
+  avant / après (un worktree de `main` sert de référence) et comparaison pixel à pixel.
 - **Glisser-déposer** : HTML5 natif depuis la palette. Vérifié dans WebKitGTK (la vraie fenêtre Tauri).
 
 ### Serveur MCP

@@ -8,8 +8,8 @@ import { Icon } from './Icon'
 function CopyBlock({ title, text }: { title: string; text: string }) {
   const notify = useStore((s) => s.notify)
   return (
-    <div className="copy-block">
-      <div className="copy-head">
+    <div className="mb-[10px] overflow-hidden rounded-xl border border-line bg-panel">
+      <div className="flex items-center justify-between border-b border-line py-1 pr-1.5 pl-3">
         <strong>{title}</strong>
         <button
           type="button"
@@ -20,10 +20,16 @@ function CopyBlock({ title, text }: { title: string; text: string }) {
           <Icon name="copy" size={14} /> Copier
         </button>
       </div>
-      <pre className="mono">{text}</pre>
+      <pre data-testid="copy-text" className="m-0 overflow-x-auto px-3 py-[10px] font-mono text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">{text}</pre>
     </div>
   )
 }
+
+const CARD = 'min-w-0 rounded-xl border border-line bg-panel-2 px-4 py-[14px]'
+const H3 = 'mt-1.5 mb-2 text-xs tracking-[0.8px] text-muted uppercase'
+const SMALL = 'mt-1 block leading-[1.5] text-muted'
+const PILL = 'rounded-full px-[9px] py-0.5 text-xs font-bold'
+const PILL_TONE = { on: 'bg-ok/12 text-ok', stale: 'bg-warn/12 text-warn', off: 'bg-raised text-muted' } as const
 
 const STATE_LABEL = { on: 'Actif', off: 'Inactif', stale: 'À mettre à jour' } as const
 
@@ -93,7 +99,7 @@ export function McpView() {
     [filePath, notify],
   )
 
-  if (!info) return <div className="mcp-view" />
+  if (!info) return <div data-testid="mcp-view" className="absolute inset-0 overflow-y-auto bg-bg" />
 
   const state = info.activation?.state
   const name = info.activation?.serverName ?? 'service-builder'
@@ -102,30 +108,30 @@ export function McpView() {
   const json = JSON.stringify({ mcpServers: { [name]: { command: info.command, args } } }, null, 2)
 
   return (
-    <div className="mcp-view">
-      <div className="mcp-body">
+    <div data-testid="mcp-view" className="absolute inset-0 overflow-y-auto bg-bg">
+      <div className="mx-auto grid max-w-[860px] gap-4 px-6 pt-[22px] pb-12">
         <header>
-          <h2>Serveur MCP</h2>
-          <p>
-            Un client IA (Claude Code, Claude Desktop…) lance Service Builder en mode <span className="mono">mcp</span> et lit,
+          <h2 className="mb-1 text-xl">Serveur MCP</h2>
+          <p className="leading-[1.5] text-muted">
+            Un client IA (Claude Code, Claude Desktop…) lance Service Builder en mode <span className="font-mono text-sm">mcp</span> et lit,
             modifie, valide et exporte ce projet par le protocole MCP, sur stdio. Le serveur travaille sur le fichier du projet.
           </p>
         </header>
 
-        <section className="card" aria-label="Activation">
-          <div className="activation">
+        <section className={CARD} aria-label="Activation">
+          <div className="flex items-center justify-between gap-[18px]">
             <div>
-              <div className="activation-title">
+              <div className="flex items-center gap-[10px]">
                 <strong>Activation</strong>
-                {state && <span className={`pill ${state}`}>{STATE_LABEL[state]}</span>}
+                {state && <span data-testid="mcp-state" data-state={state} className={`${PILL} ${PILL_TONE[state]}`}>{STATE_LABEL[state]}</span>}
               </div>
               {info.activation ? (
-                <small>
-                  Ajoute l’entrée <span className="mono">{name}</span> au fichier <span className="mono">{info.activation.configPath}</span>,
+                <small className={SMALL}>
+                  Ajoute l’entrée <span className="font-mono text-sm">{name}</span> au fichier <span className="font-mono text-sm">{info.activation.configPath}</span>,
                   que Claude Code lit depuis ce dossier. Les autres entrées sont conservées.
                 </small>
               ) : (
-                <small>Enregistrez le projet pour pouvoir activer le MCP : le serveur travaille sur son fichier.</small>
+                <small className={SMALL}>Enregistrez le projet pour pouvoir activer le MCP : le serveur travaille sur son fichier.</small>
               )}
             </div>
             {info.activation &&
@@ -142,23 +148,23 @@ export function McpView() {
         </section>
 
         <section aria-label="Configuration manuelle">
-          <h3>Configuration manuelle</h3>
+          <h3 className={H3}>Configuration manuelle</h3>
           <CopyBlock title="Commande du serveur" text={line} />
           <CopyBlock title="Claude Code" text={`claude mcp add ${name} -- ${line}`} />
           <CopyBlock title="Autres clients (Claude Desktop…)" text={json} />
         </section>
 
         <section aria-label="Outils exposés">
-          <h3>Outils exposés</h3>
-          <ul className="tool-list">
+          <h3 className={H3}>Outils exposés</h3>
+          <ul aria-label="Liste des outils" className="mx-0 mt-0 mb-3 list-none rounded-xl border border-line bg-panel p-0">
             {info.tools.map((t) => (
-              <li key={t.name}>
-                <span className="mono tool-name">{t.name}</span>
+              <li key={t.name} className="grid grid-cols-[190px_minmax(0,1fr)] gap-3 border-t border-line px-3 py-2 leading-[1.45] text-muted first:border-t-0">
+                <span className="font-mono text-sm text-text">{t.name}</span>
                 <span>{t.description}</span>
               </li>
             ))}
           </ul>
-          <p className="hint">
+          <p className="text-sm leading-[1.5] text-muted">
             Les modifications d’un client sont écrites dans le fichier du projet. L’application le recharge quand la fenêtre
             reprend le focus, sauf si des modifications non enregistrées sont en cours.
           </p>
@@ -166,9 +172,9 @@ export function McpView() {
 
         {feedback && (
           <section aria-label="Suggestions des agents">
-            <h3>Suggestions des agents</h3>
-            <div className="card feedback-head">
-              <label className="check">
+            <h3 className={H3}>Suggestions des agents</h3>
+            <div className={`${CARD} grid gap-1.5`}>
+              <label className="flex cursor-pointer items-center gap-2 font-mono text-xs font-semibold text-muted">
                 <input
                   type="checkbox"
                   checked={feedback.enabled}
@@ -176,30 +182,30 @@ export function McpView() {
                 />
                 Demander un rapport à l’agent tous les 50 appels
               </label>
-              <small>
+              <small className="leading-[1.5] text-muted">
                 Un agent peut aussi en déposer un de lui-même. Rien n’est envoyé sans votre clic : « Envoyer sur GitHub » ouvre une
                 issue pré-remplie dans votre navigateur, que vous relisez avant de la publier.
               </small>
             </div>
             {feedback.reports.length === 0 ? (
-              <p className="hint">Aucun rapport pour l’instant.</p>
+              <p className="text-sm leading-[1.5] text-muted">Aucun rapport pour l’instant.</p>
             ) : (
               feedback.reports.map((r) => (
-                <article key={r.id} className="card report" aria-label={`Rapport ${r.id}`}>
-                  <div className="report-head">
+                <article key={r.id} className={`${CARD} grid gap-2`} aria-label={`Rapport ${r.id}`}>
+                  <div className="flex items-center gap-[10px] text-muted">
                     <small>{new Date(r.createdAt * 1000).toLocaleString('fr-FR')}</small>
-                    {r.status === 'opened' && <span className="pill on">Ouvert sur GitHub</span>}
+                    {r.status === 'opened' && <span className={`${PILL} ${PILL_TONE.on}`}>Ouvert sur GitHub</span>}
                   </div>
-                  {r.summary && <p>{r.summary}</p>}
-                  <ol>
+                  {r.summary && <p className="leading-[1.5] text-muted">{r.summary}</p>}
+                  <ol className="m-0 grid gap-1.5 pl-5">
                     {r.suggestions.map((s, i) => (
                       <li key={i}>
                         <strong>{s.title}</strong>
-                        {s.details && <span>{s.details}</span>}
+                        {s.details && <span className="mt-0.5 block leading-[1.45] text-muted">{s.details}</span>}
                       </li>
                     ))}
                   </ol>
-                  <div className="report-actions">
+                  <div className="flex gap-2">
                     <button type="button" className="primary" onClick={() => void openIssue(r.id)}>
                       Envoyer sur GitHub
                     </button>

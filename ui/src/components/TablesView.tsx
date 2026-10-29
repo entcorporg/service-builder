@@ -3,7 +3,7 @@ import { addColumn, addTable, renameColumn, renameTable } from '../model'
 import { useStore } from '../store'
 import type { ColumnType, Project, Table } from '../types'
 import { Icon } from './Icon'
-import { CommitInput, Empty, IconButton } from './ui'
+import { CommitInput, IconButton } from './ui'
 
 const TYPES: ColumnType[] = ['string', 'bool', 'int32', 'int64', 'float', 'double', 'timestamp', 'uuid']
 const SQL_TYPE: Record<ColumnType, string> = {
@@ -45,6 +45,10 @@ function usages(project: Project, service: string, table: string): number {
   return n
 }
 
+const ROW = 'grid grid-cols-[minmax(130px,1.2fr)_150px_54px_54px_minmax(130px,1fr)_34px] items-center gap-2 border-t border-line px-3 py-1.5'
+const CHECK = 'flex cursor-pointer items-center justify-center gap-2 font-mono text-xs font-semibold text-muted'
+const SIDE_NOTE = 'px-[18px] py-0.5 text-sm text-faint'
+
 /**
  * The design of the tables of each service: a service owns its database, and what is designed here is
  * created when it starts. SQL steps read these tables, and are typed after their columns.
@@ -70,21 +74,23 @@ export function TablesView() {
   }
 
   return (
-    <div className="tables-view">
-      <nav className="tv-side" aria-label="Tables par service">
-        {project.services.length === 0 && <Empty>Ajoutez d’abord un service dans l’architecture.</Empty>}
+    <div data-testid="tables-view" className="absolute inset-0 grid grid-cols-[250px_minmax(0,1fr)] bg-bg">
+      <nav className="overflow-y-auto border-r border-line bg-panel px-2 py-3" aria-label="Tables par service">
+        {project.services.length === 0 && <p className={SIDE_NOTE}>Ajoutez d’abord un service dans l’architecture.</p>}
         {project.services.map((s) => (
           <section key={s.name} aria-label={`Tables de ${s.name}`}>
-            <h3>
+            <h3 className="mx-1.5 mt-0.5 mb-1 flex items-center justify-between text-xs tracking-[0.8px] text-muted uppercase">
               <span>{s.name}</span>
               <IconButton icon="plus" title={`Ajouter une table à ${s.name}`} size={13} onClick={() => create(s.name)} />
             </h3>
-            {s.tables.length === 0 && <p className="empty">Aucune table</p>}
+            {s.tables.length === 0 && <p className={SIDE_NOTE}>Aucune table</p>}
             {s.tables.map((t) => (
               <button
                 key={t.name}
                 type="button"
-                className={`tv-table${current?.service === s.name && current.table === t.name ? ' active' : ''}`}
+                className={`flex w-full cursor-pointer items-center gap-[7px] rounded-md border-0 py-[5px] pr-[10px] pl-[18px] text-left ${
+                  current?.service === s.name && current.table === t.name ? 'bg-service/18 text-white' : 'bg-transparent text-text hover:bg-raised'
+                }`}
                 onClick={() => setSel({ service: s.name, table: t.name })}
               >
                 <Icon name="table" size={13} /> <span className="mono">{t.name}</span>
@@ -95,21 +101,22 @@ export function TablesView() {
       </nav>
 
       {service && table ? (
-        <main className="tv-main" aria-label={`Table ${table.name}`}>
-          <header className="tv-head">
+        <main className="grid min-w-0 content-start gap-[14px] overflow-y-auto px-[22px] pt-[18px] pb-10" aria-label={`Table ${table.name}`}>
+          <header className="flex items-center gap-3">
             <Icon name="table" size={18} />
-            <span className="tv-service">{service.name} ·</span>
+            <span className="text-muted">{service.name} ·</span>
             <CommitInput
               value={table.name}
               mono
               label="Nom de la table"
+              className="w-[260px] text-lg font-semibold"
               onCommit={(v) => {
                 edit((p) => renameTable(p, service.name, table.name, v))
                 setSel({ service: service.name, table: v })
               }}
             />
-            <span className="spacer" />
-            <small className="muted">{usages(project, service.name, table.name)} étape(s) SQL l’utilisent</small>
+            <span className="flex-1" />
+            <small className="text-muted">{usages(project, service.name, table.name)} étape(s) SQL l’utilisent</small>
             <IconButton
               icon="trash"
               title={`Supprimer la table ${table.name}`}
@@ -121,8 +128,8 @@ export function TablesView() {
             />
           </header>
 
-          <div className="tv-columns" role="table" aria-label="Colonnes">
-            <div className="tv-row head" role="row">
+          <div className="overflow-hidden rounded-2xl border border-line bg-panel" role="table" aria-label="Colonnes">
+            <div className={`${ROW} border-t-0 bg-panel-2 text-2xs tracking-[0.7px] text-faint uppercase`} role="row">
               <span>Nom</span>
               <span>Type</span>
               <span>Nul</span>
@@ -131,17 +138,17 @@ export function TablesView() {
               <span />
             </div>
             {table.columns.map((c, ci) => (
-              <div className="tv-row" role="row" key={ci}>
+              <div className={ROW} role="row" key={ci}>
                 <CommitInput value={c.name} mono label="Nom de la colonne" onCommit={(v) => edit((p) => renameColumn(p, service.name, table.name, c.name, v))} />
                 <select aria-label="Type de la colonne" value={c.type} onChange={(e) => edit((p) => (p.services[si]!.tables[ti]!.columns[ci]!.type = e.target.value as ColumnType))}>
                   {TYPES.map((t) => (
                     <option key={t} value={t}>{t} · {SQL_TYPE[t].toLowerCase()}</option>
                   ))}
                 </select>
-                <label className="check" title="La colonne accepte NULL">
+                <label className={CHECK} title="La colonne accepte NULL">
                   <input type="checkbox" aria-label={`${c.name} peut être nul`} checked={c.nullable} disabled={c.primaryKey} onChange={(e) => edit((p) => (p.services[si]!.tables[ti]!.columns[ci]!.nullable = e.target.checked))} />
                 </label>
-                <label className="check" title="Clé primaire">
+                <label className={CHECK} title="Clé primaire">
                   <input
                     type="checkbox"
                     aria-label={`${c.name} est une clé primaire`}
@@ -163,15 +170,15 @@ export function TablesView() {
           <button type="button" className="link-btn" onClick={() => edit((p) => void addColumn(p.services[si]!.tables[ti]!))}>
             + Ajouter une colonne
           </button>
-          <small className="muted">
+          <small className="text-muted">
             Les tables sont créées au démarrage du service. Ajouter une colonne met à jour une base existante ; renommer ou supprimer une colonne
             ne change pas les tables déjà créées. Une colonne ajoutée est nulle par défaut, pour ne pas échouer sur des lignes existantes.
           </small>
 
-          <pre className="sql-preview tv-sql mono" aria-label="SQL de la table">{createTableSql(table)}</pre>
+          <pre className="sql-preview mono" aria-label="SQL de la table">{createTableSql(table)}</pre>
         </main>
       ) : (
-        <div className="tv-empty">
+        <div className="grid h-full place-content-center justify-items-center gap-[10px] p-6 text-center text-faint">
           <Icon name="table" size={32} />
           <p>Chaque service a sa propre base. Créez une table pour concevoir ses colonnes ; les blocs SQL des routes pourront la lire.</p>
           {project.services.length > 0 && (
