@@ -105,6 +105,28 @@ const TOOLS: &[ToolDef] = &[
         required: &["path"],
     },
     ToolDef {
+        name: "submit_report",
+        description: "Tells the Service Builder maintainers what is missing or could be better (a logic block, a field, a check, a tool). Call it when Service Builder asks for a report, or whenever you hit a real limitation. The user reads the report and decides whether it is published as a GitHub issue, so describe the general need only: no project names, secrets or file contents.",
+        properties: || {
+            json!({
+                "summary": { "type": "string", "description": "One or two sentences of context, optional." },
+                "suggestions": {
+                    "type": "array",
+                    "description": "1 to 5 concrete suggestions.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": { "type": "string", "description": "What to add, in a few words." },
+                            "details": { "type": "string", "description": "Why it helps, and how it could work." }
+                        },
+                        "required": ["title"]
+                    }
+                }
+            })
+        },
+        required: &["suggestions"],
+    },
+    ToolDef {
         name: "export_code",
         description: "Writes the generated Cargo workspace into a directory (empty, or a previous export: its files are overwritten). Fails while the project has errors.",
         properties: || json!({ "dir": { "type": "string", "description": "Absolute path of the destination folder." } }),
@@ -206,10 +228,12 @@ pub fn handle(project: &Path, message: &Value) -> Option<Value> {
                 Ok(text) => (text, false),
                 Err(text) => (text, true),
             };
-            result_reply(
-                id,
-                json!({ "content": [{ "type": "text", "text": text }], "isError": is_error }),
-            )
+            let mut content = vec![json!({ "type": "text", "text": text })];
+            // Every few calls the agent is asked, in the result itself, for a feedback report.
+            if name != "submit_report" && crate::feedback::tick(project) {
+                content.push(json!({ "type": "text", "text": crate::feedback::request_text() }));
+            }
+            result_reply(id, json!({ "content": content, "isError": is_error }))
         }
         Some(other) => error_reply(id, METHOD_NOT_FOUND, &format!("method not found: {other}")),
         None => error_reply(id, METHOD_NOT_FOUND, "missing method"),
@@ -259,6 +283,7 @@ fn call_tool(project: &Path, name: &str, args: &Value) -> Result<String, String>
                 .map(|f| f.content)
                 .ok_or_else(|| format!("no generated file {wanted}; see list_generated_files"))
         }
+        "submit_report" => crate::feedback::submit(project, args),
         "export_code" => {
             let report =
                 export_project(&load_project(project)?, Path::new(string_arg(args, "dir")?))?;
@@ -457,6 +482,11 @@ pub fn config_path(project_file: &Path) -> PathBuf {
 
 /// One entry per project file, so two projects in the same folder do not overwrite each other.
 pub fn server_name(project_file: &Path) -> String {
+    format!("service-builder-{}", project_slug(project_file))
+}
+
+/// The project file's name without `.sb.json`, reduced to lowercase letters, digits and dashes.
+pub(crate) fn project_slug(project_file: &Path) -> String {
     let file = project_file
         .file_name()
         .and_then(|n| n.to_str())
@@ -475,7 +505,7 @@ pub fn server_name(project_file: &Path) -> String {
             }
         })
         .collect();
-    format!("service-builder-{}", slug.trim_matches('-'))
+    slug.trim_matches('-').to_string()
 }
 
 /// What the client runs: this program in `mcp` mode on the project file.
@@ -800,6 +830,50 @@ mod tests {
         let (text, err) = f.call("get_project", json!({}));
         assert!(err);
         assert!(text.contains("cannot read"), "{text}");
+    }
+
+    #[test]
+    fn the_fiftieth_call_asks_the_agent_for_a_report_and_submit_report_files_it() {
+        let f = Fixture::new("report");
+        let answer = |f: &Fixture| {
+            handle(&f.file, &json!({ "id": 1, "method": "tools/call", "params": { "name": "describe_project", "arguments": {} } })).unwrap()
+        };
+        for call in 1..crate::feedback::REPORT_EVERY {
+            let reply = answer(&f);
+            assert_eq!(
+                reply["result"]["content"].as_array().unwrap().len(),
+                1,
+                "call {call}"
+            );
+        }
+        let fiftieth = answer(&f);
+        let content = fiftieth["result"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert!(
+            content[1]["text"]
+                .as_str()
+                .unwrap()
+                .contains("submit_report")
+        );
+
+        let (text, err) = f.call(
+            "submit_report",
+            json!({ "suggestions": [{ "title": "Blocking task block", "details": "spawn_blocking for password hashing" }] }),
+        );
+        assert!(!err, "{text}");
+        let feedback = crate::feedback::load(&f.file).unwrap();
+        assert_eq!(feedback.reports.len(), 1);
+        // Answering the request does not count as an interaction, and the next request is 50 calls away.
+        assert_eq!(feedback.interactions, 0);
+        assert_eq!(answer(&f)["result"]["content"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_invalid_report_is_a_tool_error_the_agent_can_fix() {
+        let f = Fixture::new("badreport");
+        let (text, err) = f.call("submit_report", json!({ "suggestions": [] }));
+        assert!(err);
+        assert!(text.contains("suggestions"), "{text}");
     }
 
     #[test]

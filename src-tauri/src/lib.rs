@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use sb_app::feedback::Feedback;
 use sb_app::mcp::{Activation, ToolSummary};
 use sb_app::{Analysis, ExportReport};
 use sb_model::Project;
@@ -80,6 +81,27 @@ fn mcp_set_enabled(path: PathBuf, enabled: bool) -> Result<Activation, String> {
     }
 }
 
+#[tauri::command(async)]
+fn mcp_feedback(path: PathBuf) -> Result<Feedback, String> {
+    sb_app::feedback::load(&path)
+}
+
+#[tauri::command(async)]
+fn mcp_feedback_enable(path: PathBuf, enabled: bool) -> Result<Feedback, String> {
+    sb_app::feedback::set_enabled(&path, enabled)
+}
+
+#[tauri::command(async)]
+fn mcp_report_dismiss(path: PathBuf, id: u32) -> Result<Feedback, String> {
+    sb_app::feedback::dismiss(&path, id)
+}
+
+/// The pre-filled GitHub issue page for a report; the report is marked as opened. The UI opens it.
+#[tauri::command(async)]
+fn mcp_report_issue_url(path: PathBuf, id: u32) -> Result<String, String> {
+    sb_app::feedback::issue_url_for(&path, id)
+}
+
 /// Modification time in milliseconds: how the app notices that a client edited the file.
 #[tauri::command(async)]
 fn project_stamp(path: PathBuf) -> Result<u64, String> {
@@ -98,6 +120,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             sample_project,
             new_project,
@@ -107,6 +130,10 @@ pub fn run() {
             export_project,
             mcp_info,
             mcp_set_enabled,
+            mcp_feedback,
+            mcp_feedback_enable,
+            mcp_report_dismiss,
+            mcp_report_issue_url,
             project_stamp,
         ])
         .run(tauri::generate_context!())

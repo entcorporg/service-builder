@@ -255,6 +255,17 @@ démarre un autre programme que l'actuel (application déplacée ou mise à jour
 Pour que les éditions du client apparaissent, l'UI compare la date de modification du fichier à celle qu'elle a lue ou
 écrite en dernier quand la fenêtre reprend le focus.
 
+#### Rapports des agents
+
+`sb-app::feedback` tient, par projet, un fichier d'état dans `.service-builder/` (compteur d'appels, case d'activation,
+rapports en attente). `tools/call` appelle `tick` après chaque outil sauf `submit_report` ; au 50e appel le résultat
+reçoit un second bloc texte qui demande le rapport, et le compteur repart de zéro (un fichier d'état illisible ne gêne
+jamais l'appel : on ne le réécrit pas). `submit_report` valide (1 à 5 suggestions, longueurs bornées, 20 rapports en
+attente au plus) et range le rapport. Pas de jeton GitHub ni d'envoi automatique, pour deux raisons : un rapport écrit
+par un agent peut contenir, malgré la consigne, un détail du projet, et une issue est publique. L'app construit donc
+une URL « new issue » pré-remplie (corps tronqué pour tenir dans la limite d'URL de GitHub) et l'ouvre dans le
+navigateur par `tauri-plugin-opener`, dont la capacité est limitée aux pages `issues/new` du dépôt.
+
 ### Mise à jour automatique
 
 Le plugin `tauri-plugin-updater` lit `latest.json` sur la dernière release GitHub et vérifie la signature minisign

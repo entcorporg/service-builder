@@ -105,6 +105,14 @@ toucher aux autres entrées ; l'onglet affiche aussi la commande, la ligne `clau
 autres clients. Outils : `describe_project`, `get_project`, `get_example_project`, `patch_project` (RFC 6902, tout ou
 rien), `set_project`, `validate`, `list_generated_files`, `read_generated_file`, `export_code`.
 
+**Suggestions des agents.** Tous les 50 appels d'outil, le serveur demande à l'agent, dans le résultat même de l'appel,
+un rapport sur ce qui lui a manqué (par exemple un bloc de logique qui exécute un traitement bloquant comme le hachage
+d'un mot de passe dans `spawn_blocking`) ; l'agent le dépose avec l'outil `submit_report` (il peut aussi le faire de
+lui-même). Les rapports restent à côté du projet, dans `.service-builder/<projet>.mcp.json` (à ignorer dans git si
+besoin), et s'affichent dans l'onglet MCP. **Rien n'est envoyé tout seul** : « Envoyer sur GitHub » ouvre dans votre
+navigateur une issue pré-remplie (étiquette `agent-suggestion`, dépôt `entcorporg/service-builder`) que vous relisez
+avant de la publier, et « Ignorer » la supprime. La demande se désactive d'une case à cocher.
+
 Le serveur ne garde aucun état : il lit et écrit le fichier du projet, qui doit donc être enregistré. L'application le
 recharge quand sa fenêtre reprend le focus, sauf s'il y a des modifications non enregistrées (elle prévient alors que
 l'enregistrement écrasera celles du client). Le projet n'est pas protégé contre deux éditeurs simultanés : le dernier
