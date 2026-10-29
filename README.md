@@ -82,8 +82,8 @@ lancement et signalée quand on clique. Sous Linux, seul l'AppImage se met à jo
 
 **Dans la CI** (`.github/workflows/ci.yml`). Deux règles :
 
-1. **Chaque changement annonce son type de mise à jour**, par une mention dans le titre ou la description de la PR,
-   ou dans un message de commit : `[minor]` (0.0.**X**), `[normal]` (0.**X**.0) ou `[major]` (**X**.0.0). Une PR sans
+1. **Chaque changement annonce son type de mise à jour**, par une mention dans le titre de la PR ou la première
+   ligne d'un message de commit (le reste du message n'est pas lu, pour pouvoir parler des mentions sans déclencher de release) : `[minor]` (0.0.**X**), `[normal]` (0.**X**.0) ou `[major]` (**X**.0.0). Une PR sans
    mention échoue ; si plusieurs mentions coexistent, la plus forte l'emporte.
 2. **Un push sur `main` avec mention incrémente la version**, une fois tous les tests passés : `0.1.0` + `[normal]`
    donne `0.2.0` (les nombres à droite repartent à zéro). La CI écrit la nouvelle version dans `Cargo.toml`,
@@ -96,6 +96,20 @@ Réglage unique, à faire une fois : ajouter la clé privée de signature aux se
 `src-tauri/tauri.conf.json` ; sans la clé privée, les mises à jour ne peuvent pas être signées. Si `main` est protégée,
 autorisez `github-actions[bot]` à y pousser le commit de version.
 
+## Piloter le projet depuis une IA (MCP)
+
+L'onglet **MCP** active un serveur [MCP](https://modelcontextprotocol.io) sur stdio : un client comme Claude Code lance
+`service-builder mcp <projet.sb.json>` (ou `sb mcp <projet.sb.json>`) et peut lire, modifier, valider et exporter le
+projet. Le bouton **Activer** ajoute l'entrée `service-builder-<projet>` au `.mcp.json` du dossier du projet, sans
+toucher aux autres entrées ; l'onglet affiche aussi la commande, la ligne `claude mcp add` et la configuration JSON des
+autres clients. Outils : `describe_project`, `get_project`, `get_example_project`, `patch_project` (RFC 6902, tout ou
+rien), `set_project`, `validate`, `list_generated_files`, `read_generated_file`, `export_code`.
+
+Le serveur ne garde aucun état : il lit et écrit le fichier du projet, qui doit donc être enregistré. L'application le
+recharge quand sa fenêtre reprend le focus, sauf s'il y a des modifications non enregistrées (elle prévient alors que
+l'enregistrement écrasera celles du client). Le projet n'est pas protégé contre deux éditeurs simultanés : le dernier
+qui enregistre l'emporte.
+
 ## En ligne de commande
 
 Le binaire `sb` utilise exactement le même code que l'application (pratique en CI) :
@@ -104,6 +118,7 @@ Le binaire `sb` utilise exactement le même code que l'application (pratique en 
 cargo run -p sb-app --bin sb -- sample > projet.sb.json   # projet d'exemple
 cargo run -p sb-app --bin sb -- validate projet.sb.json   # code de sortie 1 s'il y a des erreurs
 cargo run -p sb-app --bin sb -- generate projet.sb.json ./out
+cargo run -p sb-app --bin sb -- mcp projet.sb.json        # serveur MCP sur stdio
 ```
 
 ## Tests

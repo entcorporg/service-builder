@@ -3,7 +3,7 @@ import { immer } from 'zustand/middleware/immer'
 import type { Selection } from './model'
 import type { Analysis, GeneratedFile, Project } from './types'
 
-export type View = 'architecture' | 'tables' | 'code'
+export type View = 'architecture' | 'tables' | 'code' | 'mcp'
 
 export interface Notice {
   kind: 'info' | 'error'

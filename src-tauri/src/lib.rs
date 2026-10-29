@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
+use sb_app::mcp::{Activation, ToolSummary};
 use sb_app::{Analysis, ExportReport};
 use sb_model::Project;
+use serde::Serialize;
 
 #[tauri::command]
 fn sample_project() -> Project {
@@ -34,6 +36,62 @@ fn export_project(project: Project, dir: PathBuf) -> Result<ExportReport, String
     sb_app::export_project(&project, &dir)
 }
 
+/// What a client must run to start the MCP server: this program. An AppImage runs from a
+/// temporary mount, so its own path is what `APPIMAGE` holds.
+fn program() -> Result<String, String> {
+    if let Some(appimage) = std::env::var_os("APPIMAGE") {
+        return Ok(PathBuf::from(appimage).display().to_string());
+    }
+    std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .map_err(|e| format!("cannot locate the program: {e}"))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpInfo {
+    command: String,
+    tools: Vec<ToolSummary>,
+    /// Absent while the project has no file yet: the server works on a saved project.
+    activation: Option<Activation>,
+}
+
+#[tauri::command(async)]
+fn mcp_info(path: Option<PathBuf>) -> Result<McpInfo, String> {
+    let command = program()?;
+    let activation = path
+        .map(|p| sb_app::mcp::activation(&p, &command))
+        .transpose()?;
+    Ok(McpInfo {
+        command,
+        tools: sb_app::mcp::tool_summaries(),
+        activation,
+    })
+}
+
+/// Adds or removes the project's entry in the `.mcp.json` next to the project file.
+#[tauri::command(async)]
+fn mcp_set_enabled(path: PathBuf, enabled: bool) -> Result<Activation, String> {
+    let command = program()?;
+    if enabled {
+        sb_app::mcp::enable(&path, &command)
+    } else {
+        sb_app::mcp::disable(&path, &command)
+    }
+}
+
+/// Modification time in milliseconds: how the app notices that a client edited the file.
+#[tauri::command(async)]
+fn project_stamp(path: PathBuf) -> Result<u64, String> {
+    let modified = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    Ok(modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -47,6 +105,9 @@ pub fn run() {
             open_project,
             save_project,
             export_project,
+            mcp_info,
+            mcp_set_enabled,
+            project_stamp,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Service Builder");

@@ -41,6 +41,9 @@ export function Toolbar() {
         <button type="button" role="tab" aria-label="Tables" title="Tables" aria-selected={view === 'tables'} className={view === 'tables' ? 'active' : ''} onClick={() => setView('tables')}>
           <Icon name="table" size={15} /><span className="label">Tables</span>
         </button>
+        <button type="button" role="tab" aria-label="MCP" title="MCP" aria-selected={view === 'mcp'} className={view === 'mcp' ? 'active' : ''} onClick={() => setView('mcp')}>
+          <Icon name="plug" size={15} /><span className="label">MCP</span>
+        </button>
         <button type="button" role="tab" aria-label="Code généré" title="Code généré" aria-selected={view === 'code'} className={view === 'code' ? 'active' : ''} onClick={() => setView('code')}>
           <Icon name="code" size={15} /><span className="label">Code généré</span>
         </button>

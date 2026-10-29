@@ -4,7 +4,7 @@ import { getVersion } from '@tauri-apps/api/app'
 import { ask, open, save } from '@tauri-apps/plugin-dialog'
 import { relaunch } from '@tauri-apps/plugin-process'
 import { check, type Update } from '@tauri-apps/plugin-updater'
-import type { Analysis, ExportReport, Project } from './types'
+import type { Analysis, ExportReport, McpActivation, McpInfo, Project } from './types'
 
 export const api = {
   sampleProject: () => invoke<Project>('sample_project'),
@@ -13,6 +13,9 @@ export const api = {
   openProject: (path: string) => invoke<Project>('open_project', { path }),
   saveProject: (path: string, project: Project) => invoke<void>('save_project', { path, project }),
   exportProject: (project: Project, dir: string) => invoke<ExportReport>('export_project', { project, dir }),
+  mcpInfo: (path: string | null) => invoke<McpInfo>('mcp_info', { path }),
+  mcpSetEnabled: (path: string, enabled: boolean) => invoke<McpActivation>('mcp_set_enabled', { path, enabled }),
+  projectStamp: (path: string) => invoke<number>('project_stamp', { path }),
 }
 
 const PROJECT_FILTER = [{ name: 'Service Builder', extensions: ['sb.json', 'json'] }]

@@ -2,6 +2,7 @@
 //
 //   node scripts/release.mjs detect < text    prints major | normal | minor, or nothing when the text has no mention
 //   node scripts/release.mjs bump <level>     rewrites every version file and prints the new version
+//   node scripts/release.mjs set <X.Y.Z>     writes an exact version (to repair a wrong release)
 //   node scripts/release.mjs check            fails unless every version file carries the same version
 //
 // The update type is mentioned as [minor], [normal] or [major] and maps to one number of X.Y.Z:
@@ -78,10 +79,10 @@ function bumpLockfile(text, from, to) {
     .join('\n\n')
 }
 
-/** Rewrites every version file in `dir`; returns the new version. */
-export function bump(level, dir = root) {
+/** Rewrites every version file in `dir` to `to`, starting from a consistent state. */
+export function setVersion(to, dir = root) {
+  if (!/^\d+\.\d+\.\d+$/.test(to)) throw new Error(`not a X.Y.Z version: ${to}`)
   const from = currentVersion(dir)
-  const to = bumpVersion(from, level)
   for (const { file, pattern } of FILES) {
     const p = path.join(dir, file)
     fs.writeFileSync(p, fs.readFileSync(p, 'utf8').replace(pattern, `$1${to}$3`))
@@ -89,6 +90,11 @@ export function bump(level, dir = root) {
   const lock = path.join(dir, 'Cargo.lock')
   if (fs.existsSync(lock)) fs.writeFileSync(lock, bumpLockfile(fs.readFileSync(lock, 'utf8'), from, to))
   return to
+}
+
+/** Raises the version by `level`; returns the new version. */
+export function bump(level, dir = root) {
+  return setVersion(bumpVersion(currentVersion(dir), level), dir)
 }
 
 function main([command, arg]) {
@@ -101,11 +107,14 @@ function main([command, arg]) {
     case 'bump':
       console.log(bump(arg))
       return
+    case 'set':
+      console.log(setVersion(arg))
+      return
     case 'check':
       console.log(currentVersion())
       return
     default:
-      throw new Error('usage: release.mjs detect | bump <minor|normal|major> | check')
+      throw new Error('usage: release.mjs detect | bump <minor|normal|major> | set <X.Y.Z> | check')
   }
 }
 
