@@ -62,7 +62,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "patch_project",
-        description: "Edits the project with RFC 6902 operations (add, replace, remove; JSON pointers like /services/0/routes/-), validates the result and saves it. Nothing is written if an operation fails or the result is not a project. Returns the diagnostics.",
+        description: "Edits the project with RFC 6902 operations (add, replace, remove; JSON pointers like /services/0/routes/-), validates the result once and saves it. Put every edit of a step in one call: nothing is written if an operation fails or the result is not a project. Returns the totals and only the diagnostics this edit introduced or fixed (`validate` lists them all).",
         properties: || {
             json!({ "operations": {
                 "type": "array",
@@ -82,7 +82,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "set_project",
-        description: "Replaces the whole project with the given JSON, validates it and saves it. Prefer patch_project for small edits.",
+        description: "Replaces the whole project with the given JSON, validates it and saves it. Prefer patch_project for small edits. Reports like patch_project.",
         properties: || json!({ "project": { "type": "object", "description": "A complete project." } }),
         required: &["project"],
     },
@@ -320,17 +320,21 @@ fn store(project_file: &Path, document: Value) -> Result<String, String> {
         serde_json::from_value(document).map_err(|e| format!("not a valid project: {e}"))?;
     project.migrate();
     project.freeze_field_numbers();
+    // What was already wrong before this edit is not news: only the difference is listed.
+    let before = load_project(project_file)
+        .map(|p| sb_codegen::diagnose(&p))
+        .unwrap_or_default();
     save_project(project_file, &project)?;
     Ok(format!(
         "saved {}\n{}",
         project_file.display(),
-        report(&sb_codegen::diagnose(&project))
+        report_change(&before, &sb_codegen::diagnose(&project))
     ))
 }
 
-fn report(diagnostics: &[sb_model::Diagnostic]) -> String {
+fn summary(diagnostics: &[sb_model::Diagnostic]) -> String {
     let count = |s| diagnostics.iter().filter(|d| d.severity == s).count();
-    let mut text = format!(
+    format!(
         "{} error(s), {} warning(s){}",
         count(Severity::Error),
         count(Severity::Warning),
@@ -339,14 +343,69 @@ fn report(diagnostics: &[sb_model::Diagnostic]) -> String {
         } else {
             ""
         }
-    );
+    )
+}
+
+fn line(d: &sb_model::Diagnostic) -> String {
+    let level = if d.severity == Severity::Error {
+        "error"
+    } else {
+        "warning"
+    };
+    format!("\n{level}[{}] {}: {}", d.code, d.path, d.message)
+}
+
+fn report(diagnostics: &[sb_model::Diagnostic]) -> String {
+    let mut text = summary(diagnostics);
     for d in diagnostics {
-        let level = if d.severity == Severity::Error {
-            "error"
-        } else {
-            "warning"
-        };
-        text.push_str(&format!("\n{level}[{}] {}: {}", d.code, d.path, d.message));
+        text.push_str(&line(d));
+    }
+    text
+}
+
+/// The diagnostics of `of` that `other` does not have, and how many it has in common. Two
+/// diagnostics are the same when code and message are: the path moves when an item is inserted
+/// before it, which is not a change.
+fn unmatched<'a>(
+    of: &'a [sb_model::Diagnostic],
+    other: &[sb_model::Diagnostic],
+) -> (Vec<&'a sb_model::Diagnostic>, usize) {
+    let mut available: std::collections::HashMap<(&str, &str), usize> =
+        std::collections::HashMap::new();
+    for d in other {
+        *available.entry((&d.code, &d.message)).or_default() += 1;
+    }
+    let mut missing = Vec::new();
+    let mut shared = 0;
+    for d in of {
+        match available.get_mut(&(d.code.as_str(), d.message.as_str())) {
+            Some(n) if *n > 0 => {
+                *n -= 1;
+                shared += 1;
+            }
+            _ => missing.push(d),
+        }
+    }
+    (missing, shared)
+}
+
+/// The totals after an edit, then only what the edit introduced and what it fixed.
+fn report_change(before: &[sb_model::Diagnostic], after: &[sb_model::Diagnostic]) -> String {
+    let (new, unchanged) = unmatched(after, before);
+    let (resolved, _) = unmatched(before, after);
+    let mut text = summary(after);
+    if !new.is_empty() {
+        text.push_str(&format!("\nnew ({}):", new.len()));
+        new.iter().for_each(|d| text.push_str(&line(d)));
+    }
+    if !resolved.is_empty() {
+        text.push_str(&format!("\nresolved ({}):", resolved.len()));
+        resolved.iter().for_each(|d| text.push_str(&line(d)));
+    }
+    if unchanged > 0 {
+        text.push_str(&format!(
+            "\n{unchanged} diagnostic(s) were already there before this edit; `validate` lists them."
+        ));
     }
     text
 }
@@ -708,6 +767,61 @@ mod tests {
         );
         // A topic renamed by hand leaves dangling references: the validator says so.
         assert!(text.contains("error(s)"), "{text}");
+    }
+
+    #[test]
+    fn an_edit_reports_what_it_changed_not_what_was_already_wrong() {
+        let f = Fixture::new("diff");
+        let edit = |ops: Value| f.call("patch_project", json!({ "operations": ops })).0;
+
+        // Breaks the project: the new error is listed.
+        let broken =
+            edit(json!([{ "op": "replace", "path": "/topics/0/message", "value": "Nope" }]));
+        assert!(broken.contains("new (1):"), "{broken}");
+        assert!(broken.contains("Nope"), "{broken}");
+        assert!(!broken.contains("resolved"), "{broken}");
+
+        // An unrelated edit: the error is still there, but it is no news.
+        let unrelated = edit(json!([{ "op": "replace", "path": "/name", "value": "Renamed" }]));
+        assert!(unrelated.starts_with("saved"), "{unrelated}");
+        assert!(unrelated.contains("1 error(s)"), "{unrelated}");
+        assert!(!unrelated.contains("new ("), "{unrelated}");
+        assert!(
+            unrelated.contains("1 diagnostic(s) were already there"),
+            "{unrelated}"
+        );
+        assert!(!unrelated.contains("Nope"), "{unrelated}");
+
+        // The fix: reported as resolved, and the project is clean.
+        let fixed = edit(
+            json!([{ "op": "replace", "path": "/topics/0/message", "value": "OrderCreated" }]),
+        );
+        assert!(fixed.contains("0 error(s)"), "{fixed}");
+        assert!(fixed.contains("resolved (1):"), "{fixed}");
+        assert!(!fixed.contains("were already there"), "{fixed}");
+    }
+
+    #[test]
+    fn a_diagnostic_is_the_same_when_only_its_path_moved() {
+        use sb_model::{Diagnostic, Severity};
+        let d = |path: &str| Diagnostic {
+            severity: Severity::Error,
+            code: "E_X".into(),
+            message: "same".into(),
+            path: path.into(),
+        };
+        let text = report_change(&[d("/services/1/a")], &[d("/services/2/a")]);
+        assert!(
+            !text.contains("new (") && !text.contains("resolved"),
+            "{text}"
+        );
+        assert!(
+            text.contains("1 diagnostic(s) were already there"),
+            "{text}"
+        );
+        // Two identical messages are two diagnostics: a second copy is news.
+        let text = report_change(&[d("/a")], &[d("/a"), d("/b")]);
+        assert!(text.contains("new (1):"), "{text}");
     }
 
     #[test]
