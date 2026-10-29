@@ -31,8 +31,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          clean: ${{ runner.environment == 'github-hosted' }}
-        with:
           fetch-depth: 0
           clean: ${{ runner.environment == 'github-hosted' }}
       - id: detect
