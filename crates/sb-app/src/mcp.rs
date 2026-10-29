@@ -62,7 +62,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "patch_project",
-        description: "Edits the project with RFC 6902 operations (add, replace, remove; JSON pointers like /services/0/routes/-), validates the result and saves it. Nothing is written if an operation fails or the result is not a project. Returns the diagnostics.",
+        description: "Edits the project with RFC 6902 operations (add, replace, remove; JSON pointers like /services/0/routes/-) plus insert_before and insert_after, and with items addressed by name or id (/services/name=Orders/consumers/name=on_paid/steps/id=h2) rather than by index, validates the result and saves it. Nothing is written if an operation fails or the result is not a project. Returns the diagnostics.",
         properties: || {
             json!({ "operations": {
                 "type": "array",
@@ -70,8 +70,8 @@ const TOOLS: &[ToolDef] = &[
                 "items": {
                     "type": "object",
                     "properties": {
-                        "op": { "type": "string", "enum": ["add", "replace", "remove"] },
-                        "path": { "type": "string", "description": "JSON pointer, e.g. /topics/- or /services/0/name" },
+                        "op": { "type": "string", "enum": ["add", "replace", "remove", "insert_before", "insert_after"], "description": "insert_before and insert_after put `value` next to the array item `path` designates." },
+                        "path": { "type": "string", "description": "JSON pointer. In an array a segment may be an index or key=value, which selects the item whose key equals value: /services/name=Orders/rpcs/name=CreateOrder/steps/id=h2. Prefer names and ids: indexes shift when something is inserted." },
                         "value": { "description": "New value for add and replace." }
                     },
                     "required": ["op", "path"]
@@ -367,15 +367,103 @@ fn outline(project: &Project) -> Value {
         "services": project.services.iter().enumerate().map(|(i, s)| json!({
             "index": i,
             "name": s.name,
-            "rpcs": names(s.rpcs.iter().map(|r| format!("{}({}) -> {}", r.name, r.request, r.response)).collect()),
-            "routes": names(s.routes.iter().map(|r| format!("{} {} -> {}", serde_json::to_value(r.method).ok().and_then(|m| m.as_str().map(str::to_uppercase)).unwrap_or_default(), r.path, r.name)).collect()),
+            "rpcs": names(s.rpcs.iter().map(|r| format!("{}({}) -> {} [{}]", r.name, r.request, r.response, step_ids(&r.steps))).collect()),
+            "routes": names(s.routes.iter().map(|r| format!("{} {} -> {} [{}]", serde_json::to_value(r.method).ok().and_then(|m| m.as_str().map(str::to_uppercase)).unwrap_or_default(), r.path, r.name, step_ids(&r.steps))).collect()),
             "tables": names(s.tables.iter().map(|t| format!("{}({})", t.name, t.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", "))).collect()),
-            "consumers": names(s.consumers.iter().map(|c| format!("{} <- {}", c.name, c.topic)).collect()),
+            "consumers": names(s.consumers.iter().map(|c| format!("{} <- {} [{}]", c.name, c.topic, step_ids(&c.steps))).collect()),
         })).collect::<Vec<_>>(),
     })
 }
 
-// ---- JSON Patch (RFC 6902), the three operations an editing client needs ----
+/// `h1 let, h2 publish`: the ids to put in a `steps/id=…` selector, with what each step is.
+fn step_ids(steps: &[sb_model::Step]) -> String {
+    steps
+        .iter()
+        .map(|s| {
+            let kind = serde_json::to_value(s)
+                .ok()
+                .and_then(|v| v.get("type").and_then(Value::as_str).map(str::to_string))
+                .unwrap_or_default();
+            format!("{} {kind}", s.id())
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+// ---- JSON Patch (RFC 6902) with selectors, the operations an editing client needs ----
+//
+// A path is a JSON pointer, except that a segment inside an array may also be `key=value`: it
+// designates the one item whose `key` field equals `value` (`/services/name=Orders/rpcs/name=Create`).
+// Indexes shift when an item is inserted before them; names and ids do not.
+
+fn unescape(segment: &str) -> String {
+    segment.replace("~1", "/").replace("~0", "~")
+}
+
+/// What an item's field looks like in a selector.
+fn selector_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// The position an array segment stands for: an index, or a `key=value` selector.
+/// `allow_end` accepts one past the last item (to insert there).
+fn locate(items: &[Value], segment: &str, allow_end: bool) -> Result<usize, String> {
+    if let Ok(at) = segment.parse::<usize>() {
+        return if at < items.len() || (allow_end && at == items.len()) {
+            Ok(at)
+        } else {
+            Err(format!(
+                "index {at} is out of range (length {})",
+                items.len()
+            ))
+        };
+    }
+    let (key, wanted) = segment
+        .split_once('=')
+        .ok_or_else(|| format!("`{segment}` is neither an array index nor a key=value selector"))?;
+    let found: Vec<usize> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.get(key).and_then(selector_text).as_deref() == Some(wanted))
+        .map(|(at, _)| at)
+        .collect();
+    match found.as_slice() {
+        [at] => Ok(*at),
+        [] => {
+            let available: Vec<String> = items
+                .iter()
+                .filter_map(|item| item.get(key).and_then(selector_text))
+                .collect();
+            Err(format!(
+                "no item has {key}={wanted}; available {key}: [{}]",
+                available.join(", ")
+            ))
+        }
+        many => Err(format!(
+            "{} items have {key}={wanted}; be more specific",
+            many.len()
+        )),
+    }
+}
+
+/// Follows one path segment down from `value`.
+fn descend<'a>(value: &'a mut Value, segment: &str, at: &str) -> Result<&'a mut Value, String> {
+    match value {
+        Value::Object(map) => map
+            .get_mut(segment)
+            .ok_or_else(|| format!("{at}/{segment} does not exist")),
+        Value::Array(items) => {
+            let position = locate(items, segment, false).map_err(|e| format!("{at}: {e}"))?;
+            Ok(&mut items[position])
+        }
+        _ => Err(format!("{at} is neither an object nor an array")),
+    }
+}
 
 fn apply_operation(document: &mut Value, operation: &Value) -> Result<(), String> {
     let op = operation
@@ -386,13 +474,21 @@ fn apply_operation(document: &mut Value, operation: &Value) -> Result<(), String
         .get("path")
         .and_then(Value::as_str)
         .ok_or("missing `path`")?;
-    let (parent_path, key) = path.rsplit_once('/').ok_or(
+    let pointer = path.strip_prefix('/').ok_or(
         "`path` must be a JSON pointer starting with / (use set_project to replace everything)",
     )?;
-    let key = key.replace("~1", "/").replace("~0", "~");
-    let parent = document
-        .pointer_mut(parent_path)
-        .ok_or_else(|| format!("{parent_path} does not exist"))?;
+    let mut segments: Vec<String> = pointer.split('/').map(unescape).collect();
+    let key = segments.pop().expect("split yields at least one segment");
+
+    let mut parent = &mut *document;
+    let mut walked = String::new();
+    for segment in &segments {
+        parent = descend(parent, segment, &walked)?;
+        walked.push('/');
+        walked.push_str(segment);
+    }
+    let parent_path = if walked.is_empty() { "/" } else { &walked };
+
     let value = || {
         operation
             .get("value")
@@ -406,10 +502,18 @@ fn apply_operation(document: &mut Value, operation: &Value) -> Result<(), String
         ("add", Value::Array(items)) => {
             if key == "-" {
                 items.push(value()?);
-            } else {
-                let at = index(&key, items.len(), true)?;
+            } else if key.parse::<usize>().is_ok() {
+                let at = locate(items, &key, true)?;
                 items.insert(at, value()?);
+            } else {
+                return Err(format!(
+                    "`add` needs an index or `-`; to insert next to the item {key}, use insert_before or insert_after"
+                ));
             }
+        }
+        ("insert_before" | "insert_after", Value::Array(items)) => {
+            let at = locate(items, &key, false)?;
+            items.insert(if op == "insert_before" { at } else { at + 1 }, value()?);
         }
         ("replace", Value::Object(map)) => {
             let slot = map
@@ -418,7 +522,7 @@ fn apply_operation(document: &mut Value, operation: &Value) -> Result<(), String
             *slot = value()?;
         }
         ("replace", Value::Array(items)) => {
-            let at = index(&key, items.len(), false)?;
+            let at = locate(items, &key, false)?;
             items[at] = value()?;
         }
         ("remove", Value::Object(map)) => {
@@ -426,26 +530,24 @@ fn apply_operation(document: &mut Value, operation: &Value) -> Result<(), String
                 .ok_or_else(|| format!("{path} does not exist"))?;
         }
         ("remove", Value::Array(items)) => {
-            let at = index(&key, items.len(), false)?;
+            let at = locate(items, &key, false)?;
             items.remove(at);
+        }
+        ("insert_before" | "insert_after", _) => {
+            return Err(format!(
+                "{op} works inside an array, and {parent_path} is not one"
+            ));
         }
         ("add" | "replace" | "remove", _) => {
             return Err(format!("{parent_path} is neither an object nor an array"));
         }
-        _ => return Err(format!("unsupported op `{op}` (add, replace, remove)")),
+        _ => {
+            return Err(format!(
+                "unsupported op `{op}` (add, replace, remove, insert_before, insert_after)"
+            ));
+        }
     }
     Ok(())
-}
-
-fn index(key: &str, len: usize, allow_end: bool) -> Result<usize, String> {
-    let at: usize = key
-        .parse()
-        .map_err(|_| format!("`{key}` is not an array index"))?;
-    if at < len || (allow_end && at == len) {
-        Ok(at)
-    } else {
-        Err(format!("index {at} is out of range (length {len})"))
-    }
 }
 
 // ---- Activation: the entry of the client configuration that starts this server ----
@@ -684,6 +786,8 @@ mod tests {
         let (outline, err) = f.call("describe_project", json!({}));
         assert!(!err);
         assert!(outline.contains("\"Orders\"") && outline.contains("GET /orders/{order_id}"));
+        // Step ids are listed, so that a selector like steps/id=h4 can be written without get_project.
+        assert!(outline.contains("[h6 sql, h4 respond]"), "{outline}");
         let (report, err) = f.call("validate", json!({}));
         assert!(!err);
         assert!(report.starts_with("0 error(s)"), "{report}");
@@ -774,6 +878,134 @@ mod tests {
         );
         assert!(
             apply_operation(&mut doc, &json!({ "op": "move", "path": "/a", "value": 1 })).is_err()
+        );
+    }
+
+    #[test]
+    fn selectors_address_items_by_name_or_id_instead_of_by_index() {
+        let f = Fixture::new("selectors");
+        let (text, err) = f.call("patch_project", json!({ "operations": [
+            { "op": "replace", "path": "/services/name=Orders/port", "value": 6001 },
+            { "op": "replace", "path": "/services/name=Orders/routes/name=get_order/steps/id=h4/fields/field=status/value",
+              "value": { "kind": "literal", "value": "X" } },
+        ]}));
+        assert!(!err, "{text}");
+        let project = load_project(&f.file).unwrap();
+        let orders = project
+            .services
+            .iter()
+            .find(|s| s.name == "Orders")
+            .unwrap();
+        assert_eq!(orders.port, 6001);
+        // Selectors keep working after an insertion has shifted every later index.
+        let (text, err) = f.call("patch_project", json!({ "operations": [
+            { "op": "insert_before", "path": "/services/name=Orders/routes/name=get_order/steps/id=h4",
+              "value": { "type": "log", "id": "n1", "level": "info", "message": "reading" } },
+            { "op": "remove", "path": "/services/name=Orders/routes/name=get_order/steps/id=h4/fields/field=order_id" },
+        ]}));
+        assert!(!err, "{text}");
+        let project = load_project(&f.file).unwrap();
+        let orders = project
+            .services
+            .iter()
+            .find(|s| s.name == "Orders")
+            .unwrap();
+        let route = orders
+            .routes
+            .iter()
+            .find(|r| r.name == "get_order")
+            .unwrap();
+        assert_eq!(route.steps.len(), 3);
+        assert_eq!(route.steps[1].id(), "n1");
+        assert_eq!(route.steps[2].id(), "h4");
+    }
+
+    #[test]
+    fn insert_before_and_after_place_the_value_next_to_the_anchor() {
+        let mut doc = json!({ "steps": [{ "id": "a" }, { "id": "b" }] });
+        apply_operation(
+            &mut doc,
+            &json!({ "op": "insert_after", "path": "/steps/id=a", "value": { "id": "x" } }),
+        )
+        .unwrap();
+        apply_operation(
+            &mut doc,
+            &json!({ "op": "insert_before", "path": "/steps/id=a", "value": { "id": "w" } }),
+        )
+        .unwrap();
+        apply_operation(
+            &mut doc,
+            &json!({ "op": "insert_after", "path": "/steps/id=b", "value": { "id": "z" } }),
+        )
+        .unwrap();
+        let ids: Vec<_> = doc["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["w", "a", "x", "b", "z"]);
+        // `add` with a selector is ambiguous (before? after?): the error says which ops to use.
+        let err = apply_operation(
+            &mut doc,
+            &json!({ "op": "add", "path": "/steps/id=a", "value": {} }),
+        )
+        .unwrap_err();
+        assert!(err.contains("insert_before"), "{err}");
+        assert!(
+            apply_operation(
+                &mut doc,
+                &json!({ "op": "insert_after", "path": "/steps/id=nope", "value": {} })
+            )
+            .is_err()
+        );
+        assert!(
+            apply_operation(
+                &mut doc,
+                &json!({ "op": "insert_after", "path": "/steps/id=a" })
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_selector_that_matches_nothing_or_many_says_what_exists() {
+        let mut doc = json!({ "services": [{ "name": "A", "n": 1 }, { "name": "B", "n": 1 }] });
+        let missing = apply_operation(
+            &mut doc,
+            &json!({ "op": "replace", "path": "/services/name=C/n", "value": 2 }),
+        )
+        .unwrap_err();
+        assert!(
+            missing.contains("no item has name=C") && missing.contains("A, B"),
+            "{missing}"
+        );
+        let many = apply_operation(
+            &mut doc,
+            &json!({ "op": "replace", "path": "/services/n=1/name", "value": "Z" }),
+        )
+        .unwrap_err();
+        assert!(many.contains("2 items have n=1"), "{many}");
+        // The failed operations touched nothing.
+        assert_eq!(doc["services"][0]["name"], "A");
+    }
+
+    #[test]
+    fn selectors_read_numbers_and_escaped_values() {
+        let mut doc = json!({ "routes": [{ "path": "/orders/{id}", "status": 200 }, { "path": "/x", "status": 201 }] });
+        apply_operation(
+            &mut doc,
+            &json!({ "op": "replace", "path": "/routes/path=~1orders~1{id}/status", "value": 202 }),
+        )
+        .unwrap();
+        apply_operation(
+            &mut doc,
+            &json!({ "op": "remove", "path": "/routes/status=201" }),
+        )
+        .unwrap();
+        assert_eq!(
+            doc,
+            json!({ "routes": [{ "path": "/orders/{id}", "status": 202 }] })
         );
     }
 

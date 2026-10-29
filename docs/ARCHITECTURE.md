@@ -246,7 +246,10 @@ sur mesure vit dans les étapes *Code Rust* du projet.
 par l'application elle-même (`service-builder mcp <fichier>`, traité dans `main.rs` avant d'ouvrir une fenêtre, ce qui
 évite de livrer un second binaire). Les outils travaillent sur le *fichier* : chaque appel le relit, chaque édition le
 réécrit. `patch_project` applique add / replace / remove (RFC 6902) sur le JSON, vérifie que le résultat est un projet,
-puis seulement l'enregistre, donc un échec à mi-chemin ne laisse rien. Un échec d'outil est un résultat `isError` que le
+puis seulement l'enregistre, donc un échec à mi-chemin ne laisse rien. Les chemins acceptent des sélecteurs `clé=valeur` dans les tableaux
+(`/services/name=Orders/rpcs/name=CreateOrder/steps/id=h2`), plus stables que des index qui glissent à chaque
+insertion ; `insert_before` et `insert_after` posent une valeur à côté d'un élément repéré ainsi, et `describe_project`
+liste les ids d'étapes. Un sélecteur sans résultat dit ce qui existe, un sélecteur ambigu est refusé. Un échec d'outil est un résultat `isError` que le
 modèle lit, pas une erreur de protocole. Stdout ne porte que le protocole.
 
 L'activation écrit l'entrée dans le `.mcp.json` du dossier du projet (la configuration par projet de Claude Code) en
