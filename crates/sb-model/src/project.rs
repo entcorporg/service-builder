@@ -3,6 +3,7 @@
 //!
 //! The JSON representation is camelCase so the TypeScript side can use it as is.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -10,11 +11,17 @@ use serde_json::Value;
 /// 3: schemas have a `kind` (event, proto or api).
 pub const SCHEMA_VERSION: u32 = 3;
 
+/// The JSON Schema of a project file, derived from the types themselves so that it cannot drift
+/// from what the editor and the generator accept. Doc comments become descriptions.
+pub fn json_schema() -> Value {
+    serde_json::to_value(schemars::schema_for!(Project)).expect("a schema is JSON")
+}
+
 fn default_schema_version() -> u32 {
     SCHEMA_VERSION
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
     #[serde(default = "default_schema_version")]
@@ -32,7 +39,7 @@ pub struct Project {
     pub services: Vec<Service>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BrokerConfig {
     pub bootstrap_servers: String,
@@ -48,7 +55,7 @@ impl Default for BrokerConfig {
 
 /// How the services publish their events: every event goes through a transactional outbox, and
 /// is moved to `<topic>.dlq` once it could not be published after `max_attempts` attempts.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct OutboxConfig {
     #[serde(default = "default_max_attempts")]
@@ -72,7 +79,7 @@ impl Default for OutboxConfig {
 
 /// What a schema is for. All of them are compiled into the `contracts` crate (protobuf messages);
 /// API schemas also get a JSON (de)serialization, for the HTTP routes.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum MessageKind {
     /// Payload of a Kafka topic.
@@ -88,7 +95,7 @@ pub enum MessageKind {
 }
 
 /// A schema: a named set of fields, see [`MessageKind`] for what it can be used for.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
     pub name: String,
@@ -98,7 +105,7 @@ pub struct Message {
     pub fields: Vec<Field>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Field {
     pub name: String,
@@ -127,7 +134,7 @@ impl Field {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum FieldType {
     String,
@@ -148,7 +155,7 @@ impl FieldType {
 }
 
 /// A Kafka topic carrying exactly one message type.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Topic {
     pub name: String,
@@ -176,13 +183,13 @@ fn default_replication() -> i16 {
     1
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Position {
     pub x: f64,
     pub y: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Service {
     pub name: String,
@@ -203,7 +210,7 @@ pub struct Service {
     pub position: Position,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Rpc {
     pub name: String,
@@ -215,7 +222,7 @@ pub struct Rpc {
 
 /// A column type. `Timestamp` and `Uuid` are stored natively but read and written as text
 /// (RFC 3339, canonical UUID) by the flows, so that they are plain strings everywhere else.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ColumnType {
     String,
@@ -272,7 +279,7 @@ impl ColumnType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Column {
     pub name: String,
@@ -305,7 +312,7 @@ impl Column {
 }
 
 /// A table of the database of a service. Identifiers are snake_case, so they can be quoted safely.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Table {
     pub name: String,
@@ -319,7 +326,7 @@ impl Table {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum HttpMethod {
     Get,
@@ -358,7 +365,7 @@ impl HttpMethod {
 /// An HTTP endpoint of a service, for the front. `path` can hold `{params}` that fill the
 /// fields of the `request` schema with the same name; the other fields come from the JSON body
 /// (POST, PUT, PATCH) or from the query string (GET, DELETE). Both schemas are API schemas.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Route {
     /// Name of the handler (snake_case): the function generated in `flows::api`.
@@ -381,7 +388,7 @@ fn default_status() -> u16 {
 /// First port tried for the HTTP API of a service.
 pub const DEFAULT_HTTP_PORT: u16 = 8080;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Consumer {
     pub name: String,
@@ -394,7 +401,7 @@ pub struct Consumer {
 }
 
 /// One block of a handler, the equivalent of an Elementor widget.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Step {
     /// Emit a structured log line. `{input.field}` placeholders are replaced by values.
@@ -486,7 +493,7 @@ pub enum Step {
     Code { id: String, code: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SqlOp {
     Select,
@@ -496,7 +503,7 @@ pub enum SqlOp {
 }
 
 /// `column <op> value`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SqlCondition {
     pub column: String,
     pub op: CmpOp,
@@ -544,7 +551,7 @@ impl Step {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum LogLevel {
     Debug,
@@ -553,14 +560,14 @@ pub enum LogLevel {
     Error,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Assignment {
     pub field: String,
     pub value: Expr,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Expr {
     /// A variable or a field of one: `input.order_id`.
@@ -576,7 +583,7 @@ pub enum Expr {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Condition {
     Compare {
@@ -590,7 +597,7 @@ pub enum Condition {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum CmpOp {
     Eq,
@@ -789,6 +796,23 @@ impl Service {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_sample_project_conforms_to_the_derived_json_schema() {
+        let schema = super::json_schema();
+        let validator =
+            jsonschema::validator_for(&schema).expect("the derived schema is a valid JSON Schema");
+        let sample = serde_json::to_value(crate::sample::orders()).unwrap();
+        let errors: Vec<String> = validator
+            .iter_errors(&sample)
+            .map(|e| format!("{} at {}", e, e.instance_path()))
+            .collect();
+        assert!(errors.is_empty(), "{errors:#?}");
+        // And the schema is not vacuous: a step of an unknown type is refused.
+        let mut broken = sample.clone();
+        broken["services"][0]["rpcs"][0]["steps"][0]["type"] = "teleport".into();
+        assert!(!validator.is_valid(&broken));
+    }
+
     #[test]
     fn migrating_declares_the_services_that_already_publish() {
         let mut p = crate::sample::orders();
