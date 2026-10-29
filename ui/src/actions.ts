@@ -9,6 +9,33 @@ function fail(e: unknown) {
   store().notify({ kind: 'error', text: String(e) })
 }
 
+// Modification time of the project file as we last read or wrote it: a different one on focus
+// means another program (typically an MCP client) edited it.
+let knownStamp: number | null = null
+
+async function rememberStamp(path: string) {
+  knownStamp = await api.projectStamp(path).catch(() => null)
+}
+
+/** Called when the window regains focus. Reloads the file if it changed and nothing is being edited. */
+export async function reloadIfChangedOnDisk() {
+  const { filePath } = store()
+  if (!filePath || knownStamp === null) return
+  const stamp = await api.projectStamp(filePath).catch(() => null)
+  if (stamp === null || stamp === knownStamp) return
+  knownStamp = stamp
+  if (store().dirty) {
+    store().notify({ kind: 'info', text: 'Le fichier du projet a été modifié par un autre programme. Enregistrer écrasera ces changements.' })
+    return
+  }
+  try {
+    store().load(await api.openProject(filePath), filePath)
+    store().notify({ kind: 'info', text: 'Projet rechargé : le fichier a été modifié par un autre programme' })
+  } catch (e) {
+    fail(e)
+  }
+}
+
 async function confirmDiscard(): Promise<boolean> {
   if (!store().dirty) return true
   return confirm('Le projet a des modifications non enregistrées. Les abandonner ?')
@@ -38,6 +65,7 @@ export async function openProject() {
     const path = await pickProjectToOpen()
     if (!path) return
     store().load(await api.openProject(path), path)
+    await rememberStamp(path)
     store().notify({ kind: 'info', text: `Projet ouvert : ${path}` })
   } catch (e) {
     fail(e)
@@ -47,6 +75,7 @@ export async function openProject() {
 async function writeTo(path: string, project: Project) {
   await api.saveProject(path, project)
   store().markSaved(path)
+  await rememberStamp(path)
   store().notify({ kind: 'info', text: `Enregistré : ${path}` })
 }
 

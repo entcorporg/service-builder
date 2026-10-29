@@ -5,6 +5,7 @@
 //! sb validate <project.json>         print diagnostics, exit 1 if there are errors
 //! sb generate <project.json> <dir>   write the generated Cargo workspace into <dir>
 //! sb analyze                         project JSON on stdin -> analysis JSON on stdout
+//! sb mcp <project.json>              MCP server on stdio, to let an AI client edit the project
 //! ```
 
 use std::io::Read;
@@ -17,7 +18,8 @@ const USAGE: &str = "usage:
   sb sample
   sb validate <project.json>
   sb generate <project.json> <dir>
-  sb analyze            (project JSON on stdin)";
+  sb analyze            (project JSON on stdin)
+  sb mcp <project.json> (MCP server on stdio)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -62,6 +64,17 @@ fn run(args: &[&str]) -> Result<ExitCode, String> {
             let json =
                 serde_json::to_string(&sb_app::analyze(&project)).map_err(|e| e.to_string())?;
             println!("{json}");
+            Ok(ExitCode::SUCCESS)
+        }
+        ["mcp", file] => {
+            // stdout belongs to the protocol: anything else goes to stderr.
+            eprintln!("service-builder MCP server on {file}");
+            sb_app::mcp::serve(
+                Path::new(file),
+                std::io::stdin().lock(),
+                std::io::stdout().lock(),
+            )
+            .map_err(|e| e.to_string())?;
             Ok(ExitCode::SUCCESS)
         }
         _ => Err(USAGE.to_string()),

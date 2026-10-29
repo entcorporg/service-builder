@@ -433,7 +433,7 @@ describe('auto-update', () => {
 
   it('keeps a plain button when the app is current and says so on click', async () => {
     const { page, calls } = await open()
-    assert.equal((await button(page).innerText()).trim(), 'Mettre à jour')
+    assert.equal(await button(page).getAttribute('title'), 'Rechercher une nouvelle version')
     await button(page).click()
     await page.waitForSelector('.toast.info')
     assert.match(await page.locator('.toast').innerText(), /à jour \(v0\.1\.0\)/)
@@ -467,6 +467,110 @@ describe('auto-update', () => {
     assert.ok(update.x + update.width <= exportBtn.x + 1, 'update button is left of export')
     assert.ok(exportBtn.x + exportBtn.width <= 1100, 'export button stays inside the window')
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true)
+    await page.close()
+  })
+
+  it('keeps the project name readable from the default window width down to the minimum', async () => {
+    for (const width of [1480, 1300, 1100]) {
+      const { page } = await open({ update: { version: '0.2.0' }, viewport: { width, height: 700 } })
+      const name = await page.getByLabel('Nom du projet').boundingBox()
+      assert.ok(name.width >= 120, `project name is ${Math.round(name.width)}px wide at ${width}px`)
+      await page.close()
+    }
+  })
+})
+
+describe('mcp', () => {
+  let browser
+  let tmp
+  before(async () => {
+    browser = await launchBrowser()
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-e2e-mcp-'))
+  })
+  after(async () => {
+    await browser?.close()
+    fs.rmSync(tmp, { recursive: true, force: true })
+  })
+
+  const open = async (opts) => {
+    const app = await openApp(browser, URL, opts)
+    await app.page.waitForTimeout(400)
+    return app
+  }
+  const tab = (page) => page.getByRole('tab', { name: 'MCP' })
+
+  it('lists the tools and the commands, but asks for a saved project before activating', async () => {
+    const { page, errors } = await open()
+    await tab(page).click()
+    await page.waitForSelector('.mcp-view .tool-list')
+    assert.equal(await page.locator('.tool-list li').count(), 2)
+    assert.match(await page.locator('.copy-block pre').first().innerText(), /^\/opt\/service-builder\/service-builder mcp '<projet\.sb\.json>'$/)
+    assert.match(await page.locator('.mcp-view .card').innerText(), /Enregistrez le projet/)
+    assert.equal(await page.getByRole('button', { name: 'Activer' }).count(), 0)
+    assert.equal(await page.locator('.palette').count(), 0)
+    assert.deepEqual(errors, [])
+    await page.close()
+  })
+
+  it('activates and deactivates the server for the saved project', async () => {
+    const save = path.join(tmp, 'demo.sb.json')
+    const { page, mcpCalls } = await open({ dialogs: { save } })
+    await page.getByRole('button', { name: /Enregistrer$/ }).click()
+    await page.waitForTimeout(400)
+    await tab(page).click()
+    await page.waitForSelector('.pill')
+    assert.equal(await page.locator('.pill').innerText(), 'Inactif')
+    assert.match(await page.locator('.copy-block pre').nth(1).innerText(), new RegExp(`^claude mcp add service-builder-demo -- /opt/service-builder/service-builder mcp ${save}$`))
+
+    await page.getByRole('button', { name: 'Activer' }).click()
+    await page.waitForSelector('.pill.on')
+    assert.equal(await page.locator('.pill').innerText(), 'Actif')
+    assert.match(await page.locator('.mcp-view .card').innerText(), /\.mcp\.json/)
+
+    await page.getByRole('button', { name: 'Désactiver' }).click()
+    await page.waitForSelector('.pill:not(.on)')
+    assert.equal(await page.locator('.pill').innerText(), 'Inactif')
+    assert.deepEqual(mcpCalls, [`enable ${save}`, `disable ${save}`])
+    await page.close()
+  })
+
+  it('offers to refresh an entry that starts another program', async () => {
+    const save = path.join(tmp, 'stale.sb.json')
+    const { page } = await open({ dialogs: { save }, mcpInitial: 'stale' })
+    await page.getByRole('button', { name: /Enregistrer$/ }).click()
+    await page.waitForTimeout(400)
+    await tab(page).click()
+    await page.waitForSelector('.pill.stale')
+    assert.equal(await page.locator('.pill').innerText(), 'À mettre à jour')
+    assert.equal(await page.getByRole('button', { name: 'Mettre à jour', exact: true }).count() > 0, true)
+    await page.close()
+  })
+
+  it('reloads the project when a client edited the file, unless edits are pending', async () => {
+    const save = path.join(tmp, 'live.sb.json')
+    const { page, touchFile } = await open({ dialogs: { save } })
+    await page.getByRole('button', { name: /Enregistrer$/ }).click()
+    await page.waitForTimeout(400)
+
+    // A client renames the project in the file.
+    const edit = (name) => {
+      const project = JSON.parse(fs.readFileSync(save, 'utf8'))
+      fs.writeFileSync(save, JSON.stringify({ ...project, name }))
+      touchFile()
+    }
+    edit('Édité par un client')
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await page.waitForSelector('.toast.info')
+    assert.match(await page.locator('.toast').innerText(), /Projet rechargé/)
+    assert.equal(await page.getByLabel('Nom du projet').inputValue(), 'Édité par un client')
+
+    // With unsaved edits, the app keeps them and warns instead.
+    await page.getByLabel('Nom du projet').fill('Mon brouillon')
+    await page.getByLabel('Nom du projet').press('Enter')
+    edit('Encore un client')
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await page.waitForFunction(() => /écrasera/.test(document.querySelector('.toast')?.textContent ?? ''))
+    assert.equal(await page.getByLabel('Nom du projet').inputValue(), 'Mon brouillon')
     await page.close()
   })
 })

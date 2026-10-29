@@ -23,9 +23,12 @@ export async function launchBrowser() {
 
 // `update` is the release the fake feed announces ({ version, body }), or null for an up-to-date app;
 // `updateFails` makes the feed unreachable. `calls` lists the updater/process commands the UI issued, `asked` the confirmation questions shown.
-export async function openApp(browser, url, { dialogs = {}, viewport = { width: 1480, height: 920 }, update = null, updateFails = false } = {}) {
+export async function openApp(browser, url, { dialogs = {}, viewport = { width: 1480, height: 920 }, update = null, updateFails = false, mcpInitial = 'off' } = {}) {
   const calls = []
   const asked = []
+  const mcpCalls = []
+  let mcpState = mcpInitial
+  let stamp = 1
   const page = await browser.newPage({ viewport })
   const errors = []
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()))
@@ -61,6 +64,21 @@ export async function openApp(browser, url, { dialogs = {}, viewport = { width: 
         // `ask` is a message with custom buttons; answering with the OK label means “yes”.
         asked.push(args.message)
         return args.buttons?.OkCancelCustom?.[0] ?? 'Yes'
+      case 'mcp_info':
+        return {
+          command: '/opt/service-builder/service-builder',
+          tools: [
+            { name: 'describe_project', description: 'Outline of the project.' },
+            { name: 'patch_project', description: 'Edits the project.' },
+          ],
+          activation: args.path && { configPath: path.join(path.dirname(args.path), '.mcp.json'), serverName: `service-builder-${path.basename(args.path).replace(/\.sb\.json$|\.json$/, '')}`, state: mcpState },
+        }
+      case 'mcp_set_enabled':
+        mcpState = args.enabled ? 'on' : 'off'
+        mcpCalls.push(`${args.enabled ? 'enable' : 'disable'} ${args.path}`)
+        return { configPath: path.join(path.dirname(args.path), '.mcp.json'), serverName: 'service-builder-demo', state: mcpState }
+      case 'project_stamp':
+        return stamp
       case 'plugin:app|version':
         return '0.1.0'
       case 'plugin:updater|check':
@@ -89,5 +107,5 @@ export async function openApp(browser, url, { dialogs = {}, viewport = { width: 
   })
   await page.goto(url)
   await page.waitForSelector('.node.service')
-  return { page, errors, calls, asked }
+  return { page, errors, calls, asked, mcpCalls, touchFile: () => void stamp++ }
 }

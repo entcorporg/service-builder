@@ -1,10 +1,11 @@
 import { useEffect, useRef } from 'react'
-import { checkForUpdate, openProject, saveProject, saveProjectAs } from './actions'
+import { checkForUpdate, openProject, reloadIfChangedOnDisk, saveProject, saveProjectAs } from './actions'
 import { api } from './bridge'
 import { Canvas } from './components/Canvas'
 import { EndpointEditor } from './components/EndpointEditor'
 import { CodeView } from './components/CodeView'
 import { Inspector } from './components/Inspector'
+import { McpView } from './components/McpView'
 import { Palette } from './components/Palette'
 import { Problems } from './components/Problems'
 import { TablesView } from './components/TablesView'
@@ -47,6 +48,14 @@ function useShortcuts() {
   }, [])
 }
 
+function useDiskWatch() {
+  useEffect(() => {
+    const onFocus = () => void reloadIfChangedOnDisk()
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [])
+}
+
 function Toast() {
   const notice = useStore((s) => s.notice)
   const notify = useStore((s) => s.notify)
@@ -70,6 +79,7 @@ export default function App() {
   const endpoint = view === 'architecture' && selection?.kind === 'route' ? selection : null
   useAnalysis()
   useShortcuts()
+  useDiskWatch()
 
   // The first launch opens the demo project so the canvas is never blank.
   useEffect(() => {
@@ -85,6 +95,8 @@ export default function App() {
         <div className="stage">
           {view === 'tables' ? (
             <TablesView />
+          ) : view === 'mcp' ? (
+            <McpView />
           ) : endpoint ? (
             <EndpointEditor service={endpoint.service} route={endpoint.route} />
           ) : view === 'architecture' ? (

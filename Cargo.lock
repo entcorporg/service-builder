@@ -2975,6 +2975,7 @@ version = "0.1.0"
 dependencies = [
  "sb-app",
  "sb-model",
+ "serde",
  "serde_json",
  "tauri",
  "tauri-build",

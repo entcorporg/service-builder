@@ -39,7 +39,7 @@ code, .mono { font-family: var(--mono); font-size: 12px; }
   grid-template-rows: 52px minmax(0, 1fr);
   grid-template-areas: 'bar bar bar' 'palette center inspector';
 }
-.app.view-code, .app.view-tables { grid-template-columns: minmax(0, 1fr); grid-template-areas: 'bar' 'center'; }
+.app.view-code, .app.view-tables, .app.view-mcp { grid-template-columns: minmax(0, 1fr); grid-template-areas: 'bar' 'center'; }
 .app.view-endpoint { grid-template-columns: 228px minmax(0, 1fr); grid-template-areas: 'bar bar' 'palette center'; }
 .toolbar { grid-area: bar; }
 .palette { grid-area: palette; }
@@ -370,13 +370,19 @@ textarea { resize: vertical; line-height: 1.5; }
 
 @media (max-width: 1350px) {
   .app { grid-template-columns: 200px minmax(0, 1fr) 380px; }
+}
+
+/* The toolbar sheds text in steps so the project name always keeps its width. */
+@media (max-width: 1700px) {
   .file { display: none; }
   .btn-group .label, button.update .label { display: none; }
+}
+@media (max-width: 1450px) {
   .brand strong { display: none; }
 }
 
-@media (max-width: 1200px) {
-  /* The window minimum: tabs shrink to icons so the project name stays readable. */
+@media (max-width: 1350px) {
+  /* Tabs shrink to icons so the project name stays readable. */
   .tabs .label { display: none; }
 }
 
@@ -472,3 +478,25 @@ textarea { resize: vertical; line-height: 1.5; }
 .tv-row .check { justify-content: center; display: flex; }
 .tv-sql { margin: 0; }
 .tv-empty { display: grid; place-content: center; justify-items: center; gap: 10px; color: var(--faint); height: 100%; text-align: center; padding: 24px; }
+
+/* ---- MCP view ---- */
+.mcp-view { position: absolute; inset: 0; overflow-y: auto; background: var(--bg); }
+.mcp-body { max-width: 860px; margin: 0 auto; padding: 22px 24px 48px; display: grid; gap: 16px; }
+.mcp-body h2 { margin: 0 0 4px; font-size: 18px; }
+.mcp-body h3 { margin: 6px 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); }
+.mcp-body p { margin: 0; color: var(--muted); line-height: 1.5; }
+.mcp-body .card { padding: 14px 16px; margin: 0; }
+.activation { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.activation small { display: block; margin-top: 4px; color: var(--muted); line-height: 1.5; }
+.activation-title { display: flex; align-items: center; gap: 10px; }
+.pill { font-size: 11px; font-weight: 700; padding: 2px 9px; border-radius: 999px; background: var(--raised); color: var(--muted); }
+.pill.on { color: var(--ok); background: rgba(62, 207, 142, 0.12); }
+.pill.stale { color: var(--warn); background: rgba(255, 197, 61, 0.12); }
+.copy-block { border: 1px solid var(--border); border-radius: 10px; background: var(--panel); margin-bottom: 10px; overflow: hidden; }
+.copy-head { display: flex; align-items: center; justify-content: space-between; padding: 4px 6px 4px 12px; border-bottom: 1px solid var(--border); }
+.copy-block pre { margin: 0; padding: 10px 12px; overflow-x: auto; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tool-list { list-style: none; margin: 0 0 12px; padding: 0; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
+.tool-list li { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 12px; padding: 8px 12px; border-top: 1px solid var(--border); color: var(--muted); line-height: 1.45; }
+.tool-list li:first-child { border-top: 0; }
+.tool-name { color: var(--text); }
+.hint { font-size: 12px; }

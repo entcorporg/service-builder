@@ -1,6 +1,8 @@
 //! Application logic shared by the desktop app (Tauri commands) and the `sb` CLI.
 //! Free of any UI type so it can be unit-tested without a window.
 
+pub mod mcp;
+
 use std::fs;
 use std::path::Path;
 

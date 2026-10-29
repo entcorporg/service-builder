@@ -178,6 +178,25 @@ export interface Analysis {
   files: GeneratedFile[]
 }
 
+export interface McpTool {
+  name: string
+  description: string
+}
+
+export interface McpActivation {
+  configPath: string
+  serverName: string
+  /** `stale`: an entry exists but starts another program (the app moved or was updated). */
+  state: 'off' | 'on' | 'stale'
+}
+
+export interface McpInfo {
+  command: string
+  tools: McpTool[]
+  /** Null while the project has no file: the server works on a saved project. */
+  activation: McpActivation | null
+}
+
 export interface ExportReport {
   dir: string
   files: number
