@@ -500,3 +500,13 @@ textarea { resize: vertical; line-height: 1.5; }
 .tool-list li:first-child { border-top: 0; }
 .tool-name { color: var(--text); }
 .hint { font-size: 12px; }
+
+/* ---- agent reports ---- */
+.feedback-head { display: grid; gap: 6px; }
+.feedback-head small { color: var(--muted); line-height: 1.5; }
+.check { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.report { display: grid; gap: 8px; }
+.report-head { display: flex; align-items: center; gap: 10px; color: var(--muted); }
+.report ol { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+.report li span { display: block; color: var(--muted); line-height: 1.45; margin-top: 2px; }
+.report-actions { display: flex; gap: 8px; }

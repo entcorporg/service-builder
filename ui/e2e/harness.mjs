@@ -23,10 +23,12 @@ export async function launchBrowser() {
 
 // `update` is the release the fake feed announces ({ version, body }), or null for an up-to-date app;
 // `updateFails` makes the feed unreachable. `calls` lists the updater/process commands the UI issued, `asked` the confirmation questions shown.
-export async function openApp(browser, url, { dialogs = {}, viewport = { width: 1480, height: 920 }, update = null, updateFails = false, mcpInitial = 'off' } = {}) {
+export async function openApp(browser, url, { dialogs = {}, viewport = { width: 1480, height: 920 }, update = null, updateFails = false, mcpInitial = 'off', reports = [] } = {}) {
   const calls = []
   const asked = []
   const mcpCalls = []
+  const feedback = { enabled: true, interactions: 7, reports: structuredClone(reports) }
+  const opened = []
   let mcpState = mcpInitial
   let stamp = 1
   const page = await browser.newPage({ viewport })
@@ -77,6 +79,20 @@ export async function openApp(browser, url, { dialogs = {}, viewport = { width: 
         mcpState = args.enabled ? 'on' : 'off'
         mcpCalls.push(`${args.enabled ? 'enable' : 'disable'} ${args.path}`)
         return { configPath: path.join(path.dirname(args.path), '.mcp.json'), serverName: 'service-builder-demo', state: mcpState }
+      case 'mcp_feedback':
+        return structuredClone(feedback)
+      case 'mcp_feedback_enable':
+        feedback.enabled = args.enabled
+        return structuredClone(feedback)
+      case 'mcp_report_dismiss':
+        feedback.reports = feedback.reports.filter((r) => r.id !== args.id)
+        return structuredClone(feedback)
+      case 'mcp_report_issue_url':
+        feedback.reports.find((r) => r.id === args.id).status = 'opened'
+        return `https://github.com/entcorporg/service-builder/issues/new?title=report-${args.id}`
+      case 'plugin:opener|open_url':
+        opened.push(args.url)
+        return null
       case 'project_stamp':
         return stamp
       case 'plugin:app|version':
@@ -107,5 +123,5 @@ export async function openApp(browser, url, { dialogs = {}, viewport = { width: 
   })
   await page.goto(url)
   await page.waitForSelector('.node.service')
-  return { page, errors, calls, asked, mcpCalls, touchFile: () => void stamp++ }
+  return { page, errors, calls, asked, mcpCalls, opened, feedback, touchFile: () => void stamp++ }
 }

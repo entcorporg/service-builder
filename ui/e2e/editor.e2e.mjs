@@ -505,7 +505,7 @@ describe('mcp', () => {
     await page.waitForSelector('.mcp-view .tool-list')
     assert.equal(await page.locator('.tool-list li').count(), 2)
     assert.match(await page.locator('.copy-block pre').first().innerText(), /^\/opt\/service-builder\/service-builder mcp '<projet\.sb\.json>'$/)
-    assert.match(await page.locator('.mcp-view .card').innerText(), /Enregistrez le projet/)
+    assert.match(await page.getByLabel('Activation').innerText(), /Enregistrez le projet/)
     assert.equal(await page.getByRole('button', { name: 'Activer' }).count(), 0)
     assert.equal(await page.locator('.palette').count(), 0)
     assert.deepEqual(errors, [])
@@ -525,7 +525,7 @@ describe('mcp', () => {
     await page.getByRole('button', { name: 'Activer' }).click()
     await page.waitForSelector('.pill.on')
     assert.equal(await page.locator('.pill').innerText(), 'Actif')
-    assert.match(await page.locator('.mcp-view .card').innerText(), /\.mcp\.json/)
+    assert.match(await page.getByLabel('Activation').innerText(), /\.mcp\.json/)
 
     await page.getByRole('button', { name: 'Désactiver' }).click()
     await page.waitForSelector('.pill:not(.on)')
@@ -543,6 +543,59 @@ describe('mcp', () => {
     await page.waitForSelector('.pill.stale')
     assert.equal(await page.locator('.pill').innerText(), 'À mettre à jour')
     assert.equal(await page.getByRole('button', { name: 'Mettre à jour', exact: true }).count() > 0, true)
+    await page.close()
+  })
+
+  const report = {
+    id: 3,
+    createdAt: 1790000000,
+    summary: 'Hashing passwords blocks the runtime.',
+    suggestions: [{ title: 'Blocking task block', details: 'Run code in spawn_blocking.' }],
+    status: 'pending',
+  }
+
+  it('shows the reports agents filed and opens a pre-filled GitHub issue only on click', async () => {
+    const save = path.join(tmp, 'reports.sb.json')
+    const { page, opened } = await open({ dialogs: { save }, reports: [report] })
+    await page.getByRole('button', { name: /Enregistrer$/ }).click()
+    await page.waitForTimeout(400)
+    await tab(page).click()
+    const card = page.getByLabel('Rapport 3')
+    await card.waitFor()
+    assert.match(await card.innerText(), /Blocking task block/)
+    assert.match(await card.innerText(), /spawn_blocking/)
+    assert.deepEqual(opened, [], 'nothing is opened before the click')
+
+    await card.getByRole('button', { name: 'Envoyer sur GitHub' }).click()
+    await page.waitForSelector('.report .pill')
+    assert.deepEqual(opened, ['https://github.com/entcorporg/service-builder/issues/new?title=report-3'])
+    assert.match(await card.innerText(), /Ouvert sur GitHub/)
+    await page.close()
+  })
+
+  it('dismisses a report and can stop the requests altogether', async () => {
+    const save = path.join(tmp, 'dismiss.sb.json')
+    const { page, feedback } = await open({ dialogs: { save }, reports: [report] })
+    await page.getByRole('button', { name: /Enregistrer$/ }).click()
+    await page.waitForTimeout(400)
+    await tab(page).click()
+    await page.getByLabel('Rapport 3').getByRole('button', { name: 'Ignorer' }).click()
+    await page.waitForSelector('text=Aucun rapport pour l’instant')
+    assert.equal(feedback.reports.length, 0)
+
+    const toggle = page.getByLabel(/Demander un rapport à l’agent tous les 50 appels/)
+    assert.equal(await toggle.isChecked(), true)
+    await toggle.click() // controlled: it flips once the backend has answered
+    await page.waitForFunction(() => document.querySelector('.check input')?.checked === false)
+    assert.equal(feedback.enabled, false)
+    await page.close()
+  })
+
+  it('has no suggestions section before the project is saved', async () => {
+    const { page } = await open({ reports: [report] })
+    await tab(page).click()
+    await page.waitForSelector('.mcp-view .tool-list')
+    assert.equal(await page.getByLabel('Suggestions des agents').count(), 0)
     await page.close()
   })
 

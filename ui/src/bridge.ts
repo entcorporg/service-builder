@@ -2,9 +2,10 @@
 import { invoke } from '@tauri-apps/api/core'
 import { getVersion } from '@tauri-apps/api/app'
 import { ask, open, save } from '@tauri-apps/plugin-dialog'
+import { openUrl } from '@tauri-apps/plugin-opener'
 import { relaunch } from '@tauri-apps/plugin-process'
 import { check, type Update } from '@tauri-apps/plugin-updater'
-import type { Analysis, ExportReport, McpActivation, McpInfo, Project } from './types'
+import type { AgentFeedback, Analysis, ExportReport, McpActivation, McpInfo, Project } from './types'
 
 export const api = {
   sampleProject: () => invoke<Project>('sample_project'),
@@ -15,6 +16,10 @@ export const api = {
   exportProject: (project: Project, dir: string) => invoke<ExportReport>('export_project', { project, dir }),
   mcpInfo: (path: string | null) => invoke<McpInfo>('mcp_info', { path }),
   mcpSetEnabled: (path: string, enabled: boolean) => invoke<McpActivation>('mcp_set_enabled', { path, enabled }),
+  mcpFeedback: (path: string) => invoke<AgentFeedback>('mcp_feedback', { path }),
+  mcpFeedbackEnable: (path: string, enabled: boolean) => invoke<AgentFeedback>('mcp_feedback_enable', { path, enabled }),
+  mcpReportDismiss: (path: string, id: number) => invoke<AgentFeedback>('mcp_report_dismiss', { path, id }),
+  mcpReportIssueUrl: (path: string, id: number) => invoke<string>('mcp_report_issue_url', { path, id }),
   projectStamp: (path: string) => invoke<number>('project_stamp', { path }),
 }
 
@@ -70,4 +75,9 @@ export const updater = {
     })
     await relaunch()
   },
+}
+
+/** Opens a page in the browser (the capability only allows the project's "new issue" pages). */
+export function openExternal(url: string): Promise<void> {
+  return openUrl(url)
 }

@@ -197,6 +197,27 @@ export interface McpInfo {
   activation: McpActivation | null
 }
 
+export interface AgentSuggestion {
+  title: string
+  details: string
+}
+
+export interface AgentReport {
+  id: number
+  /** Seconds since the Unix epoch. */
+  createdAt: number
+  summary: string
+  suggestions: AgentSuggestion[]
+  status: 'pending' | 'opened'
+}
+
+/** What the agents using the MCP server reported, kept next to the project file. */
+export interface AgentFeedback {
+  enabled: boolean
+  interactions: number
+  reports: AgentReport[]
+}
+
 export interface ExportReport {
   dir: string
   files: number
