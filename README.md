@@ -96,6 +96,22 @@ Réglage unique, à faire une fois : ajouter la clé privée de signature aux se
 `src-tauri/tauri.conf.json` ; sans la clé privée, les mises à jour ne peuvent pas être signées. Si `main` est protégée,
 autorisez `github-actions[bot]` à y pousser le commit de version.
 
+### Où tourne la CI
+
+Les contrôles (formatage, clippy, tests, code généré, UI, e2e) tournent sur un **runner auto-hébergé** (libellé
+`service-builder`) : plus rapide, et sans minutes GitHub. Seule la release (`bump`, `publish`) reste sur un runner
+GitHub, pour être construite dans un environnement propre et parce que c'est là que vit la clé de signature. Une PR
+venue d'un **fork** ne touche jamais le runner local : elle retombe sur un runner GitHub. Chaque commit d'une PR n'est
+testé qu'une fois (pas de double exécution push + PR), et seul `main` est testé à chaque push.
+
+Installer le runner sur une machine : télécharger le runner officiel, puis
+`./config.sh --url https://github.com/<org>/service-builder --token <jeton> --labels service-builder` et `./run.sh`
+(le jeton vient de `gh api -X POST repos/<org>/service-builder/actions/runners/registration-token`). La machine
+doit avoir Rust stable (rustfmt, clippy), Node 22, pnpm, cmake, les bibliothèques de Tauri et Google Chrome ; son
+fichier `.env` doit contenir le `PATH` qui les trouve. Pour qu'il survive à la session, un service `systemd --user`
+suffit (`ExecStart=<dossier du runner>/run.sh`, `systemctl --user enable --now …`). Hors ligne, les jobs attendent :
+désenregistrer le runner et remettre `ubuntu-24.04` dans `runs-on` suffit pour revenir aux runners GitHub.
+
 ## Piloter le projet depuis une IA (MCP)
 
 L'onglet **MCP** active un serveur [MCP](https://modelcontextprotocol.io) sur stdio : un client comme Claude Code lance
