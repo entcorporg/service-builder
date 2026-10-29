@@ -1,11 +1,23 @@
 name: CI
 
+# A branch is tested once, through its pull request; main is tested on every push (it releases).
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
   contents: read
+
+# A new push to a pull request replaces the run in progress. Main is never cancelled: a release hangs on it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Where the checks run: our own machine (label `service-builder`) is faster and costs no minutes, so it
+# takes everything except the release itself. A pull request from a fork never reaches it, because its
+# code is not ours to run there: it falls back to a GitHub-hosted runner. The expression is repeated in
+# each job, since `runs-on` cannot read `env`.
 
 jobs:
   # Rule 1 — every change names its update type: [minor] 0.0.X, [normal] 0.X.0, [major] X.0.0,
@@ -13,13 +25,14 @@ jobs:
   # count: a description or commit body that merely talks about the mentions must not release.
   # A pull request without the mention fails here; a push to main reads it to decide the release.
   update-type:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "service-builder"]') || 'ubuntu-24.04' }}
     outputs:
       level: ${{ steps.detect.outputs.level }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          clean: ${{ runner.environment == 'github-hosted' }}
       - id: detect
         # Texts reach the script through the environment, never interpolated into the shell.
         env:
@@ -50,71 +63,101 @@ jobs:
           fi
 
   scripts:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "service-builder"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          clean: ${{ runner.environment == 'github-hosted' }}
       - run: node --test scripts/release.test.mjs
       - run: node scripts/release.mjs check
 
   rust:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "service-builder"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          clean: ${{ runner.environment == 'github-hosted' }}
       - name: Tauri system dependencies
+        if: runner.environment == 'github-hosted'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
             libayatana-appindicator3-dev librsvg2-dev libssl-dev pkg-config build-essential
       - uses: dtolnay/rust-toolchain@stable
+        if: runner.environment == 'github-hosted'
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
   generated-workspace:
     # The code we generate must compile, not just look right.
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "service-builder"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          clean: ${{ runner.environment == 'github-hosted' }}
       - name: Build tools for librdkafka
+        if: runner.environment == 'github-hosted'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake libssl-dev pkg-config build-essential
       - uses: dtolnay/rust-toolchain@stable
+        if: runner.environment == 'github-hosted'
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo run -p sb-codegen --example dump -- "$RUNNER_TEMP/generated"
       - run: cargo check --workspace
         working-directory: ${{ runner.temp }}/generated
+        env:
+          # runner.temp is wiped between jobs; the tool cache is not, so librdkafka is built once.
+          CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
 
   ui:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "service-builder"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          clean: ${{ runner.environment == 'github-hosted' }}
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
+          cache: ${{ runner.environment == 'github-hosted' && 'pnpm' || '' }}
       - run: pnpm install --frozen-lockfile
       - run: pnpm --dir ui typecheck
       - run: pnpm --dir ui test
       - run: pnpm --dir ui build
 
   e2e:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "service-builder"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          clean: ${{ runner.environment == 'github-hosted' }}
       - uses: dtolnay/rust-toolchain@stable
+        if: runner.environment == 'github-hosted'
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
+          cache: ${{ runner.environment == 'github-hosted' && 'pnpm' || '' }}
       - run: pnpm install --frozen-lockfile
       - run: pnpm --dir ui exec playwright install --with-deps chromium
+        if: runner.environment == 'github-hosted'
       - run: cargo build -p sb-app --bin sb
       - run: pnpm --dir ui e2e
+        env:
+          SB_CHROMIUM: ${{ runner.environment == 'self-hosted' && '/usr/bin/google-chrome' || '' }}
 
   # Rule 2 — a push to main that carries a mention raises the version (0.1.0 + [normal] = 0.2.0),
   # commits it and tags it. The commit made with GITHUB_TOKEN does not start another run.
