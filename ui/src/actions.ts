@@ -1,5 +1,5 @@
 // User-level operations: they talk to the backend and update the store.
-import { api, confirm, pickExportDir, pickProjectToOpen, pickProjectToSave } from './bridge'
+import { api, confirm, pickExportDir, pickProjectToOpen, pickProjectToSave, updater } from './bridge'
 import { useStore } from './store'
 import type { Project } from './types'
 
@@ -80,4 +80,45 @@ export async function exportCode() {
   } catch (e) {
     fail(e)
   }
+}
+
+/**
+ * Looks for a newer release. At launch (`silent`) a missing network or feed is
+ * not worth a message; when the user asks, every outcome is reported.
+ */
+export async function checkForUpdate({ silent }: { silent: boolean }) {
+  if (store().update.phase !== 'idle') return
+  store().setUpdate({ phase: 'checking' })
+  try {
+    const found = await updater.check()
+    if (found) {
+      store().setUpdate({ phase: 'available', ...found })
+      if (!silent) store().notify({ kind: 'info', text: `Version ${found.version} disponible` })
+      return
+    }
+    store().setUpdate({ phase: 'idle' })
+    if (!silent) store().notify({ kind: 'info', text: `Service Builder est à jour (v${await updater.currentVersion()})` })
+  } catch (e) {
+    store().setUpdate({ phase: 'idle' })
+    if (!silent) store().notify({ kind: 'error', text: `Recherche de mise à jour impossible : ${String(e)}` })
+  }
+}
+
+export async function installUpdate() {
+  const status = store().update
+  if (status.phase !== 'available') return
+  const unsaved = store().dirty ? ' Les modifications non enregistrées seront perdues.' : ''
+  if (!(await confirm(`Installer la version ${status.version} ? L’application va redémarrer.${unsaved}`))) return
+  store().setUpdate({ phase: 'installing', percent: null })
+  try {
+    await updater.install((percent) => store().setUpdate({ phase: 'installing', percent }))
+  } catch (e) {
+    store().setUpdate({ phase: 'available', version: status.version, notes: status.notes })
+    fail(`Mise à jour impossible : ${String(e)}`)
+  }
+}
+
+/** The Update button: install when a release is known, look for one otherwise. */
+export function updateAction() {
+  return store().update.phase === 'available' ? installUpdate() : checkForUpdate({ silent: false })
 }

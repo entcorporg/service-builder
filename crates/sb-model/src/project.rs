@@ -6,7 +6,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const SCHEMA_VERSION: u32 = 1;
+/// 2: topics declare their `producers` (before, a producer was whatever had a Publish step).
+/// 3: schemas have a `kind` (event, proto or api).
+pub const SCHEMA_VERSION: u32 = 3;
 
 fn default_schema_version() -> u32 {
     SCHEMA_VERSION
@@ -20,6 +22,8 @@ pub struct Project {
     pub name: String,
     #[serde(default)]
     pub broker: BrokerConfig,
+    #[serde(default)]
+    pub outbox: OutboxConfig,
     #[serde(default)]
     pub messages: Vec<Message>,
     #[serde(default)]
@@ -42,11 +46,54 @@ impl Default for BrokerConfig {
     }
 }
 
-/// A protobuf message. Used both as Kafka event payload and as gRPC request/response.
+/// How the services publish their events: every event goes through a transactional outbox, and
+/// is moved to `<topic>.dlq` once it could not be published after `max_attempts` attempts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboxConfig {
+    #[serde(default = "default_max_attempts")]
+    pub max_attempts: u32,
+}
+
+pub const DEFAULT_OUTBOX_ATTEMPTS: u32 = 5;
+pub const MAX_OUTBOX_ATTEMPTS: u32 = 100;
+
+fn default_max_attempts() -> u32 {
+    DEFAULT_OUTBOX_ATTEMPTS
+}
+
+impl Default for OutboxConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: DEFAULT_OUTBOX_ATTEMPTS,
+        }
+    }
+}
+
+/// What a schema is for. All of them are compiled into the `contracts` crate (protobuf messages);
+/// API schemas also get a JSON (de)serialization, for the HTTP routes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MessageKind {
+    /// Payload of a Kafka topic.
+    Event,
+    /// gRPC request/response, and the building blocks (value objects) shared by events and gRPC.
+    #[default]
+    Proto,
+    /// Body, parameters and response of an HTTP route.
+    Api,
+    /// The row a SQL step reads: derived from the table and the columns it ticks, never stored in
+    /// a project file, only added by [`Project::with_sql_rows`] so that the row can be typed.
+    Row,
+}
+
+/// A schema: a named set of fields, see [`MessageKind`] for what it can be used for.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
     pub name: String,
+    #[serde(default)]
+    pub kind: MessageKind,
     #[serde(default)]
     pub fields: Vec<Field>,
 }
@@ -113,6 +160,10 @@ pub struct Topic {
     /// Field of `message` used as the Kafka record key (keeps related events ordered).
     #[serde(default)]
     pub key_field: Option<String>,
+    /// Services allowed to publish on this topic: the owners of the event. A Publish step in any
+    /// other service is an error.
+    #[serde(default)]
+    pub producers: Vec<String>,
     #[serde(default)]
     pub position: Position,
 }
@@ -138,6 +189,14 @@ pub struct Service {
     pub port: u16,
     #[serde(default)]
     pub rpcs: Vec<Rpc>,
+    /// Port of the HTTP API (the `routes`). Required as soon as there is a route.
+    #[serde(default)]
+    pub http_port: Option<u16>,
+    #[serde(default)]
+    pub routes: Vec<Route>,
+    /// The tables of the service's own database.
+    #[serde(default)]
+    pub tables: Vec<Table>,
     #[serde(default)]
     pub consumers: Vec<Consumer>,
     #[serde(default)]
@@ -153,6 +212,174 @@ pub struct Rpc {
     #[serde(default)]
     pub steps: Vec<Step>,
 }
+
+/// A column type. `Timestamp` and `Uuid` are stored natively but read and written as text
+/// (RFC 3339, canonical UUID) by the flows, so that they are plain strings everywhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ColumnType {
+    String,
+    Bool,
+    Int32,
+    Int64,
+    Float,
+    Double,
+    Timestamp,
+    Uuid,
+}
+
+impl ColumnType {
+    pub const ALL: [ColumnType; 8] = [
+        ColumnType::String,
+        ColumnType::Bool,
+        ColumnType::Int32,
+        ColumnType::Int64,
+        ColumnType::Float,
+        ColumnType::Double,
+        ColumnType::Timestamp,
+        ColumnType::Uuid,
+    ];
+
+    /// The PostgreSQL type.
+    pub fn sql(self) -> &'static str {
+        match self {
+            ColumnType::String => "TEXT",
+            ColumnType::Bool => "BOOLEAN",
+            ColumnType::Int32 => "INTEGER",
+            ColumnType::Int64 => "BIGINT",
+            ColumnType::Float => "REAL",
+            ColumnType::Double => "DOUBLE PRECISION",
+            ColumnType::Timestamp => "TIMESTAMPTZ",
+            ColumnType::Uuid => "UUID",
+        }
+    }
+
+    /// The type a flow sees.
+    pub fn field_type(self) -> FieldType {
+        match self {
+            ColumnType::String | ColumnType::Timestamp | ColumnType::Uuid => FieldType::String,
+            ColumnType::Bool => FieldType::Bool,
+            ColumnType::Int32 => FieldType::Int32,
+            ColumnType::Int64 => FieldType::Int64,
+            ColumnType::Float => FieldType::Float,
+            ColumnType::Double => FieldType::Double,
+        }
+    }
+
+    /// Whether the database type differs from the text a flow reads and writes (it needs a cast).
+    pub fn is_text_cast(self) -> bool {
+        matches!(self, ColumnType::Timestamp | ColumnType::Uuid)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Column {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub ty: ColumnType,
+    #[serde(default)]
+    pub nullable: bool,
+    #[serde(default)]
+    pub primary_key: bool,
+    /// SQL expression used when an insert does not give the column a value (`now()`, `0`, `'new'`).
+    #[serde(default)]
+    pub default: Option<String>,
+}
+
+impl Column {
+    pub fn new(name: impl Into<String>, ty: ColumnType) -> Self {
+        Self {
+            name: name.into(),
+            ty,
+            nullable: false,
+            primary_key: false,
+            default: None,
+        }
+    }
+
+    /// An insert must give a value to the columns that cannot be left out.
+    pub fn is_required_on_insert(&self) -> bool {
+        !self.nullable && self.default.as_deref().is_none_or(|d| d.trim().is_empty())
+    }
+}
+
+/// A table of the database of a service. Identifiers are snake_case, so they can be quoted safely.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Table {
+    pub name: String,
+    #[serde(default)]
+    pub columns: Vec<Column>,
+}
+
+impl Table {
+    pub fn column(&self, name: &str) -> Option<&Column> {
+        self.columns.iter().find(|c| c.name == name)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HttpMethod {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+impl HttpMethod {
+    pub const ALL: [HttpMethod; 5] = [
+        HttpMethod::Get,
+        HttpMethod::Post,
+        HttpMethod::Put,
+        HttpMethod::Patch,
+        HttpMethod::Delete,
+    ];
+
+    /// Upper case, as written in a request line.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HttpMethod::Get => "GET",
+            HttpMethod::Post => "POST",
+            HttpMethod::Put => "PUT",
+            HttpMethod::Patch => "PATCH",
+            HttpMethod::Delete => "DELETE",
+        }
+    }
+
+    /// Whether the request schema travels in a JSON body (otherwise in the query string).
+    pub fn has_body(self) -> bool {
+        matches!(self, HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch)
+    }
+}
+
+/// An HTTP endpoint of a service, for the front. `path` can hold `{params}` that fill the
+/// fields of the `request` schema with the same name; the other fields come from the JSON body
+/// (POST, PUT, PATCH) or from the query string (GET, DELETE). Both schemas are API schemas.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Route {
+    /// Name of the handler (snake_case): the function generated in `flows::api`.
+    pub name: String,
+    pub method: HttpMethod,
+    pub path: String,
+    pub request: String,
+    pub response: String,
+    /// Success status code (200, 201 or 202).
+    #[serde(default = "default_status")]
+    pub status: u16,
+    #[serde(default)]
+    pub steps: Vec<Step>,
+}
+
+fn default_status() -> u16 {
+    200
+}
+
+/// First port tried for the HTTP API of a service.
+pub const DEFAULT_HTTP_PORT: u16 = 8080;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -222,9 +449,71 @@ pub enum Step {
         #[serde(default)]
         fields: Vec<Assignment>,
     },
+    /// A query on a table of the service's database, in the transaction of the handler. A
+    /// `Select` binds `bind`, typed after the ticked columns: that is what the next steps read.
+    #[serde(rename_all = "camelCase")]
+    Sql {
+        id: String,
+        op: SqlOp,
+        table: String,
+        /// Select: the variable receiving the row (or, with `many`, the list of rows).
+        #[serde(default)]
+        bind: Option<String>,
+        /// Select: the columns to read.
+        #[serde(default)]
+        columns: Vec<String>,
+        /// Select: every matching row (a list, which needs `into`) instead of exactly one.
+        #[serde(default)]
+        many: bool,
+        /// Select: convert the rows into this schema (same-named columns fill its fields).
+        #[serde(default)]
+        into: Option<String>,
+        /// `WHERE`, all the conditions together.
+        #[serde(default, rename = "where")]
+        conditions: Vec<SqlCondition>,
+        /// Insert and update: the value of each column.
+        #[serde(default)]
+        values: Vec<Assignment>,
+        #[serde(default)]
+        order_by: Option<String>,
+        #[serde(default)]
+        descending: bool,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
     /// Escape hatch: raw Rust statements inserted verbatim.
     #[serde(rename_all = "camelCase")]
     Code { id: String, code: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SqlOp {
+    Select,
+    Insert,
+    Update,
+    Delete,
+}
+
+/// `column <op> value`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SqlCondition {
+    pub column: String,
+    pub op: CmpOp,
+    pub value: Expr,
+}
+
+impl SqlCondition {
+    pub fn sql_op(&self) -> &'static str {
+        match self.op {
+            CmpOp::Eq => "=",
+            CmpOp::Ne => "<>",
+            CmpOp::Gt => ">",
+            CmpOp::Ge => ">=",
+            CmpOp::Lt => "<",
+            CmpOp::Le => "<=",
+        }
+    }
 }
 
 impl Step {
@@ -236,6 +525,7 @@ impl Step {
             | Step::CallRpc { id, .. }
             | Step::Branch { id, .. }
             | Step::Respond { id, .. }
+            | Step::Sql { id, .. }
             | Step::Code { id, .. } => id,
         }
     }
@@ -330,6 +620,7 @@ impl Project {
             schema_version: SCHEMA_VERSION,
             name: name.into(),
             broker: BrokerConfig::default(),
+            outbox: OutboxConfig::default(),
             messages: vec![],
             topics: vec![],
             services: vec![],
@@ -347,6 +638,82 @@ impl Project {
                 f.tag = Some(n);
             }
         }
+    }
+
+    /// A copy where the rows read by SQL steps are real messages, so that the validator and the
+    /// generator can type `row.column` like any other path. Appended after the project's own
+    /// messages: their indexes, which diagnostics refer to, do not change.
+    pub fn with_sql_rows(&self) -> Project {
+        let mut out = self.clone();
+        for svc in &self.services {
+            for step in svc.handler_steps() {
+                step.walk(&mut |s| {
+                    let Step::Sql {
+                        id,
+                        op: SqlOp::Select,
+                        table,
+                        columns,
+                        into: None,
+                        ..
+                    } = s
+                    else {
+                        return;
+                    };
+                    let Some(t) = svc.table(table) else { return };
+                    out.messages.push(Message {
+                        name: sql_row_name(table, id),
+                        kind: MessageKind::Row,
+                        fields: columns
+                            .iter()
+                            .filter_map(|c| t.column(c))
+                            .map(|c| {
+                                let mut f = Field::new(&c.name, c.ty.field_type());
+                                f.optional = c.nullable;
+                                f
+                            })
+                            .collect(),
+                    });
+                });
+            }
+        }
+        out
+    }
+
+    /// Brings a project saved by an older version up to date.
+    pub fn migrate(&mut self) {
+        if self.schema_version < 2 {
+            // Producers used to be implicit: whoever had a Publish step on the topic.
+            for t in &mut self.topics {
+                for svc in &self.services {
+                    let mut publishes = false;
+                    for step in svc.handler_steps() {
+                        step.walk(&mut |s| {
+                            publishes |=
+                                matches!(s, Step::Publish { topic, .. } if *topic == t.name)
+                        });
+                    }
+                    if publishes && !t.producers.contains(&svc.name) {
+                        t.producers.push(svc.name.clone());
+                    }
+                }
+            }
+        }
+        if self.schema_version < 3 {
+            // Before kinds, everything was a protobuf message: payloads of topics become events.
+            let carried: Vec<String> = self.topics.iter().map(|t| t.message.clone()).collect();
+            for m in self
+                .messages
+                .iter_mut()
+                .filter(|m| m.kind != MessageKind::Api)
+            {
+                m.kind = if carried.contains(&m.name) {
+                    MessageKind::Event
+                } else {
+                    MessageKind::Proto
+                };
+            }
+        }
+        self.schema_version = SCHEMA_VERSION;
     }
 
     pub fn message(&self, name: &str) -> Option<&Message> {
@@ -389,18 +756,74 @@ impl Message {
     }
 }
 
+/// Name of the (derived) message holding the row of a `Select` step: `OrdersRowO1`.
+pub fn sql_row_name(table: &str, step_id: &str) -> String {
+    let mut id: String = step_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    if let Some(first) = id.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    format!("{}Row{id}", crate::names::pascal(table))
+}
+
 impl Service {
+    pub fn table(&self, name: &str) -> Option<&Table> {
+        self.tables.iter().find(|t| t.name == name)
+    }
+
     pub fn rpc(&self, name: &str) -> Option<&Rpc> {
         self.rpcs.iter().find(|r| r.name == name)
+    }
+
+    /// The top-level steps of every handler: RPCs, HTTP routes and consumers.
+    pub fn handler_steps(&self) -> impl Iterator<Item = &Step> {
+        self.rpcs
+            .iter()
+            .flat_map(|r| &r.steps)
+            .chain(self.routes.iter().flat_map(|r| &r.steps))
+            .chain(self.consumers.iter().flat_map(|c| &c.steps))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn migrating_declares_the_services_that_already_publish() {
+        let mut p = crate::sample::orders();
+        for t in &mut p.topics {
+            t.producers.clear();
+        }
+        for m in p.messages.iter_mut().filter(|m| m.kind != MessageKind::Api) {
+            m.kind = MessageKind::Proto;
+        }
+        p.schema_version = 1;
+        p.migrate();
+        assert_eq!(p, crate::sample::orders());
+        let kind = |p: &Project, n: &str| p.message(n).unwrap().kind;
+        assert_eq!(kind(&p, "OrderCreated"), MessageKind::Event);
+        assert_eq!(kind(&p, "CreateOrderRequest"), MessageKind::Proto);
+        assert_eq!(kind(&p, "Customer"), MessageKind::Proto);
+        // Migrating again changes nothing.
+        let again = p.clone();
+        p.migrate();
+        assert_eq!(p, again);
+    }
+
+    #[test]
+    fn projects_saved_before_the_outbox_get_the_default() {
+        let p: Project = serde_json::from_str(r#"{"name":"Old"}"#).unwrap();
+        assert_eq!(p.outbox.max_attempts, DEFAULT_OUTBOX_ATTEMPTS);
+        let p: Project = serde_json::from_str(r#"{"name":"Old","outbox":{}}"#).unwrap();
+        assert_eq!(p.outbox.max_attempts, DEFAULT_OUTBOX_ATTEMPTS);
+    }
+
     use super::*;
 
     fn message(names: &[&str]) -> Message {
         Message {
+            kind: Default::default(),
             name: "M".into(),
             fields: names
                 .iter()

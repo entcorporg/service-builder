@@ -1,4 +1,4 @@
-import { exportCode, loadSample, newProject, openProject, saveProject, saveProjectAs } from '../actions'
+import { exportCode, loadSample, newProject, openProject, saveProject, saveProjectAs, updateAction } from '../actions'
 import { errorCount, useStore, warningCount } from '../store'
 import { Icon } from './Icon'
 import { CommitInput } from './ui'
@@ -9,8 +9,11 @@ export function Toolbar() {
   const filePath = useStore((s) => s.filePath)
   const view = useStore((s) => s.view)
   const setView = useStore((s) => s.setView)
+  const selection = useStore((s) => s.selection)
+  const select = useStore((s) => s.select)
   const edit = useStore((s) => s.edit)
   const analysis = useStore((s) => s.analysis)
+  const update = useStore((s) => s.update)
   const errors = errorCount(analysis)
   const warnings = warningCount(analysis)
 
@@ -28,11 +31,18 @@ export function Toolbar() {
       </div>
 
       <div className="tabs" role="tablist">
-        <button type="button" role="tab" aria-selected={view === 'architecture'} className={view === 'architecture' ? 'active' : ''} onClick={() => setView('architecture')}>
-          <Icon name="graph" size={15} /> Architecture
+        <button type="button" role="tab" aria-label="Architecture" title="Architecture" aria-selected={view === 'architecture'} className={view === 'architecture' ? 'active' : ''} onClick={() => {
+            setView('architecture')
+            // From an endpoint, the tab goes back to the canvas of its service.
+            if (selection?.kind === 'route') select({ kind: 'service', name: selection.service })
+          }}>
+          <Icon name="graph" size={15} /><span className="label">Architecture</span>
         </button>
-        <button type="button" role="tab" aria-selected={view === 'code'} className={view === 'code' ? 'active' : ''} onClick={() => setView('code')}>
-          <Icon name="code" size={15} /> Code généré
+        <button type="button" role="tab" aria-label="Tables" title="Tables" aria-selected={view === 'tables'} className={view === 'tables' ? 'active' : ''} onClick={() => setView('tables')}>
+          <Icon name="table" size={15} /><span className="label">Tables</span>
+        </button>
+        <button type="button" role="tab" aria-label="Code généré" title="Code généré" aria-selected={view === 'code'} className={view === 'code' ? 'active' : ''} onClick={() => setView('code')}>
+          <Icon name="code" size={15} /><span className="label">Code généré</span>
         </button>
       </div>
 
@@ -52,6 +62,20 @@ export function Toolbar() {
           <Icon name="copy" size={15} />
         </button>
       </div>
+      <button
+        type="button"
+        className={`ghost update ${update.phase}`}
+        onClick={() => void updateAction()}
+        disabled={update.phase === 'checking' || update.phase === 'installing'}
+        aria-label="Mettre à jour"
+        title={update.phase === 'available' ? `Installer la version ${update.version}` : 'Rechercher une nouvelle version'}
+      >
+        <Icon name="update" size={15} />
+        {update.phase === 'checking' && <span className="label">Recherche…</span>}
+        {update.phase === 'installing' && <span>{update.percent === null ? '…' : `${update.percent} %`}</span>}
+        {update.phase === 'available' && <><span className="label">Mettre à jour</span><span className="version mono">v{update.version}</span></>}
+        {update.phase === 'idle' && <span className="label">Mettre à jour</span>}
+      </button>
       <button type="button" className="primary" onClick={() => void exportCode()} disabled={errors > 0} title={errors > 0 ? 'Corrigez les erreurs avant d’exporter' : 'Générer le workspace Cargo'}>
         <Icon name="export" size={15} /> Exporter le code
       </button>

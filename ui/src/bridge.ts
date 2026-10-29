@@ -1,6 +1,9 @@
 // Typed access to the Rust side (Tauri commands) and to native dialogs.
 import { invoke } from '@tauri-apps/api/core'
+import { getVersion } from '@tauri-apps/api/app'
 import { ask, open, save } from '@tauri-apps/plugin-dialog'
+import { relaunch } from '@tauri-apps/plugin-process'
+import { check, type Update } from '@tauri-apps/plugin-updater'
 import type { Analysis, ExportReport, Project } from './types'
 
 export const api = {
@@ -30,4 +33,38 @@ export async function pickExportDir(): Promise<string | null> {
 
 export function confirm(message: string): Promise<boolean> {
   return ask(message, { title: 'Service Builder', kind: 'warning', okLabel: 'Continuer', cancelLabel: 'Annuler' })
+}
+
+export interface AvailableUpdate {
+  version: string
+  notes: string | null
+}
+
+// The handle returned by `check` is the only way to install what it found.
+let found: Update | null = null
+
+export const updater = {
+  currentVersion: () => getVersion(),
+
+  /** Asks the GitHub release feed whether a newer signed build exists. */
+  async check(): Promise<AvailableUpdate | null> {
+    await found?.close().catch(() => {})
+    found = await check()
+    return found ? { version: found.version, notes: found.body ?? null } : null
+  },
+
+  /** Downloads, verifies the signature, installs, then restarts. `percent` is null while the size is unknown. */
+  async install(onProgress: (percent: number | null) => void): Promise<void> {
+    if (!found) throw new Error('aucune mise à jour trouvée')
+    let total = 0
+    let done = 0
+    await found.downloadAndInstall((event) => {
+      if (event.event === 'Started') total = event.data.contentLength ?? 0
+      else if (event.event === 'Progress') {
+        done += event.data.chunkLength
+        onProgress(total > 0 ? Math.min(100, Math.round((done / total) * 100)) : null)
+      }
+    })
+    await relaunch()
+  },
 }

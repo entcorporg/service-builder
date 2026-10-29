@@ -1,7 +1,7 @@
 //! `.proto` generation.
 
 use sb_model::names::snake;
-use sb_model::{FieldType, Project};
+use sb_model::{FieldType, MessageKind, Project};
 
 use crate::writer::Code;
 
@@ -43,23 +43,45 @@ pub fn generate(project: &Project) -> String {
         c.line("import \"google/protobuf/timestamp.proto\";");
     }
 
-    for m in &project.messages {
-        c.blank();
-        c.open(format!("message {}", m.name));
-        for (f, n) in m.fields.iter().zip(m.field_numbers()) {
-            let label = if f.repeated {
-                "repeated "
-            } else if f.optional && !f.ty.is_message() {
-                "optional "
-            } else {
-                ""
-            };
-            c.line(format!("{label}{} {} = {n};", proto_type(&f.ty), f.name));
+    let sections = [
+        (MessageKind::Proto, "gRPC schemas and shared types"),
+        (MessageKind::Event, "Events (Kafka payloads)"),
+        (
+            MessageKind::Api,
+            "HTTP API schemas (also read and written as JSON)",
+        ),
+    ];
+    for (kind, title) in sections {
+        let mut messages = project
+            .messages
+            .iter()
+            .filter(|m| m.kind == kind)
+            .peekable();
+        if messages.peek().is_none() {
+            continue;
         }
-        c.close();
+        c.blank();
+        c.line(format!("// ---- {title} ----"));
+        for m in messages {
+            c.blank();
+            c.open(format!("message {}", m.name));
+            for (f, n) in m.fields.iter().zip(m.field_numbers()) {
+                let label = if f.repeated {
+                    "repeated "
+                } else if f.optional && !f.ty.is_message() {
+                    "optional "
+                } else {
+                    ""
+                };
+                c.line(format!("{label}{} {} = {n};", proto_type(&f.ty), f.name));
+            }
+            c.close();
+        }
     }
 
     for s in project.services.iter().filter(|s| !s.rpcs.is_empty()) {
+        c.blank();
+        c.line("// ---- gRPC services ----");
         c.blank();
         c.open(format!("service {}", s.name));
         for r in &s.rpcs {
@@ -91,8 +113,25 @@ mod tests {
     }
 
     #[test]
+    fn api_schemas_get_their_own_section() {
+        let proto = generate(&sb_model::sample::orders());
+        assert!(proto.contains("// ---- HTTP API schemas (also read and written as JSON) ----"));
+        assert!(
+            proto.contains(
+                "message OrderView {\n    string order_id = 1;\n    string status = 2;\n}"
+            )
+        );
+        // Proto schemas first, then events, then the HTTP API.
+        let at = |needle: &str| proto.find(needle).unwrap();
+        assert!(at("message CreateOrderRequest") < at("message OrderCreated"));
+        assert!(at("message OrderCreated") < at("message OrderView"));
+        assert!(proto.contains("// ---- Events (Kafka payloads) ----"));
+    }
+
+    #[test]
     fn explicit_tags_are_kept_and_never_reused() {
         let mut m = Message {
+            kind: Default::default(),
             name: "M".into(),
             fields: vec![
                 Field::new("a", FieldType::String),

@@ -1,12 +1,27 @@
-//! Generation of one service crate: `main.rs`, `ctx.rs`, `server.rs`, `flows.rs`.
+//! Generation of one service crate, organised by responsibility:
+//!
+//! ```text
+//! main.rs        the start-up sequence, nothing else
+//! app/           config, shared context, start-up steps
+//! transport/     how the outside reaches the service: grpc.rs (RPCs), http.rs (routes for the front),
+//!                 kafka.rs (subscriptions),
+//!                 outbox.rs (the relay that publishes the events a flow queued)
+//! flows/         the logic drawn in the editor: rpc.rs, api.rs (HTTP routes), consumers.rs
+//! ```
+//!
+//! Transports only translate and delegate to `flows`; `main` only wires.
 
 use std::collections::BTreeSet;
 
+use sb_model::names::route_params;
 use sb_model::names::{shouty, snake, topic_const};
 use sb_model::typing::{Scope, TypeRef};
-use sb_model::{Project, Service, Step};
+use sb_model::{
+    Column, ColumnType, DEFAULT_HTTP_PORT, FieldType, HttpMethod, Project, Service, SqlOp, Step,
+    sql_row_name,
+};
 
-use crate::expr::{condition_code, log_code, lower, rust_scalar, struct_literal};
+use crate::expr::{condition_code, log_code, lower, rust_let_type, struct_literal};
 use crate::writer::Code;
 use crate::{CodegenError, GeneratedFile};
 
@@ -22,23 +37,126 @@ pub fn dir(service: &Service) -> String {
 }
 
 pub fn generate(project: &Project, service: &Service) -> Result<Vec<GeneratedFile>, CodegenError> {
-    let base = dir(service);
+    let src = format!("{}/src", dir(service));
+    let has_rpcs = !service.rpcs.is_empty();
+    let has_routes = !service.routes.is_empty();
+    let has_consumers = !service.consumers.is_empty();
+    let has_topics = !used_topics(project, service).is_empty();
+    let publishes = publishes(service);
+    let file = |path: &str, content: String| GeneratedFile::new(format!("{src}/{path}"), content);
+
     let mut files = vec![
-        GeneratedFile::new(format!("{base}/Cargo.toml"), cargo_toml(service)),
-        GeneratedFile::new(format!("{base}/src/main.rs"), main_rs(project, service)),
-        GeneratedFile::new(format!("{base}/src/ctx.rs"), ctx_rs(project, service)),
-        GeneratedFile::new(format!("{base}/src/flows.rs"), flows_rs(project, service)?),
+        GeneratedFile::new(format!("{}/Cargo.toml", dir(service)), cargo_toml(service)),
+        file("main.rs", main_rs(service, has_topics, publishes)),
     ];
-    if !service.rpcs.is_empty() {
-        files.push(GeneratedFile::new(
-            format!("{base}/src/server.rs"),
-            server_rs(service),
+
+    let mut app = vec!["bootstrap", "config", "ctx"];
+    if !service.tables.is_empty() {
+        app.push("schema");
+    }
+    files.push(file(
+        "app/mod.rs",
+        mod_rs("Configuration, shared context and start-up.", &app),
+    ));
+    if !service.tables.is_empty() {
+        files.push(file("app/schema.rs", schema_rs(service)));
+    }
+    files.push(file(
+        "app/config.rs",
+        config_rs(project, service, publishes),
+    ));
+    files.push(file("app/ctx.rs", ctx_rs(project, service)));
+    files.push(file(
+        "app/bootstrap.rs",
+        bootstrap_rs(project, service, publishes),
+    ));
+
+    let mut transport = vec![];
+    if has_rpcs {
+        transport.push("grpc");
+    }
+    if has_routes {
+        transport.push("http");
+    }
+    if has_consumers {
+        transport.push("kafka");
+    }
+    if publishes {
+        transport.push("outbox");
+    }
+    files.push(file(
+        "transport/mod.rs",
+        mod_rs(
+            "How the outside talks to the service. Each transport translates and delegates to `flows`.",
+            &transport,
+        ),
+    ));
+    if has_rpcs {
+        files.push(file("transport/grpc.rs", grpc_rs(service)));
+    }
+    if has_routes {
+        files.push(file("transport/http.rs", http_rs(service)));
+    }
+    if has_consumers {
+        files.push(file("transport/kafka.rs", kafka_rs(project, service)));
+    }
+    if publishes {
+        files.push(file("transport/outbox.rs", outbox_rs()));
+    }
+
+    let mut flows = vec![];
+    if has_routes {
+        flows.push("api");
+    }
+    if has_consumers {
+        flows.push("consumers");
+    }
+    if has_rpcs {
+        flows.push("rpc");
+    }
+    files.push(file(
+        "flows/mod.rs",
+        mod_rs(
+            "The logic of the service, drawn in the editor. Transports call into it.",
+            &flows,
+        ),
+    ));
+    if has_rpcs {
+        files.push(file("flows/rpc.rs", rpc_flows_rs(project, service)?));
+    }
+    if has_routes {
+        files.push(file("flows/api.rs", api_flows_rs(project, service)?));
+    }
+    if has_consumers {
+        files.push(file(
+            "flows/consumers.rs",
+            consumer_flows_rs(project, service)?,
         ));
     }
     Ok(files)
 }
 
+/// A `mod.rs` that only declares its submodules.
+fn mod_rs(doc: &str, modules: &[&str]) -> String {
+    let mut c = Code::new();
+    c.line(HEADER);
+    c.line(format!("//! {doc}"));
+    if !modules.is_empty() {
+        c.blank();
+    }
+    for m in modules {
+        c.line(format!("pub mod {m};"));
+    }
+    c.finish()
+}
+
 fn cargo_toml(service: &Service) -> String {
+    // The HTTP stack is only compiled by the services that have routes.
+    let http = if service.routes.is_empty() {
+        ""
+    } else {
+        "axum.workspace = true\ntower-http.workspace = true\n"
+    };
     format!(
         "# @generated by service-builder. Do not edit: changes are overwritten on export.\n\
          [package]\n\
@@ -50,9 +168,11 @@ fn cargo_toml(service: &Service) -> String {
          anyhow.workspace = true\n\
          contracts = {{ path = \"../../contracts\" }}\n\
          eda-runtime = {{ path = \"../../runtime\" }}\n\
+         sqlx.workspace = true\n\
          tokio.workspace = true\n\
          tonic.workspace = true\n\
-         tracing.workspace = true\n",
+         tracing.workspace = true\n\
+         {http}",
         crate_name(service)
     )
 }
@@ -60,7 +180,7 @@ fn cargo_toml(service: &Service) -> String {
 /// Services this one calls over gRPC, in a stable order.
 fn called_services<'a>(project: &'a Project, service: &Service) -> BTreeSet<&'a str> {
     let mut called = BTreeSet::new();
-    for step in handler_steps(service) {
+    for step in service.handler_steps() {
         step.walk(&mut |s| {
             if let Step::CallRpc {
                 service: target, ..
@@ -74,18 +194,17 @@ fn called_services<'a>(project: &'a Project, service: &Service) -> BTreeSet<&'a 
     called
 }
 
-fn handler_steps(service: &Service) -> impl Iterator<Item = &Step> {
-    service
-        .rpcs
-        .iter()
-        .flat_map(|r| &r.steps)
-        .chain(service.consumers.iter().flat_map(|c| &c.steps))
-}
-
-/// Topics this service publishes to or consumes, in project order.
+/// Topics this service produces (declared owner, or publishing) or consumes, in project order.
 fn used_topics<'a>(project: &'a Project, service: &Service) -> Vec<&'a sb_model::Topic> {
     let mut names: BTreeSet<&str> = service.consumers.iter().map(|c| c.topic.as_str()).collect();
-    for step in handler_steps(service) {
+    names.extend(
+        project
+            .topics
+            .iter()
+            .filter(|t| t.producers.contains(&service.name))
+            .map(|t| t.name.as_str()),
+    );
+    for step in service.handler_steps() {
         step.walk(&mut |s| {
             if let Step::Publish { topic, .. } = s {
                 names.insert(topic);
@@ -99,6 +218,15 @@ fn used_topics<'a>(project: &'a Project, service: &Service) -> Vec<&'a sb_model:
         .collect()
 }
 
+/// Whether any handler of the service publishes an event (so it needs an outbox and its relay).
+fn publishes(service: &Service) -> bool {
+    let mut found = false;
+    for step in service.handler_steps() {
+        step.walk(&mut |s| found |= matches!(s, Step::Publish { .. }));
+    }
+    found
+}
+
 fn group_id(service: &Service, consumer: &sb_model::Consumer) -> String {
     consumer
         .group_id
@@ -108,102 +236,245 @@ fn group_id(service: &Service, consumer: &sb_model::Consumer) -> String {
 
 // ---- main.rs ---------------------------------------------------------------------------
 
-fn main_rs(project: &Project, service: &Service) -> String {
+/// The start-up sequence. What each step does lives in `app` and `transport`.
+fn main_rs(service: &Service, has_topics: bool, publishes: bool) -> String {
     let mut c = Code::new();
     c.line(HEADER);
-    c.line("mod ctx;");
+    c.line("mod app;");
     c.line("mod flows;");
-    if !service.rpcs.is_empty() {
-        c.line("mod server;");
-    }
-    c.blank();
-    c.line("use contracts::{pb, topics};");
+    c.line("mod transport;");
     c.blank();
     c.line("#[tokio::main]");
     c.open("async fn main() -> anyhow::Result<()>");
     c.line("eda_runtime::init_tracing();");
-    c.line("let brokers = eda_runtime::env_or(\"KAFKA_BROKERS\", \"localhost:9092\");");
-
-    let topics = used_topics(project, service);
-    if !topics.is_empty() {
-        c.line("eda_runtime::ensure_topics(&brokers, &[").indent();
-        for t in &topics {
-            c.line(format!(
-                "eda_runtime::TopicSpec {{ name: topics::{}, partitions: {}, replication: {} }},",
-                topic_const(&t.name),
-                t.partitions,
-                t.replication_factor
-            ));
+    c.line("let config = app::config::Config::from_env()?;");
+    if has_topics {
+        c.line("app::bootstrap::provision_topics(&config).await?;");
+    }
+    c.line("let db = app::bootstrap::connect_database(&config).await?;");
+    c.line("let ctx = app::ctx::Ctx::new(db)?;");
+    if publishes {
+        c.line("transport::outbox::spawn_relay(&config, &ctx)?;");
+    }
+    if !service.consumers.is_empty() {
+        c.line("transport::kafka::spawn_consumers(&config, &ctx);");
+    }
+    match (service.rpcs.is_empty(), service.routes.is_empty()) {
+        (true, true) => c.line("app::bootstrap::wait_for_shutdown().await"),
+        (false, true) => c.line("transport::grpc::serve(&config, ctx).await"),
+        (true, false) => c.line("transport::http::serve(&config, ctx).await"),
+        (false, false) => {
+            c.line("tokio::try_join!(");
+            c.line("    transport::grpc::serve(&config, ctx.clone()),");
+            c.line("    transport::http::serve(&config, ctx),");
+            c.line(")?;");
+            c.line("Ok(())")
         }
-        c.dedent().line("]).await?;");
-    }
-    c.line("let ctx = ctx::Ctx::new(&brokers)?;");
-
-    for consumer in &service.consumers {
-        let Some(topic) = project.topic(&consumer.topic) else {
-            continue;
-        };
-        c.blank();
-        c.block();
-        c.line("let ctx = ctx.clone();");
-        c.line("let brokers = brokers.clone();");
-        c.open("tokio::spawn(async move");
-        c.open(format!(
-            "let result = eda_runtime::consume::<pb::{}, _, _>(&brokers, {:?}, topics::{}, move |event|",
-            topic.message,
-            group_id(service, consumer),
-            topic_const(&topic.name)
-        ));
-        c.line("let ctx = ctx.clone();");
-        c.line(format!(
-            "async move {{ flows::consumers::{}(&ctx, event).await }}",
-            consumer.name
-        ));
-        c.close_with(").await;");
-        c.open("if let Err(e) = result");
-        c.line(format!(
-            "tracing::error!(\"consumer {} stopped: {{e:#}}\");",
-            consumer.name
-        ));
-        c.close();
-        c.close_with(");");
-        c.close();
-    }
-
-    c.blank();
-    if service.rpcs.is_empty() {
-        c.line(format!(
-            "tracing::info!(\"{} running (consumers only), press Ctrl+C to stop\");",
-            service.name
-        ));
-        c.line("tokio::signal::ctrl_c().await?;");
-    } else {
-        let env = format!("{}_PORT", shouty(&service.name));
-        c.line(format!(
-            "let port = eda_runtime::env_or({env:?}, \"{}\");",
-            service.port
-        ));
-        c.line("let addr = format!(\"0.0.0.0:{port}\").parse()?;");
-        c.line(format!(
-            "tracing::info!(\"{} gRPC server listening on {{addr}}\");",
-            service.name
-        ));
-        c.line("tonic::transport::Server::builder()");
-        c.line(format!(
-            "    .add_service(pb::{}_server::{}Server::new(server::{}Service {{ ctx }}))",
-            snake(&service.name),
-            service.name,
-            service.name
-        ));
-        c.line("    .serve(addr)");
-        c.line("    .await?;");
-    }
-    c.line("Ok(())");
+    };
     c.close();
     c.finish()
 }
 
-// ---- ctx.rs ----------------------------------------------------------------------------
+// ---- app/ ------------------------------------------------------------------------------
+
+fn config_rs(project: &Project, service: &Service, publishes: bool) -> String {
+    let has_rpcs = !service.rpcs.is_empty();
+    let has_routes = !service.routes.is_empty();
+    let mut c = Code::new();
+    c.line(HEADER);
+    c.line("//! Runtime configuration, read once from the environment.");
+    c.blank();
+    if has_rpcs || has_routes || publishes {
+        c.line("use anyhow::Context;");
+        c.blank();
+    }
+    c.line("#[derive(Clone, Debug)]");
+    c.open("pub struct Config");
+    c.line("pub brokers: String,");
+    c.line("pub database_url: String,");
+    if has_rpcs {
+        c.line("pub port: u16,");
+    }
+    if has_routes {
+        c.line("pub http_port: u16,");
+        c.line("/// Origins allowed to call the HTTP API from a browser: `*` or a comma-separated list.");
+        c.line("pub cors_origins: String,");
+    }
+    if publishes {
+        c.line("/// Publish attempts before an event is parked on its dead-letter topic.");
+        c.line("pub outbox_max_attempts: u32,");
+    }
+    c.close();
+    c.blank();
+    c.open("impl Config");
+    c.open("pub fn from_env() -> anyhow::Result<Self>");
+    c.open("Ok(Self");
+    c.line("brokers: eda_runtime::env_or(\"KAFKA_BROKERS\", \"localhost:9092\"),");
+    let db_env = format!("{}_DATABASE_URL", shouty(&service.name));
+    c.line(format!(
+        "database_url: eda_runtime::env_or({db_env:?}, \"postgres://postgres:postgres@localhost:5432/{}\"),",
+        snake(&service.name)
+    ));
+    if has_rpcs {
+        let env = format!("{}_PORT", shouty(&service.name));
+        c.line(format!(
+            "port: eda_runtime::env_or({env:?}, \"{}\")",
+            service.port
+        ));
+        c.line("    .parse()");
+        c.line(format!("    .context(\"{env} must be a port number\")?,"));
+    }
+    if has_routes {
+        let env = format!("{}_HTTP_PORT", shouty(&service.name));
+        c.line(format!(
+            "http_port: eda_runtime::env_or({env:?}, \"{}\")",
+            service.http_port.unwrap_or(DEFAULT_HTTP_PORT)
+        ));
+        c.line("    .parse()");
+        c.line(format!("    .context(\"{env} must be a port number\")?,"));
+        c.line("cors_origins: eda_runtime::env_or(\"CORS_ORIGINS\", \"*\"),");
+    }
+    if publishes {
+        c.line(format!(
+            "outbox_max_attempts: eda_runtime::env_or(\"OUTBOX_MAX_ATTEMPTS\", \"{}\")",
+            project.outbox.max_attempts
+        ));
+        c.line("    .parse()");
+        c.line("    .context(\"OUTBOX_MAX_ATTEMPTS must be a number\")?,");
+    }
+    c.close_with(")");
+    c.close();
+    c.close();
+    c.finish()
+}
+
+fn bootstrap_rs(project: &Project, service: &Service, publishes: bool) -> String {
+    let topics = used_topics(project, service);
+    let mut c = Code::new();
+    c.line(HEADER);
+    c.line("//! Start-up steps, kept out of `main` so it only reads as a sequence.");
+    c.blank();
+    if !topics.is_empty() {
+        c.line("use contracts::topics;");
+        c.blank();
+    }
+    c.line("use crate::app::config::Config;");
+    if !topics.is_empty() {
+        c.blank();
+        c.line("/// Creates the topics this service publishes to or consumes, and their dead-letter topics.");
+        c.open("pub async fn provision_topics(config: &Config) -> anyhow::Result<()>");
+        c.line("eda_runtime::ensure_topics(&config.brokers, &[")
+            .indent();
+        for t in &topics {
+            for suffix in ["", "_DLQ"] {
+                c.line(format!(
+                    "eda_runtime::TopicSpec {{ name: topics::{}{suffix}.to_string(), partitions: {}, replication: {} }},",
+                    topic_const(&t.name),
+                    t.partitions,
+                    t.replication_factor
+                ));
+            }
+        }
+        c.dedent().line("]).await");
+        c.close();
+    }
+    c.blank();
+    c.line(match (publishes, service.tables.is_empty()) {
+        (true, false) => {
+            "/// Connects to the service's own database, creates its tables and the outbox table."
+        }
+        (true, true) => "/// Connects to the service's own database and creates the outbox table.",
+        (false, false) => "/// Connects to the service's own database and creates its tables.",
+        (false, true) => "/// Connects to the service's own database.",
+    });
+    c.open("pub async fn connect_database(config: &Config) -> anyhow::Result<sqlx::PgPool>");
+    c.line("let db = eda_runtime::connect_database(&config.database_url).await?;");
+    if publishes {
+        c.line("eda_runtime::outbox::migrate(&db).await?;");
+    }
+    if !service.tables.is_empty() {
+        c.line("crate::app::schema::apply(&db).await?;");
+    }
+    c.line("Ok(db)");
+    c.close();
+    if service.rpcs.is_empty() && service.routes.is_empty() {
+        c.blank();
+        c.line("/// Keeps the process alive until Ctrl+C: nothing here serves requests.");
+        c.open("pub async fn wait_for_shutdown() -> anyhow::Result<()>");
+        c.line(format!(
+            "tracing::info!(\"{} running{}, press Ctrl+C to stop\");",
+            service.name,
+            if service.consumers.is_empty() {
+                ""
+            } else {
+                " (consumers only)"
+            }
+        ));
+        c.line("tokio::signal::ctrl_c().await?;");
+        c.line("Ok(())");
+        c.close();
+    }
+    c.finish()
+}
+
+/// The tables designed in the editor, as idempotent statements: the table with all its columns, then
+/// every column again with `ADD COLUMN IF NOT EXISTS`, so that a column added to the design reaches an
+/// existing database.
+fn schema_rs(service: &Service) -> String {
+    let mut c = Code::new();
+    c.line(HEADER);
+    c.line("//! The tables of this service, as designed in the editor. Applied at start-up, additive only.");
+    c.blank();
+    c.line("const STATEMENTS: &[&str] = &[");
+    c.indent();
+    let definition = |col: &Column| {
+        let mut d = format!("{} {}", quoted(&col.name), col.ty.sql());
+        if !col.nullable {
+            d.push_str(" NOT NULL");
+        }
+        if let Some(default) = col.default.as_deref().filter(|d| !d.trim().is_empty()) {
+            d.push_str(&format!(" DEFAULT {}", default.trim()));
+        }
+        d
+    };
+    for t in &service.tables {
+        let mut parts: Vec<String> = t.columns.iter().map(&definition).collect();
+        let pk: Vec<String> = t
+            .columns
+            .iter()
+            .filter(|col| col.primary_key)
+            .map(|col| quoted(&col.name))
+            .collect();
+        if !pk.is_empty() {
+            parts.push(format!("PRIMARY KEY ({})", pk.join(", ")));
+        }
+        c.line(format!(
+            "{:?},",
+            format!(
+                "CREATE TABLE IF NOT EXISTS {} ({})",
+                quoted(&t.name),
+                parts.join(", ")
+            )
+        ));
+        for col in t.columns.iter().filter(|col| !col.primary_key) {
+            c.line(format!(
+                "{:?},",
+                format!(
+                    "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {}",
+                    quoted(&t.name),
+                    definition(col)
+                )
+            ));
+        }
+    }
+    c.dedent();
+    c.line("];");
+    c.blank();
+    c.open("pub async fn apply(db: &sqlx::PgPool) -> anyhow::Result<()>");
+    c.line("eda_runtime::db::apply_schema(db, STATEMENTS).await");
+    c.close();
+    c.finish()
+}
 
 fn ctx_rs(project: &Project, service: &Service) -> String {
     let called = called_services(project, service);
@@ -211,18 +482,14 @@ fn ctx_rs(project: &Project, service: &Service) -> String {
     c.line(HEADER);
     c.line("#![allow(dead_code)]");
     c.blank();
-    c.line("use std::sync::Arc;");
-    c.blank();
     if !called.is_empty() {
         c.line("use contracts::pb;");
         c.blank();
     }
-    c.line(
-        "/// Everything a flow can use: the Kafka producer and the gRPC clients of other services.",
-    );
+    c.line("/// Everything a flow can use: the service's database and the gRPC clients of other services.");
     c.line("#[derive(Clone)]");
     c.open("pub struct Ctx");
-    c.line("pub producer: Arc<eda_runtime::Producer>,");
+    c.line("pub db: sqlx::PgPool,");
     for name in &called {
         c.line(format!(
             "pub {}: pb::{}_client::{name}Client<tonic::transport::Channel>,",
@@ -233,9 +500,9 @@ fn ctx_rs(project: &Project, service: &Service) -> String {
     c.close();
     c.blank();
     c.open("impl Ctx");
-    c.open("pub fn new(brokers: &str) -> anyhow::Result<Self>");
+    c.open("pub fn new(db: sqlx::PgPool) -> anyhow::Result<Self>");
     c.open("Ok(Self");
-    c.line("producer: Arc::new(eda_runtime::Producer::new(brokers)?),");
+    c.line("db,");
     for name in &called {
         let target = project.service(name).expect("validated");
         let env = format!("{}_URL", shouty(name));
@@ -256,19 +523,42 @@ fn ctx_rs(project: &Project, service: &Service) -> String {
     c.finish()
 }
 
-// ---- server.rs -------------------------------------------------------------------------
+// ---- transport/ ------------------------------------------------------------------------
 
-fn server_rs(service: &Service) -> String {
+/// The tonic server: translates requests and errors, then calls `flows::rpc`.
+fn grpc_rs(service: &Service) -> String {
     let mut c = Code::new();
     c.line(HEADER);
     c.line("use contracts::pb;");
     c.line("use tonic::{Request, Response, Status};");
     c.blank();
-    c.line("use crate::{ctx::Ctx, flows};");
+    c.line("use crate::{");
+    c.line("    app::{config::Config, ctx::Ctx},");
+    c.line("    flows,");
+    c.line("};");
+    c.blank();
+    c.line("/// Serves the gRPC API until the process stops.");
+    c.open("pub async fn serve(config: &Config, ctx: Ctx) -> anyhow::Result<()>");
+    c.line("let addr = format!(\"0.0.0.0:{}\", config.port).parse()?;");
+    c.line(format!(
+        "tracing::info!(\"{} gRPC server listening on {{addr}}\");",
+        service.name
+    ));
+    c.line("tonic::transport::Server::builder()");
+    c.line(format!(
+        "    .add_service(pb::{}_server::{}Server::new({}Service {{ ctx }}))",
+        snake(&service.name),
+        service.name,
+        service.name
+    ));
+    c.line("    .serve(addr)");
+    c.line("    .await?;");
+    c.line("Ok(())");
+    c.close();
     c.blank();
     c.line("#[derive(Clone)]");
-    c.line(format!("pub struct {}Service {{", service.name));
-    c.line("    pub ctx: Ctx,");
+    c.line(format!("struct {}Service {{", service.name));
+    c.line("    ctx: Ctx,");
     c.line("}");
     c.blank();
     c.line("#[tonic::async_trait]");
@@ -304,60 +594,351 @@ fn server_rs(service: &Service) -> String {
     c.finish()
 }
 
-// ---- flows.rs --------------------------------------------------------------------------
-
-fn flows_rs(project: &Project, service: &Service) -> Result<String, CodegenError> {
+/// The Kafka subscriptions: which topic, which group, which message, which flow.
+fn kafka_rs(project: &Project, service: &Service) -> String {
     let mut c = Code::new();
     c.line(HEADER);
-    c.line("//! One function per RPC and per consumer, built from the steps drawn in the editor.");
-    c.line("#![allow(unused, unreachable_code, clippy::all)]");
-    c.blank();
     c.line("use contracts::{pb, topics};");
     c.blank();
-    c.line("use crate::ctx::Ctx;");
-
-    if !service.rpcs.is_empty() {
-        c.blank();
-        c.open("pub mod rpc");
-        c.line("use super::*;");
-        for r in &service.rpcs {
+    c.line("use crate::{");
+    c.line("    app::{config::Config, ctx::Ctx},");
+    c.line("    flows,");
+    c.line("};");
+    c.blank();
+    c.line("/// Runs one background task per consumer; a failing consumer is logged, not fatal.");
+    c.open("pub fn spawn_consumers(config: &Config, ctx: &Ctx)");
+    let mut first = true;
+    for consumer in &service.consumers {
+        let Some(topic) = project.topic(&consumer.topic) else {
+            continue;
+        };
+        if !first {
             c.blank();
-            c.open(format!(
-                "pub async fn {}(ctx: &Ctx, input: pb::{}) -> anyhow::Result<pb::{}>",
-                snake(&r.name),
-                r.request,
-                r.response
-            ));
-            let mut scope = Scope::with_input(&r.request);
-            steps(&mut c, project, &mut scope, &r.steps, Some(&r.response))?;
-            c.line(format!("Ok(pb::{}::default())", r.response));
-            c.close();
         }
+        first = false;
+        c.line(format!(
+            "// `{}` ({}) -> flows::consumers::{}",
+            topic.name, topic.message, consumer.name
+        ));
+        c.block();
+        c.line("let ctx = ctx.clone();");
+        c.line("let brokers = config.brokers.clone();");
+        c.open("tokio::spawn(async move");
+        c.open(format!(
+            "let result = eda_runtime::consume::<pb::{}, _, _>(&brokers, {:?}, topics::{}, move |event|",
+            topic.message,
+            group_id(service, consumer),
+            topic_const(&topic.name)
+        ));
+        c.line("let ctx = ctx.clone();");
+        c.line(format!(
+            "async move {{ flows::consumers::{}(&ctx, event).await }}",
+            consumer.name
+        ));
+        c.close_with(").await;");
+        c.open("if let Err(e) = result");
+        c.line(format!(
+            "tracing::error!(\"consumer {} stopped: {{e:#}}\");",
+            consumer.name
+        ));
+        c.close();
+        c.close_with(");");
+        c.close();
+    }
+    c.close();
+    c.finish()
+}
+
+/// The outbound side of Kafka: relays the events the flows queued in the outbox table.
+fn outbox_rs() -> String {
+    let mut c = Code::new();
+    c.line(HEADER);
+    c.line("//! Publishes the outbox of this service to Kafka (see `eda_runtime::outbox`).");
+    c.blank();
+    c.line("use crate::app::{config::Config, ctx::Ctx};");
+    c.blank();
+    c.line(
+        "/// Starts the relay: events are published as soon as the flow that queued them commits.",
+    );
+    c.open("pub fn spawn_relay(config: &Config, ctx: &Ctx) -> anyhow::Result<()>");
+    c.line("let settings = eda_runtime::outbox::Settings::new(config.outbox_max_attempts);");
+    c.line(
+        "let relay = eda_runtime::outbox::Relay::new(ctx.db.clone(), &config.brokers, settings)?;",
+    );
+    c.line("tokio::spawn(relay.run());");
+    c.line("Ok(())");
+    c.close();
+    c.finish()
+}
+
+/// The HTTP API for the front: one handler per route, translating the request into the
+/// schema of the route and the answer (or the error) into JSON, then delegating to `flows::api`.
+fn http_rs(service: &Service) -> String {
+    // Routes sharing a path are served by one `MethodRouter`, in order of appearance.
+    let mut paths: Vec<(&str, Vec<&sb_model::Route>)> = vec![];
+    for r in &service.routes {
+        match paths.iter_mut().find(|(p, _)| *p == r.path) {
+            Some((_, list)) => list.push(r),
+            None => paths.push((&r.path, vec![r])),
+        }
+    }
+    let verb = |m: HttpMethod| m.as_str().to_lowercase();
+    // Only the first method of a path is a free function; the others chain on the `MethodRouter`.
+    let mut verbs: Vec<String> = paths.iter().map(|(_, rs)| verb(rs[0].method)).collect();
+    verbs.sort();
+    verbs.dedup();
+    let any_params = service
+        .routes
+        .iter()
+        .any(|r| route_params(&r.path).is_ok_and(|p| !p.is_empty()));
+
+    let mut c = Code::new();
+    c.line(HEADER);
+    c.line("//! HTTP API of the service, for the front (JSON). Each handler translates and delegates to `flows::api`.");
+    c.blank();
+    c.line("use std::collections::HashMap;");
+    c.blank();
+    c.line("use axum::{");
+    c.line("    Json, Router,");
+    c.line(format!(
+        "    extract::{{{}State}},",
+        if any_params { "Path, " } else { "" }.to_owned()
+            + if service.routes.iter().any(|r| !r.method.has_body()) {
+                "Query, "
+            } else {
+                ""
+            }
+    ));
+    c.line("    http::{HeaderValue, StatusCode},");
+    c.line("    response::{IntoResponse, Response},");
+    c.line(format!("    routing::{{{}}},", verbs.join(", ")));
+    c.line("};");
+    c.line("use contracts::pb;");
+    c.line("use tower_http::cors::{Any, CorsLayer};");
+    c.blank();
+    c.line("use crate::{");
+    c.line("    app::{config::Config, ctx::Ctx},");
+    c.line("    flows,");
+    c.line("};");
+    c.blank();
+
+    c.line("/// Serves the HTTP API until the process stops.");
+    c.open("pub async fn serve(config: &Config, ctx: Ctx) -> anyhow::Result<()>");
+    c.line("let app = Router::new()");
+    for (path, routes) in &paths {
+        let mut chain = String::new();
+        for (i, r) in routes.iter().enumerate() {
+            if i == 0 {
+                chain.push_str(&format!("{}(handle_{})", verb(r.method), r.name));
+            } else {
+                chain.push_str(&format!(".{}(handle_{})", verb(r.method), r.name));
+            }
+        }
+        c.line(format!("    .route({path:?}, {chain})"));
+    }
+    c.line("    .layer(cors(config))");
+    c.line("    .with_state(ctx);");
+    c.line("let listener = tokio::net::TcpListener::bind((\"0.0.0.0\", config.http_port)).await?;");
+    c.line(format!(
+        "tracing::info!(\"{} HTTP API listening on {{}}\", listener.local_addr()?);",
+        service.name
+    ));
+    c.line("axum::serve(listener, app).await?;");
+    c.line("Ok(())");
+    c.close();
+    c.blank();
+
+    c.open("fn cors(config: &Config) -> CorsLayer");
+    c.line("let layer = CorsLayer::new().allow_methods(Any).allow_headers(Any);");
+    c.open("if config.cors_origins.trim() == \"*\"");
+    c.line("layer.allow_origin(Any)");
+    c.close_open("else");
+    c.line("let origins: Vec<HeaderValue> = config");
+    c.line("    .cors_origins");
+    c.line("    .split(',')");
+    c.line("    .filter_map(|origin| origin.trim().parse().ok())");
+    c.line("    .collect();");
+    c.line("layer.allow_origin(origins)");
+    c.close();
+    c.close();
+
+    for r in &service.routes {
+        let params = route_params(&r.path).unwrap_or_default();
+        let status = match r.status {
+            201 => "StatusCode::CREATED",
+            202 => "StatusCode::ACCEPTED",
+            _ => "StatusCode::OK",
+        };
+        let m = if params.is_empty() { "" } else { "mut " };
+        c.blank();
+        c.line(format!("/// `{} {}`", r.method.as_str(), r.path));
+        c.line(format!("async fn handle_{}(", r.name));
+        c.indent();
+        c.line("State(ctx): State<Ctx>,");
+        if !params.is_empty() {
+            c.line("Path(path): Path<HashMap<String, String>>,");
+        }
+        c.line(if r.method.has_body() {
+            format!("Json({m}input): Json<pb::{}>,", r.request)
+        } else {
+            format!("Query({m}input): Query<pb::{}>,", r.request)
+        });
+        c.dedent();
+        c.open(format!(
+            ") -> Result<(StatusCode, Json<pb::{}>), ApiError>",
+            r.response
+        ));
+        for param in &params {
+            c.line(format!("input.{param} = param(&path, {param:?})?;"));
+        }
+        c.line(format!("flows::api::{}(&ctx, input)", r.name));
+        c.line("    .await");
+        c.line(format!("    .map(|body| ({status}, Json(body)))"));
+        c.line("    .map_err(ApiError::from)");
         c.close();
     }
 
-    if !service.consumers.is_empty() {
+    if any_params {
         c.blank();
-        c.open("pub mod consumers");
-        c.line("use super::*;");
-        for cons in &service.consumers {
-            let topic = project
-                .topic(&cons.topic)
-                .ok_or_else(|| CodegenError::Internal(format!("unknown topic `{}`", cons.topic)))?;
-            c.blank();
-            c.line(format!(
-                "/// Consumes `{}` ({}).",
-                topic.name, topic.message
-            ));
-            c.open(format!(
-                "pub async fn {}(ctx: &Ctx, input: pb::{}) -> anyhow::Result<()>",
-                cons.name, topic.message
-            ));
-            let mut scope = Scope::with_input(&topic.message);
-            steps(&mut c, project, &mut scope, &cons.steps, None)?;
-            c.line("Ok(())");
-            c.close();
-        }
+        c.line("/// Reads a path parameter into the type of the schema field it fills.");
+        c.open("fn param<T: std::str::FromStr>(path: &HashMap<String, String>, name: &str) -> Result<T, ApiError>");
+        c.line("path.get(name)");
+        c.line("    .and_then(|value| value.parse().ok())");
+        c.line("    .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, format!(\"invalid path parameter `{name}`\")))");
+        c.close();
+    }
+
+    c.blank();
+    c.line("/// Errors are answered as `{ \"error\": \"...\" }`. A flow picks the status with `eda_runtime::http::HttpError`;");
+    c.line("/// anything else is an internal error whose details stay in the logs.");
+    c.open("struct ApiError");
+    c.line("status: StatusCode,");
+    c.line("message: String,");
+    c.close();
+    c.blank();
+    c.open("impl ApiError");
+    c.open("fn new(status: StatusCode, message: impl Into<String>) -> Self");
+    c.line("Self { status, message: message.into() }");
+    c.close();
+    c.close();
+    c.blank();
+    c.open("impl From<anyhow::Error> for ApiError");
+    c.open("fn from(error: anyhow::Error) -> Self");
+    c.open("match error.downcast_ref::<eda_runtime::http::HttpError>()");
+    c.line("Some(e) => Self::new(StatusCode::from_u16(e.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), e.message.clone()),");
+    c.open("None =>");
+    c.line("tracing::error!(\"HTTP handler failed: {error:#}\");");
+    c.line("Self::new(StatusCode::INTERNAL_SERVER_ERROR, \"internal error\")");
+    c.close();
+    c.close();
+    c.close();
+    c.close();
+    c.blank();
+    c.open("impl IntoResponse for ApiError");
+    c.open("fn into_response(self) -> Response");
+    c.line("(self.status, Json(HashMap::from([(\"error\", self.message)]))).into_response()");
+    c.close();
+    c.close();
+    c.finish()
+}
+
+// ---- flows/ ----------------------------------------------------------------------------
+
+fn flows_header(doc: &str) -> Code {
+    let mut c = Code::new();
+    c.line(HEADER);
+    c.line(format!("//! {doc}"));
+    c.line("#![allow(unused, unreachable_code, clippy::all)]");
+    c.blank();
+    c.line("use contracts::{pb, topics};");
+    c.line("use sqlx::Row as _;");
+    c.blank();
+    c.line("use crate::app::ctx::Ctx;");
+    c
+}
+
+/// Every run is one transaction: what a flow writes through `tx` and the events it publishes
+/// (queued in the outbox) commit together, or not at all.
+fn begin(c: &mut Code) {
+    c.line("// One transaction per run: state written through `tx` and the events published below commit together.");
+    c.line("let mut tx = ctx.db.begin().await?;");
+}
+
+fn rpc_flows_rs(project: &Project, service: &Service) -> Result<String, CodegenError> {
+    let mut c = flows_header("One function per RPC, built from the steps drawn in the editor.");
+    for r in &service.rpcs {
+        c.blank();
+        c.open(format!(
+            "pub async fn {}(ctx: &Ctx, input: pb::{}) -> anyhow::Result<pb::{}>",
+            snake(&r.name),
+            r.request,
+            r.response
+        ));
+        begin(&mut c);
+        let mut scope = Scope::with_input(&r.request);
+        steps(
+            &mut c,
+            project,
+            service,
+            &mut scope,
+            &r.steps,
+            Some(&r.response),
+        )?;
+        c.line("tx.commit().await?;");
+        c.line(format!("Ok(pb::{}::default())", r.response));
+        c.close();
+    }
+    Ok(c.finish())
+}
+
+fn api_flows_rs(project: &Project, service: &Service) -> Result<String, CodegenError> {
+    let mut c =
+        flows_header("One function per HTTP route, built from the steps drawn in the editor.");
+    for r in &service.routes {
+        c.blank();
+        c.line(format!("/// `{} {}`", r.method.as_str(), r.path));
+        c.open(format!(
+            "pub async fn {}(ctx: &Ctx, input: pb::{}) -> anyhow::Result<pb::{}>",
+            r.name, r.request, r.response
+        ));
+        begin(&mut c);
+        let mut scope = Scope::with_input(&r.request);
+        steps(
+            &mut c,
+            project,
+            service,
+            &mut scope,
+            &r.steps,
+            Some(&r.response),
+        )?;
+        c.line("tx.commit().await?;");
+        c.line(format!("Ok(pb::{}::default())", r.response));
+        c.close();
+    }
+    Ok(c.finish())
+}
+
+fn consumer_flows_rs(project: &Project, service: &Service) -> Result<String, CodegenError> {
+    let mut c =
+        flows_header("One function per consumer, built from the steps drawn in the editor.");
+    for cons in &service.consumers {
+        let topic = project
+            .topic(&cons.topic)
+            .ok_or_else(|| CodegenError::Internal(format!("unknown topic `{}`", cons.topic)))?;
+        c.blank();
+        c.line(format!(
+            "/// Consumes `{}` ({}).",
+            topic.name, topic.message
+        ));
+        c.open(format!(
+            "pub async fn {}(ctx: &Ctx, input: pb::{}) -> anyhow::Result<()>",
+            cons.name, topic.message
+        ));
+        begin(&mut c);
+        let mut scope = Scope::with_input(&topic.message);
+        steps(&mut c, project, service, &mut scope, &cons.steps, None)?;
+        c.line("tx.commit().await?;");
+        c.line("Ok(())");
         c.close();
     }
     Ok(c.finish())
@@ -366,6 +947,7 @@ fn flows_rs(project: &Project, service: &Service) -> Result<String, CodegenError
 fn steps(
     c: &mut Code,
     project: &Project,
+    service: &Service,
     scope: &mut Scope,
     list: &[Step],
     response: Option<&str>,
@@ -386,7 +968,7 @@ fn steps(
                 let value = lower(project, scope, value, &ty)?;
                 c.line(format!(
                     "let {name}: {} = {value};",
-                    rust_scalar(value_type)
+                    rust_let_type(value_type)
                 ));
                 scope.bind(name.clone(), ty);
             }
@@ -397,21 +979,17 @@ fn steps(
                 let literal = struct_literal(project, scope, &t.message, payload)?;
                 c.block();
                 c.line(format!("let event = {literal};"));
-                match &t.key_field {
+                let key = match &t.key_field {
                     Some(key) => {
                         c.line(format!("let key = event.{key}.to_string();"));
-                        c.line(format!(
-                            "ctx.producer.publish(topics::{}, Some(&key), &event).await?;",
-                            topic_const(topic)
-                        ));
+                        "Some(&key)"
                     }
-                    None => {
-                        c.line(format!(
-                            "ctx.producer.publish(topics::{}, None, &event).await?;",
-                            topic_const(topic)
-                        ));
-                    }
-                }
+                    None => "None",
+                };
+                c.line(format!(
+                    "eda_runtime::outbox::enqueue(&mut tx, topics::{}, {key}, &event).await?;",
+                    topic_const(topic)
+                ));
                 c.close();
             }
             Step::CallRpc {
@@ -450,10 +1028,10 @@ fn steps(
                 ..
             } => {
                 c.open(format!("if {}", condition_code(project, scope, condition)?));
-                steps(c, project, &mut scope.clone(), then, response)?;
+                steps(c, project, service, &mut scope.clone(), then, response)?;
                 if !otherwise.is_empty() {
                     c.close_open("else");
-                    steps(c, project, &mut scope.clone(), otherwise, response)?;
+                    steps(c, project, service, &mut scope.clone(), otherwise, response)?;
                 }
                 c.close();
             }
@@ -462,10 +1040,273 @@ fn steps(
                     CodegenError::Internal("Respond used outside of an RPC handler".into())
                 })?;
                 let literal = struct_literal(project, scope, response, fields)?;
-                c.line(format!("return Ok({literal});"));
+                c.line(format!("let reply = {literal};"));
+                c.line("tx.commit().await?;");
+                c.line("return Ok(reply);");
             }
+            Step::Sql { .. } => sql_step(c, project, service, scope, step)?,
             Step::Code { code, .. } => {
                 c.line(code.trim_end());
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---- SQL step --------------------------------------------------------------------------
+
+fn quoted(ident: &str) -> String {
+    format!("\"{ident}\"")
+}
+
+/// Rust type of a column value, as read by `Row::try_get`.
+fn column_rust(col: &Column) -> String {
+    let base = match col.ty.field_type() {
+        FieldType::Bool => "bool",
+        FieldType::Int32 => "i32",
+        FieldType::Int64 => "i64",
+        FieldType::Float => "f32",
+        FieldType::Double => "f64",
+        _ => "String",
+    };
+    if col.nullable {
+        format!("Option<{base}>")
+    } else {
+        base.to_string()
+    }
+}
+
+/// What a flow sees for a column (nullable columns are optional).
+fn column_type_ref(col: &Column) -> TypeRef {
+    let mut t = TypeRef::scalar(col.ty.field_type());
+    t.optional = col.nullable;
+    t
+}
+
+/// The placeholder of the n-th parameter, cast back to the database type of a text-cast column.
+fn placeholder(n: usize, col: &Column) -> String {
+    if col.ty.is_text_cast() {
+        format!("${n}::{}", col.ty.sql().to_lowercase())
+    } else {
+        format!("${n}")
+    }
+}
+
+fn sql_step(
+    c: &mut Code,
+    project: &Project,
+    service: &Service,
+    scope: &mut Scope,
+    step: &Step,
+) -> Result<(), CodegenError> {
+    let Step::Sql {
+        id,
+        op,
+        table,
+        bind,
+        columns,
+        many,
+        into,
+        conditions,
+        values,
+        order_by,
+        descending,
+        limit,
+    } = step
+    else {
+        return Ok(());
+    };
+    let t = service
+        .table(table)
+        .ok_or_else(|| CodegenError::Internal(format!("unknown table `{table}`")))?;
+    let col = |name: &str| {
+        t.column(name).ok_or_else(|| {
+            CodegenError::Internal(format!("table `{table}` has no column `{name}`"))
+        })
+    };
+
+    // Parameters, in the order of the placeholders: the values written, then the WHERE.
+    let mut binds: Vec<String> = Vec::new();
+    let mut set_sql = Vec::new();
+    for a in values {
+        let column = col(&a.field)?;
+        binds.push(lower(project, scope, &a.value, &column_type_ref(column))?);
+        set_sql.push((quoted(&column.name), placeholder(binds.len(), column)));
+    }
+    let mut where_sql = Vec::new();
+    for cond in conditions {
+        let column = col(&cond.column)?;
+        binds.push(lower(
+            project,
+            scope,
+            &cond.value,
+            &column_type_ref(column),
+        )?);
+        where_sql.push(format!(
+            "{} {} {}",
+            quoted(&column.name),
+            cond.sql_op(),
+            placeholder(binds.len(), column)
+        ));
+    }
+    let where_clause = if where_sql.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_sql.join(" AND "))
+    };
+
+    let query = |sql: &str| -> String {
+        let mut q = format!("sqlx::query({sql:?})");
+        for b in &binds {
+            q.push_str(&format!(".bind({b})"));
+        }
+        q
+    };
+
+    match op {
+        SqlOp::Insert => {
+            let names: Vec<_> = set_sql.iter().map(|(n, _)| n.as_str()).collect();
+            let params: Vec<_> = set_sql.iter().map(|(_, p)| p.as_str()).collect();
+            let sql = format!(
+                "INSERT INTO {} ({}) VALUES ({})",
+                quoted(table),
+                names.join(", "),
+                params.join(", ")
+            );
+            c.line(format!("{}.execute(&mut *tx).await?;", query(&sql)));
+        }
+        SqlOp::Update => {
+            let sets: Vec<_> = set_sql.iter().map(|(n, p)| format!("{n} = {p}")).collect();
+            let sql = format!(
+                "UPDATE {} SET {}{where_clause}",
+                quoted(table),
+                sets.join(", ")
+            );
+            c.line(format!("{}.execute(&mut *tx).await?;", query(&sql)));
+        }
+        SqlOp::Delete => {
+            let sql = format!("DELETE FROM {}{where_clause}", quoted(table));
+            c.line(format!("{}.execute(&mut *tx).await?;", query(&sql)));
+        }
+        SqlOp::Select => {
+            let var = bind
+                .as_deref()
+                .ok_or_else(|| CodegenError::Internal("a SQL select needs a variable".into()))?;
+            let selected: Vec<&Column> =
+                columns.iter().map(|n| col(n)).collect::<Result<_, _>>()?;
+            let exprs: Vec<String> = selected
+                .iter()
+                .map(|cl| {
+                    let name = quoted(&cl.name);
+                    match cl.ty {
+                        // ISO 8601 / RFC 3339, in UTC, whatever the session time zone.
+                        ColumnType::Timestamp => format!(
+                            "to_char({name} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS {name}"
+                        ),
+                        ColumnType::Uuid => format!("{name}::text AS {name}"),
+                        _ => name,
+                    }
+                })
+                .collect();
+            let mut sql = format!(
+                "SELECT {} FROM {}{where_clause}",
+                exprs.join(", "),
+                quoted(table)
+            );
+            if let Some(o) = order_by {
+                sql.push_str(&format!(
+                    " ORDER BY {}{}",
+                    quoted(&col(o)?.name),
+                    if *descending { " DESC" } else { "" }
+                ));
+            }
+            match (many, limit) {
+                (true, Some(n)) => sql.push_str(&format!(" LIMIT {n}")),
+                (false, _) => sql.push_str(" LIMIT 1"),
+                _ => {}
+            }
+            let fill = |target: &str, fields: Vec<&str>| {
+                let mut lit = format!("{target} {{\n");
+                for f in fields {
+                    lit.push_str(&format!("    {f}: row.try_get({f:?})?,\n"));
+                }
+                lit
+            };
+            match (into, many) {
+                (Some(schema), true) => {
+                    let ty = format!("pb::{schema}");
+                    let msg = project.message(schema).ok_or_else(|| {
+                        CodegenError::Internal(format!("unknown message `{schema}`"))
+                    })?;
+                    let lit = fill(&ty, msg.fields.iter().map(|f| f.name.as_str()).collect());
+                    c.line(format!("let {var}: Vec<{ty}> = {}", query(&sql)));
+                    c.line("    .fetch_all(&mut *tx)");
+                    c.line("    .await?");
+                    c.line("    .iter()");
+                    c.line(format!("    .map(|row| -> anyhow::Result<{ty}> {{"));
+                    c.line(format!(
+                        "        Ok({lit}        ..Default::default()\n    }})"
+                    ));
+                    c.line("    })");
+                    c.line("    .collect::<anyhow::Result<Vec<_>>>()?;");
+                    scope.bind(
+                        var,
+                        TypeRef {
+                            repeated: true,
+                            ..TypeRef::message(schema)
+                        },
+                    );
+                }
+                (_, true) => {
+                    return Err(CodegenError::Internal(
+                        "a list of rows needs a schema to convert them into".into(),
+                    ));
+                }
+                (found, false) => {
+                    let (ty, lit, bound) = match found {
+                        Some(schema) => {
+                            let msg = project.message(schema).ok_or_else(|| {
+                                CodegenError::Internal(format!("unknown message `{schema}`"))
+                            })?;
+                            let ty = format!("pb::{schema}");
+                            let lit =
+                                fill(&ty, msg.fields.iter().map(|f| f.name.as_str()).collect());
+                            (
+                                ty,
+                                format!("{lit}    ..Default::default()\n}}"),
+                                TypeRef::message(schema),
+                            )
+                        }
+                        None => {
+                            let name = sql_row_name(table, id);
+                            let lit =
+                                fill(&name, selected.iter().map(|cl| cl.name.as_str()).collect());
+                            (
+                                name,
+                                format!("{lit}}}"),
+                                TypeRef::message(sql_row_name(table, id)),
+                            )
+                        }
+                    };
+                    c.open(format!("let {var} = "));
+                    if into.is_none() {
+                        // The row is a struct of its own, local to the step.
+                        c.line(format!("struct {ty} {{"));
+                        for cl in &selected {
+                            c.line(format!("    {}: {},", cl.name, column_rust(cl)));
+                        }
+                        c.line("}");
+                    }
+                    c.line(format!("let row = {}", query(&sql)));
+                    c.line("    .fetch_optional(&mut *tx)");
+                    c.line("    .await?");
+                    c.line(format!(
+                        "    .ok_or_else(|| eda_runtime::http::HttpError::not_found(\"{table}: no row matches\"))?;"
+                    ));
+                    c.line(lit);
+                    c.close_with(";");
+                    scope.bind(var, bound);
+                }
             }
         }
     }
@@ -482,6 +1323,15 @@ fn describe(step: &Step) -> String {
         } => format!("call {service}.{method}"),
         Step::Branch { .. } => "branch".into(),
         Step::Respond { .. } => "respond".into(),
+        Step::Sql { op, table, .. } => format!(
+            "sql {} {table}",
+            match op {
+                SqlOp::Select => "select from",
+                SqlOp::Insert => "insert into",
+                SqlOp::Update => "update",
+                SqlOp::Delete => "delete from",
+            }
+        ),
         Step::Code { .. } => "custom code".into(),
     }
 }

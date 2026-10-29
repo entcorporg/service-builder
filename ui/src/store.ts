@@ -3,12 +3,18 @@ import { immer } from 'zustand/middleware/immer'
 import type { Selection } from './model'
 import type { Analysis, GeneratedFile, Project } from './types'
 
-export type View = 'architecture' | 'code'
+export type View = 'architecture' | 'tables' | 'code'
 
 export interface Notice {
   kind: 'info' | 'error'
   text: string
 }
+
+export type UpdateStatus =
+  | { phase: 'idle' }
+  | { phase: 'checking' }
+  | { phase: 'available'; version: string; notes: string | null }
+  | { phase: 'installing'; percent: number | null }
 
 interface AppState {
   project: Project
@@ -23,6 +29,7 @@ interface AppState {
   activeFile: string | null
   problemsOpen: boolean
   notice: Notice | null
+  update: UpdateStatus
 
   edit: (fn: (draft: Project) => void) => void
   load: (project: Project, filePath: string | null, dirty?: boolean) => void
@@ -33,12 +40,14 @@ interface AppState {
   toggleProblems: () => void
   markSaved: (filePath: string) => void
   notify: (notice: Notice | null) => void
+  setUpdate: (update: UpdateStatus) => void
 }
 
 const emptyProject: Project = {
-  schemaVersion: 1,
+  schemaVersion: 3,
   name: 'Nouveau projet',
   broker: { bootstrapServers: 'localhost:9092' },
+  outbox: { maxAttempts: 5 },
   messages: [],
   topics: [],
   services: [],
@@ -57,6 +66,7 @@ export const useStore = create<AppState>()(
     activeFile: null,
     problemsOpen: true,
     notice: null,
+    update: { phase: 'idle' },
 
     edit: (fn) =>
       set((s) => {
@@ -87,7 +97,7 @@ export const useStore = create<AppState>()(
           s.files = analysis.files
           s.filesStale = false
           if (!s.activeFile || !analysis.files.some((f) => f.path === s.activeFile)) {
-            s.activeFile = analysis.files.find((f) => f.path.endsWith('flows.rs'))?.path ?? analysis.files[0]!.path
+            s.activeFile = analysis.files.find((f) => /\/flows\/(?!mod\.rs)/.test(f.path))?.path ?? analysis.files[0]!.path
           }
         } else {
           s.filesStale = true
@@ -109,6 +119,10 @@ export const useStore = create<AppState>()(
     notify: (notice) =>
       set((s) => {
         s.notice = notice
+      }),
+    setUpdate: (update) =>
+      set((s) => {
+        s.update = update
       }),
   })),
 )

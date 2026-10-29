@@ -8,13 +8,15 @@ export function CommitInput(props: {
   mono?: boolean
   placeholder?: string
   label?: string
+  /** Lets the value be cleared (renames never can be empty). */
+  allowEmpty?: boolean
 }) {
   const [draft, setDraft] = useState(props.value)
   const cancelled = useRef(false)
   useEffect(() => setDraft(props.value), [props.value])
   const commit = () => {
     const v = draft.trim()
-    if (!cancelled.current && v !== '' && v !== props.value) props.onCommit(v)
+    if (!cancelled.current && (v !== '' || props.allowEmpty) && v !== props.value) props.onCommit(v)
     else setDraft(props.value)
     cancelled.current = false
   }

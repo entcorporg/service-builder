@@ -45,6 +45,54 @@ pub fn is_topic_name(s: &str) -> bool {
         && s.starts_with(|c: char| c.is_ascii_alphanumeric())
 }
 
+/// Parameters of an HTTP route path (`/orders/{order_id}/items` -> `["order_id"]`), or why the
+/// path is not valid. A segment is either literal (`[A-Za-z0-9._~-]`) or exactly one `{param}`;
+/// the path starts with `/` and has no empty segment and no trailing `/`.
+pub fn route_params(path: &str) -> Result<Vec<String>, String> {
+    if path == "/" {
+        return Ok(vec![]);
+    }
+    let Some(rest) = path.strip_prefix('/') else {
+        return Err("the path must start with `/`".into());
+    };
+    let mut params: Vec<String> = Vec::new();
+    for segment in rest.split('/') {
+        if segment.is_empty() {
+            return Err("the path has an empty segment (`//` or a trailing `/`)".into());
+        }
+        if let Some(inner) = segment.strip_prefix('{') {
+            let Some(name) = inner.strip_suffix('}') else {
+                return Err(format!("`{segment}` is not a valid `{{param}}`"));
+            };
+            if !is_snake_ident(name) {
+                return Err(format!(
+                    "parameter `{name}` must be a snake_case field name"
+                ));
+            }
+            if params.iter().any(|p| p == name) {
+                return Err(format!("parameter `{name}` appears twice"));
+            }
+            params.push(name.to_string());
+        } else if !segment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '~' | '-'))
+        {
+            return Err(format!(
+                "`{segment}` has characters that are not allowed (letters, digits, `.`, `_`, `~`, `-`)"
+            ));
+        }
+    }
+    Ok(params)
+}
+
+/// The path with its parameters made anonymous: two routes with the same shape clash.
+pub fn route_shape(path: &str) -> String {
+    path.split('/')
+        .map(|s| if s.starts_with('{') { "{}" } else { s })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Name of the Rust constant holding a topic name: `orders.created` -> `ORDERS_CREATED`.
 pub fn topic_const(topic: &str) -> String {
     shouty(topic)
@@ -127,6 +175,33 @@ mod tests {
         assert!(!is_pascal_ident("orderCreated"));
         assert!(!is_pascal_ident("HTTPServer"));
         assert!(!is_pascal_ident("Order_Created"));
+    }
+
+    #[test]
+    fn route_paths() {
+        assert_eq!(route_params("/").unwrap(), Vec::<String>::new());
+        assert_eq!(route_params("/orders").unwrap(), Vec::<String>::new());
+        assert_eq!(
+            route_params("/orders/{order_id}/items/{item_id}").unwrap(),
+            vec!["order_id", "item_id"]
+        );
+        for bad in [
+            "orders",
+            "",
+            "/orders/",
+            "//orders",
+            "/orders/{id",
+            "/orders/id}",
+            "/orders/{Id}",
+            "/orders/{id}/{id}",
+            "/orders/x{id}",
+            "/or ders",
+            "/orders?x=1",
+        ] {
+            assert!(route_params(bad).is_err(), "{bad}");
+        }
+        assert_eq!(route_shape("/a/{x}/b"), route_shape("/a/{y}/b"));
+        assert_ne!(route_shape("/a/{x}"), route_shape("/a/b"));
     }
 
     #[test]

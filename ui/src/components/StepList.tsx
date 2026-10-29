@@ -1,11 +1,12 @@
 import { useState } from 'react'
-import { makeStep, newId, STEP_LABELS } from '../model'
+import { declareProducer, makeStep, newId, STEP_LABELS } from '../model'
 import { candidates, isSimpleScalar, SCALARS, type Scope, scopeAfter, scopesOf, scalar } from '../scope'
 import { useStore } from '../store'
 import type { CmpOp, Condition, Diagnostic, Expr, FieldType, LogLevel, Project, Step, StepType } from '../types'
 import { AssignmentsEditor } from './AssignmentsEditor'
 import { ExprEditor } from './ExprEditor'
 import { Icon } from './Icon'
+import { OP_LABELS, SqlBody } from './SqlStep'
 import { Badge, Collapsible, Empty, IconButton } from './ui'
 
 export interface HandlerCtx {
@@ -25,7 +26,7 @@ interface ListProps {
   locate: (p: Project) => Step[]
 }
 
-const STEP_ORDER: StepType[] = ['publish', 'callRpc', 'branch', 'let', 'log', 'respond', 'code']
+const STEP_ORDER: StepType[] = ['publish', 'sql', 'callRpc', 'branch', 'let', 'log', 'respond', 'code']
 
 export function StepList({ steps, base, scope, ctx, locate }: ListProps) {
   const project = useStore((s) => s.project)
@@ -54,7 +55,14 @@ export function StepList({ steps, base, scope, ctx, locate }: ListProps) {
       ))}
       <AddStep
         allowRespond={ctx.response !== null}
-        onAdd={(type) => mutate((list) => list.push(makeStep(type, project, endScope, ctx)))}
+        onAdd={(type) =>
+          edit((p) => {
+            const step = makeStep(type, p, endScope, ctx)
+            locate(p).push(step)
+            // Publishing needs the service to own the topic: declare it, like drawing the arrow would.
+            if (step.type === 'publish') declareProducer(p, ctx.service, step.topic)
+          })
+        }
       />
     </div>
   )
@@ -136,6 +144,8 @@ function summary(step: Step): string {
         : `si ${step.condition.code}`
     case 'respond':
       return ''
+    case 'sql':
+      return `${OP_LABELS[step.op].toLowerCase()} ${step.table}${step.op === 'select' && step.bind ? ` → ${step.bind}` : ''}`
     case 'code':
       return ''
   }
@@ -223,6 +233,7 @@ function StepBody(props: {
 }) {
   const { step, scope } = props
   const project = useStore((s) => s.project)
+  const edit = useStore((s) => s.edit)
 
   switch (step.type) {
     case 'log': {
@@ -274,26 +285,59 @@ function StepBody(props: {
             />
             <select
               aria-label="Type"
-              value={step.valueType.kind}
+              value={step.valueType.kind === 'message' ? `msg:${step.valueType.name}` : step.valueType.kind}
               onChange={(e) =>
                 u((s) => {
-                  s.valueType = { kind: e.target.value } as FieldType
-                  s.value = { kind: 'literal', value: e.target.value === 'bool' ? false : e.target.value === 'string' ? '' : 0 }
+                  if (e.target.value.startsWith('msg:')) {
+                    // A whole schema: built with Rust, e.g. from queries over several tables.
+                    const name = e.target.value.slice(4)
+                    s.valueType = { kind: 'message', name }
+                    s.value = { kind: 'raw', code: `pb::${name} { ..Default::default() }` }
+                  } else {
+                    s.valueType = { kind: e.target.value } as FieldType
+                    s.value = { kind: 'literal', value: e.target.value === 'bool' ? false : e.target.value === 'string' ? '' : 0 }
+                  }
                 })
               }
             >
-              {SCALARS.map((k) => (
-                <option key={k}>{k}</option>
-              ))}
+              <optgroup label="Types simples">
+                {SCALARS.map((k) => (
+                  <option key={k}>{k}</option>
+                ))}
+              </optgroup>
+              {project.messages.length > 0 && (
+                <optgroup label="Schémas (construits en Rust)">
+                  {project.messages.map((m) => (
+                    <option key={m.name} value={`msg:${m.name}`}>{m.name}</option>
+                  ))}
+                </optgroup>
+              )}
             </select>
           </div>
-          <ExprEditor
-            label="Valeur"
-            expr={step.value}
-            target={scalar(step.valueType.kind)}
-            scope={scope}
-            onChange={(v) => v && u((s) => (s.value = v))}
-          />
+          {step.valueType.kind === 'message' ? (
+            <>
+              <textarea
+                className="mono code-input"
+                aria-label="Code Rust de la variable"
+                rows={Math.min(14, Math.max(4, (step.value.kind === 'raw' ? step.value.code : '').split('\n').length + 1))}
+                spellCheck={false}
+                value={step.value.kind === 'raw' ? step.value.code : ''}
+                onChange={(e) => u((s) => (s.value = { kind: 'raw', code: e.target.value }))}
+              />
+              <small className="muted">
+                Expression Rust qui renvoie <code>pb::{step.valueType.name}</code> : <code>ctx</code>, <code>input</code> et <code>tx</code> sont disponibles
+                (requêtes SQL sur plusieurs tables, par exemple). Ses champs se lisent ensuite comme <code>{step.name}.champ</code>.
+              </small>
+            </>
+          ) : (
+            <ExprEditor
+              label="Valeur"
+              expr={step.value}
+              target={scalar(step.valueType.kind)}
+              scope={scope}
+              onChange={(v) => v && u((s) => (s.value = v))}
+            />
+          )}
         </div>
       )
     }
@@ -307,12 +351,14 @@ function StepBody(props: {
             <span>Topic</span>
             <select
               value={step.topic}
-              onChange={(e) =>
+              onChange={(e) => {
+                const next = e.target.value
                 u((s) => {
-                  s.topic = e.target.value
+                  s.topic = next
                   s.payload = []
                 })
-              }
+                edit((p) => declareProducer(p, props.ctx.service, next))
+              }}
             >
               {!topic && <option value={step.topic}>{step.topic || 'Choisir…'}</option>}
               {project.topics.map((t) => (
@@ -410,6 +456,9 @@ function StepBody(props: {
       )
     }
 
+    case 'sql':
+      return <SqlBody step={step} update={as<'sql'>(props.update)} scope={scope} service={props.ctx.service} />
+
     case 'code': {
       const u = as<'code'>(props.update)
       return (
@@ -423,7 +472,9 @@ function StepBody(props: {
             onChange={(e) => u((s) => (s.code = e.target.value))}
           />
           <small className="muted">
-            Instructions Rust insérées telles quelles. Disponibles : <code>ctx</code>, <code>input</code> et les variables ci-dessus.
+            Instructions Rust insérées telles quelles. Disponibles : <code>ctx</code>, <code>input</code>, <code>tx</code> (la transaction
+            PostgreSQL du service) et les variables ci-dessus. Faites <code>tx.commit().await?;</code> avant un <code>return</code> anticipé,
+            sinon la transaction et les événements publiés sont annulés.
           </small>
         </div>
       )

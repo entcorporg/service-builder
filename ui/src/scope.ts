@@ -1,6 +1,6 @@
 // Client-side mirror of the type rules of crates/sb-model/src/typing.rs. It only drives
 // suggestions (which variables fit a field); the Rust validator stays authoritative.
-import type { Field, FieldType, Project, Step } from './types'
+import type { Column, ColumnType, Field, FieldType, Message, Project, Service, Step, Table } from './types'
 
 export interface TypeRef {
   type: FieldType
@@ -29,8 +29,12 @@ export function scalar(kind: FieldType['kind']): TypeRef {
   return { type: { kind } as FieldType, repeated: false, optional: false }
 }
 
+const rawName = (t: FieldType): string => (isMessage(t) ? t.name : t.kind)
+
 export function fieldTypeLabel(t: FieldType): string {
-  return isMessage(t) ? t.name : t.kind
+  // The derived row of a SQL step: `OrdersRowH6` reads as "ligne orders".
+  const row = isMessage(t) ? /^(.+)Row[A-Z0-9][A-Za-z0-9]*$/.exec(t.name) : null
+  return isMessage(t) ? (row ? `ligne ${row[1]!.toLowerCase()}` : t.name) : t.kind
 }
 
 export function typeLabel(t: TypeRef): string {
@@ -41,7 +45,7 @@ export function sameType(a: TypeRef, b: TypeRef): boolean {
   return (
     a.repeated === b.repeated &&
     a.optional === b.optional &&
-    fieldTypeLabel(a.type) === fieldTypeLabel(b.type) &&
+    rawName(a.type) === rawName(b.type) &&
     isMessage(a.type) === isMessage(b.type)
   )
 }
@@ -61,9 +65,75 @@ export function fits(from: TypeRef, bare: boolean, to: TypeRef): boolean {
     to.optional &&
     !to.repeated &&
     !isMessage(to.type) &&
-    fieldTypeLabel(from.type) === fieldTypeLabel(to.type)
+    rawName(from.type) === rawName(to.type)
   )
 }
+
+// ---- SQL rows ----------------------------------------------------------------------------
+// The row a `select` reads is typed after the table and the ticked columns: it is what makes the
+// SQL block predictive. Mirrors `sql_row_name` and `Project::with_sql_rows` of sb-model.
+
+const pascal = (s: string) =>
+  s
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join('')
+
+export function sqlRowName(table: string, stepId: string): string {
+  return `${pascal(table)}Row${pascal(stepId)}`
+}
+
+/** What a flow sees of a column: timestamps and uuids are text. */
+export function columnFieldType(t: ColumnType): FieldType {
+  return { kind: t === 'timestamp' || t === 'uuid' ? 'string' : t } as FieldType
+}
+
+export function columnType(c: Column): TypeRef {
+  return { type: columnFieldType(c.type), repeated: false, optional: c.nullable }
+}
+
+const rowsCache = new WeakMap<Project, Map<string, Message>>()
+
+/** The rows of the `select` steps of the project, by derived message name. */
+export function sqlRows(project: Project): Map<string, Message> {
+  const cached = rowsCache.get(project)
+  if (cached) return cached
+  const rows = new Map<string, Message>()
+  const visit = (svc: Service, steps: Step[]) => {
+    for (const s of steps) {
+      if (s.type === 'branch') {
+        visit(svc, s.then)
+        visit(svc, s.otherwise)
+      } else if (s.type === 'sql' && s.op === 'select' && !s.into) {
+        const table = svc.tables.find((t) => t.name === s.table)
+        if (!table) continue
+        rows.set(sqlRowName(s.table, s.id), {
+          name: sqlRowName(s.table, s.id),
+          kind: 'proto',
+          fields: s.columns
+            .map((c) => table.columns.find((x) => x.name === c))
+            .filter((c): c is Column => !!c)
+            .map((c) => ({ name: c.name, type: columnFieldType(c.type), repeated: false, optional: c.nullable })),
+        })
+      }
+    }
+  }
+  for (const svc of project.services) {
+    visit(svc, svc.rpcs.flatMap((r) => r.steps))
+    visit(svc, svc.routes.flatMap((r) => r.steps))
+    visit(svc, svc.consumers.flatMap((c) => c.steps))
+  }
+  rowsCache.set(project, rows)
+  return rows
+}
+
+/** A message of the project, or the row of a SQL step. */
+export function findMessage(project: Project, name: string): Message | undefined {
+  return project.messages.find((m) => m.name === name) ?? sqlRows(project).get(name)
+}
+
+export const tableOf = (service: Service | undefined, name: string): Table | undefined => service?.tables.find((t) => t.name === name)
 
 export interface Candidate {
   path: string
@@ -78,7 +148,7 @@ export function candidates(project: Project, scope: Scope, maxDepth = 3): Candid
   const walk = (prefix: string, type: TypeRef, depth: number, bare: boolean) => {
     out.push({ path: prefix, type, bare })
     if (depth >= maxDepth || type.repeated || !isMessage(type.type)) return
-    const message = project.messages.find((m) => m.name === (type.type as { name: string }).name)
+    const message = findMessage(project, (type.type as { name: string }).name)
     for (const f of message?.fields ?? []) walk(`${prefix}.${f.name}`, typeOfField(f), depth + 1, false)
   }
   const names = Object.keys(scope).sort((a, b) => (a === 'input' ? -1 : b === 'input' ? 1 : a.localeCompare(b)))
@@ -94,6 +164,10 @@ export function inputScope(messageName: string): Scope {
 export function scopeAfter(project: Project, scope: Scope, step: Step): Scope {
   if (step.type === 'let' && step.name) {
     return { ...scope, [step.name]: { type: step.valueType, repeated: false, optional: false } }
+  }
+  if (step.type === 'sql' && step.op === 'select' && step.bind) {
+    const message = step.into ?? sqlRowName(step.table, step.id)
+    return { ...scope, [step.bind]: { type: { kind: 'message', name: message }, repeated: step.many, optional: false } }
   }
   if (step.type === 'callRpc' && step.bind) {
     const rpc = project.services.find((s) => s.name === step.service)?.rpcs.find((r) => r.name === step.method)
