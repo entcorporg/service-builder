@@ -346,9 +346,32 @@ describe('editor', () => {
 
     // An update without a condition is refused: it would touch every row.
     await page.getByRole('button', { name: 'Modifier', exact: true }).last().click()
-    await page.locator('.condition').last().getByRole('button', { name: 'Retirer la condition' }).click()
+    await page.locator('.sql-condition').last().getByRole('button', { name: 'Retirer la condition' }).click()
     await settle(page)
     assert.ok((await page.locator('.problems li').allInnerTexts()).some((t) => t.includes('E_SQL_NO_WHERE')))
+    await page.close()
+  })
+
+  it('keeps the condition block stacked, with the SQL block’s own condition rows next to it', async () => {
+    const { page } = await open()
+    await page.locator('.tree button.sub', { hasText: '/orders/{order_id}' }).click()
+    const logic = page.getByRole('region', { name: 'Logique' })
+    await logic.locator('.add-step-btn').click()
+    await page.getByRole('menuitem', { name: /Condition/ }).click()
+    const editor = page.locator('.stack.condition').last()
+    await editor.waitFor()
+    // “Si” + type, then the left operand, the operator and the right operand, one under the other.
+    const tops = await editor.evaluate((el) => [...el.children].map((c) => Math.round(c.getBoundingClientRect().top)))
+    assert.ok(tops.length >= 3, `expected the rows of the editor, got ${tops.length}`)
+    assert.deepEqual(tops, [...tops].sort((a, b) => a - b))
+    assert.equal(new Set(tops).size, tops.length, `rows overlap on one line: ${tops}`)
+    assert.equal(await editor.evaluate((el) => getComputedStyle(el).gridTemplateColumns.split(' ').length), 1)
+
+    // And the SQL block, which shares the word “condition”, keeps its own four-column rows.
+    await logic.locator('.add-step-btn').last().click() // the branch added two nested lists, the handler's own is last
+    await page.getByRole('menuitem', { name: /SQL/ }).click()
+    const row = page.locator('.sql-condition').last()
+    assert.equal(await row.evaluate((el) => getComputedStyle(el).gridTemplateColumns.split(' ').length), 4)
     await page.close()
   })
 

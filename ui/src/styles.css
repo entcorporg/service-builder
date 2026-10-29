@@ -455,7 +455,7 @@ textarea { resize: vertical; line-height: 1.5; }
 .prediction code { color: #c9cfff; }
 .mini-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.7px; color: var(--faint); margin: 4px 0 2px; font-weight: 600; }
 .req { color: var(--accent); }
-.condition { display: grid; grid-template-columns: 110px 64px minmax(0, 1fr) auto; gap: 6px; align-items: center; margin-bottom: 6px; }
+.sql-condition { display: grid; grid-template-columns: 110px 64px minmax(0, 1fr) auto; gap: 6px; align-items: center; margin-bottom: 6px; }
 .sql-preview { margin: 0; padding: 8px 10px; background: #0c0e17; border: 1px solid var(--border); border-radius: 8px; color: #9be3b4; white-space: pre-wrap; word-break: break-word; font-size: 11.5px; user-select: text; -webkit-user-select: text; }
 .muted.warn { color: var(--warn); }
 

@@ -203,7 +203,7 @@ export function SqlBody(props: { step: SqlStep; update: (fn: (s: SqlStep) => voi
           {step.where.map((c, i) => {
             const col = table.columns.find((x) => x.name === c.column)
             return (
-              <div className="condition" key={i}>
+              <div className="sql-condition" key={i}>
                 <select aria-label="Colonne" value={c.column} onChange={(e) => setCondition(i, (x) => (x.column = e.target.value))}>
                   {!col && <option value={c.column}>{c.column}</option>}
                   {table.columns.map((x) => (
