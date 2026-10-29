@@ -243,7 +243,7 @@ function StepBody(props: {
         .slice(0, 8)
       return (
         <div className="stack">
-          <div className="inline">
+          <div className="form-row">
             <select aria-label="Niveau" value={step.level} onChange={(e) => u((s) => (s.level = e.target.value as LogLevel))}>
               <option value="debug">debug</option>
               <option value="info">info</option>
@@ -275,7 +275,7 @@ function StepBody(props: {
       const u = as<'let'>(props.update)
       return (
         <div className="stack">
-          <div className="inline">
+          <div className="form-row">
             <input
               className="mono"
               aria-label="Nom de la variable"
@@ -347,7 +347,7 @@ function StepBody(props: {
       const topic = project.topics.find((t) => t.name === step.topic)
       return (
         <div className="stack">
-          <label className="inline">
+          <label className="form-row">
             <span>Topic</span>
             <select
               value={step.topic}
@@ -380,7 +380,7 @@ function StepBody(props: {
       const callable = project.services.filter((s) => s.name !== props.ctx.service && s.rpcs.length > 0)
       return (
         <div className="stack">
-          <div className="inline">
+          <div className="form-row">
             <select
               aria-label="Service"
               value={step.service}
@@ -414,7 +414,7 @@ function StepBody(props: {
             </select>
           </div>
           {rpc && <AssignmentsEditor message={rpc.request} assignments={step.request} scope={scope} update={(fn) => u((s) => fn(s.request))} />}
-          <label className="inline">
+          <label className="form-row">
             <span>Mémoriser la réponse dans</span>
             <input
               className="mono"
@@ -501,7 +501,7 @@ function ConditionEditor(props: { condition: Condition; scope: Scope; onChange: 
 
   return (
     <div className="stack condition">
-      <div className="inline">
+      <div className="form-row">
         <span>Si</span>
         <select
           aria-label="Type de condition"

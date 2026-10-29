@@ -254,9 +254,9 @@ textarea { resize: vertical; line-height: 1.5; }
 .step-icon.code { background: rgba(120, 220, 255, 0.15); color: #7fdcff; }
 
 .stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; margin-top: 8px; }
-.inline { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.inline > span { color: var(--muted); white-space: nowrap; flex: none; }
-.inline > select, .inline > input { flex: 1; min-width: 0; width: auto; }
+.form-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.form-row > span { color: var(--muted); white-space: nowrap; flex: none; }
+.form-row > select, .form-row > input { flex: 1; min-width: 0; width: auto; }
 .chips { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
 .chips small { color: var(--faint); }
 .chip { border: 1px solid var(--border); background: var(--bg); border-radius: 999px; padding: 1px 8px; cursor: pointer; color: var(--muted); }
