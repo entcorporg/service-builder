@@ -1,29 +1,35 @@
 import { describe, expect, it } from 'vitest'
-import { autoMap, renameField, renameMessage, renameTopic, servicesUsingTopic } from '../model'
-import { candidates, fits, inputScope, scalar, scopesOf, typeOfField } from '../scope'
+import { exampleJson, exampleQuery } from '../json'
+import { addColumn, addTable, makeStep, renameColumn, renameTable, selectionForPath, addMessage, addRoute, addRpc, defaultStatus, pathParams, addTopic, autoMap, canConsume, canProduce, connectConsumer, consumersOf, declareProducer, removeService, renameService, renameField, renameMessage, renameTopic, nestable } from '../model'
+import { candidates, fits, inputScope, scalar, scopeAfter, scopesOf, sqlRowName, typeOfField } from '../scope'
 import type { Project } from '../types'
 
 const project = (): Project => ({
-  schemaVersion: 1,
+  schemaVersion: 3,
   name: 'T',
   broker: { bootstrapServers: 'localhost:9092' },
+  outbox: { maxAttempts: 5 },
   messages: [
-    { name: 'Customer', fields: [{ name: 'name', type: { kind: 'string' }, repeated: false, optional: false }] },
+    { name: 'Customer', kind: 'proto', fields: [{ name: 'name', type: { kind: 'string' }, repeated: false, optional: false }] },
     {
       name: 'Order',
+      kind: 'proto',
       fields: [
         { name: 'id', type: { kind: 'string' }, repeated: false, optional: false },
         { name: 'customer', type: { kind: 'message', name: 'Customer' }, repeated: false, optional: false },
         { name: 'note', type: { kind: 'string' }, repeated: false, optional: true },
       ],
     },
-    { name: 'Placed', fields: [{ name: 'id', type: { kind: 'string' }, repeated: false, optional: false }] },
+    { name: 'Placed', kind: 'event', fields: [{ name: 'id', type: { kind: 'string' }, repeated: false, optional: false }] },
   ],
-  topics: [{ name: 'orders.placed', message: 'Placed', partitions: 1, replicationFactor: 1, keyField: 'id', position: { x: 0, y: 0 } }],
+  topics: [{ name: 'orders.placed', message: 'Placed', partitions: 1, replicationFactor: 1, keyField: 'id', producers: ['Orders'], position: { x: 0, y: 0 } }],
   services: [
     {
       name: 'Orders',
       port: 50051,
+      httpPort: null,
+      routes: [],
+      tables: [],
       position: { x: 0, y: 0 },
       rpcs: [
         {
@@ -108,8 +114,244 @@ describe('rename cascades', () => {
     // Order.id is a different message: untouched.
     expect(p.messages[1]!.fields[0]!.name).toBe('id')
   })
-  it('finds the services using a topic', () => {
-    expect(servicesUsingTopic(project(), 'orders.placed').map((s) => s.name)).toEqual(['Orders'])
-    expect(servicesUsingTopic(project(), 'nope')).toEqual([])
+  it('finds the services consuming a topic', () => {
+    const p = project()
+    expect(consumersOf(p, 'orders.placed').map((s) => s.name)).toEqual(['Orders'])
+    p.services.push({ name: 'Notifications', port: 50052, position: { x: 0, y: 0 }, rpcs: [], httpPort: null, routes: [], tables: [], consumers: [] })
+    connectConsumer(p, 'Notifications', 'orders.placed')
+    expect(consumersOf(p, 'orders.placed').map((s) => s.name)).toEqual(['Orders', 'Notifications'])
+  })
+})
+
+describe('connecting a topic to a service', () => {
+  it('creates a consumer named after the topic', () => {
+    const p = project()
+    p.services.push({ name: 'Notifications', port: 50052, position: { x: 0, y: 0 }, rpcs: [], httpPort: null, routes: [], tables: [], consumers: [] })
+    expect(canConsume(p, 'Notifications', 'orders.placed')).toBe(true)
+    expect(connectConsumer(p, 'Notifications', 'orders.placed')).toMatchObject({ name: 'on_orders_placed', topic: 'orders.placed', steps: [] })
+    expect(p.services[1]!.consumers).toHaveLength(1)
+  })
+  it('refuses a topic the service already consumes, and unknown ends', () => {
+    const p = project()
+    p.services.push({ name: 'Notifications', port: 50052, position: { x: 0, y: 0 }, rpcs: [], httpPort: null, routes: [], tables: [], consumers: [] })
+    connectConsumer(p, 'Notifications', 'orders.placed')
+    expect(canConsume(p, 'Notifications', 'orders.placed')).toBe(false)
+    expect(connectConsumer(p, 'Notifications', 'orders.placed')).toBeNull()
+    expect(connectConsumer(p, 'Nope', 'orders.placed')).toBeNull()
+    expect(connectConsumer(p, 'Notifications', 'nope')).toBeNull()
+  })
+})
+
+describe('declaring producers', () => {
+  const withNotifications = () => {
+    const p = project()
+    p.services.push({ name: 'Notifications', port: 50052, position: { x: 0, y: 0 }, rpcs: [], httpPort: null, routes: [], tables: [], consumers: [] })
+    return p
+  }
+  it('makes a service a producer once, and only if both ends exist', () => {
+    const p = withNotifications()
+    expect(canProduce(p, 'Notifications', 'orders.placed')).toBe(true)
+    expect(declareProducer(p, 'Notifications', 'orders.placed')).toBe(true)
+    expect(p.topics[0]!.producers).toEqual(['Orders', 'Notifications'])
+    expect(declareProducer(p, 'Notifications', 'orders.placed')).toBe(false)
+    expect(declareProducer(p, 'Nope', 'orders.placed')).toBe(false)
+    expect(declareProducer(p, 'Notifications', 'nope')).toBe(false)
+    expect(p.topics[0]!.producers).toEqual(['Orders', 'Notifications'])
+  })
+  it('follows a renamed service and forgets a deleted one', () => {
+    const p = withNotifications()
+    declareProducer(p, 'Notifications', 'orders.placed')
+    renameService(p, 'Notifications', 'Alerts')
+    expect(p.topics[0]!.producers).toEqual(['Orders', 'Alerts'])
+    removeService(p, 'Alerts')
+    expect(p.topics[0]!.producers).toEqual(['Orders'])
+    expect(p.services.map((s) => s.name)).toEqual(['Orders'])
+  })
+})
+
+describe('schema kinds', () => {
+  it('creates events for topics and proto schemas for RPCs', () => {
+    const p = project()
+    const rpc = addRpc(p, p.services[0]!)
+    expect(p.messages.find((m) => m.name === rpc.request)!.kind).toBe('proto')
+    expect(p.messages.find((m) => m.name === rpc.response)!.kind).toBe('proto')
+    const topic = addTopic(p, { x: 0, y: 0 })
+    expect(p.messages.find((m) => m.name === topic.message)!.kind).toBe('event')
+  })
+  it('makes an event when a topic is added to a project without one', () => {
+    const p = project()
+    p.messages = p.messages.filter((m) => m.kind !== 'event')
+    p.topics = []
+    const topic = addTopic(p, { x: 0, y: 0 })
+    expect(p.messages.find((m) => m.name === topic.message)).toMatchObject({ kind: 'event' })
+  })
+  it('names new schemas after their kind', () => {
+    const p = project()
+    expect(addMessage(p, undefined, 'api')).toMatchObject({ name: 'NewApiSchema', kind: 'api' })
+    expect(addMessage(p, undefined, 'event')).toMatchObject({ name: 'NewEvent', kind: 'event' })
+  })
+  it('keeps API schemas apart from protobuf ones when nesting', () => {
+    const p = project()
+    addMessage(p, 'Dto', 'api')
+    expect(nestable(p, 'event').map((m) => m.name)).not.toContain('Dto')
+    expect(nestable(p, 'proto').map((m) => m.name)).toContain('Placed')
+    expect(nestable(p, 'api').map((m) => m.name)).toEqual(['Dto'])
+  })
+})
+
+describe('HTTP routes', () => {
+  it('reads the parameters of a path', () => {
+    expect(pathParams('/orders/{order_id}/items/{item}')).toEqual(['order_id', 'item'])
+    expect(pathParams('/orders')).toEqual([])
+    expect(defaultStatus('post')).toBe(201)
+    expect(defaultStatus('get')).toBe(200)
+  })
+  it('creates a route with its own API schemas and gives the service an HTTP port', () => {
+    const p = project()
+    const route = addRoute(p, p.services[0]!)
+    expect(route).toMatchObject({ name: 'new_route', method: 'get', path: '/new-route', status: 200 })
+    expect(p.messages.find((m) => m.name === route.request)!.kind).toBe('api')
+    expect(p.messages.find((m) => m.name === route.response)!.kind).toBe('api')
+    expect(p.services[0]!.httpPort).toBe(8081)
+    // The port is kept, and the next route and schemas get fresh names.
+    const next = addRoute(p, p.services[0]!)
+    expect(next.name).toBe('new_route2')
+    expect(next.request).not.toBe(route.request)
+    expect(p.services[0]!.httpPort).toBe(8081)
+  })
+  it('takes the next free HTTP port for a second service', () => {
+    const p = project()
+    p.services.push({ name: 'Billing', port: 50052, position: { x: 0, y: 0 }, rpcs: [], httpPort: null, routes: [], tables: [], consumers: [] })
+    addRoute(p, p.services[0]!)
+    addRoute(p, p.services[1]!)
+    expect(p.services.map((s) => s.httpPort)).toEqual([8081, 8082])
+  })
+  it('follows renames: schemas, and the `{param}` of the path when its field is renamed', () => {
+    const p = project()
+    const route = addRoute(p, p.services[0]!)
+    route.path = '/orders/{id}'
+    const request = p.messages.find((m) => m.name === route.request)!
+    renameField(p, request.name, 'id', 'order_id')
+    expect(route.path).toBe('/orders/{order_id}')
+    renameMessage(p, route.response, 'OrderView')
+    expect(route.response).toBe('OrderView')
+  })
+})
+
+describe('endpoint configurator helpers', () => {
+  const withRoute = () => {
+    const p = project()
+    const route = addRoute(p, p.services[0]!)
+    const request = p.messages.find((m) => m.name === route.request)!
+    request.fields.push({ name: 'tags', type: { kind: 'string' }, repeated: true, optional: false })
+    request.fields.push({ name: 'limit', type: { kind: 'int32' }, repeated: false, optional: false })
+    return { p, route, request }
+  }
+  it('writes an example JSON, leaving out the path parameters', () => {
+    const { p, route } = withRoute()
+    expect(JSON.parse(exampleJson(p, route.request))).toEqual({ id: 'string', tags: ['string'], limit: 0 })
+    expect(JSON.parse(exampleJson(p, route.request, (f) => f.name !== 'id'))).toEqual({ tags: ['string'], limit: 0 })
+  })
+  it('nests schemas, and stops on a schema that contains itself', () => {
+    const p = project()
+    const node = addMessage(p, 'Node', 'api')
+    node.fields.push({ name: 'child', type: { kind: 'message', name: 'Node' }, repeated: true, optional: false })
+    const json = JSON.parse(exampleJson(p, 'Node'))
+    expect(json.child[0].child[0].child[0].child[0]).toEqual({})
+  })
+  it('writes the query string of a GET', () => {
+    const { p, route } = withRoute()
+    expect(exampleQuery(p, route.request, (f) => f.name === 'limit')).toBe('?limit=0')
+    expect(exampleQuery(p, route.request, () => false)).toBe('')
+  })
+  it('opens the endpoint of a diagnostic that points into a route', () => {
+    const { p, route } = withRoute()
+    expect(selectionForPath(p, '/services/0/routes/0/path')).toEqual({ kind: 'route', service: 'Orders', route: route.name })
+    expect(selectionForPath(p, '/services/0/routes/0/steps/2')).toMatchObject({ kind: 'route' })
+    expect(selectionForPath(p, '/services/0/rpcs/0/steps/1')).toEqual({ kind: 'service', name: 'Orders' })
+    expect(selectionForPath(p, '/services/0/routes/7/path')).toEqual({ kind: 'service', name: 'Orders' })
+  })
+})
+
+describe('tables and the SQL block', () => {
+  const withOrders = () => {
+    const p = project()
+    p.messages.push({ name: 'GetOrderRequest', kind: 'api', fields: [{ name: 'order_id', type: { kind: 'string' }, repeated: false, optional: false }] })
+    const svc = p.services[0]!
+    const t = addTable(svc)
+    t.name = 'orders'
+    t.columns = [
+      { name: 'order_id', type: 'string', nullable: false, primaryKey: true, default: null },
+      { name: 'amount', type: 'int64', nullable: false, primaryKey: false, default: null },
+      { name: 'note', type: 'string', nullable: true, primaryKey: false, default: null },
+      { name: 'created_at', type: 'timestamp', nullable: false, primaryKey: false, default: 'now()' },
+    ]
+    return { p, svc }
+  }
+
+  it('creates a table with a uuid key, and nullable columns', () => {
+    const p = project()
+    const t = addTable(p.services[0]!)
+    expect(t).toMatchObject({ name: 'new_table', columns: [{ name: 'id', type: 'uuid', primaryKey: true, nullable: false }] })
+    expect(addTable(p.services[0]!).name).toBe('new_table2')
+    expect(addColumn(t)).toMatchObject({ name: 'column', type: 'string', nullable: true })
+  })
+
+  it('names the row after the table and the step, like the Rust side', () => {
+    expect(sqlRowName('orders', 'h6')).toBe('OrdersRowH6')
+    expect(sqlRowName('order_items', 'a1b2')).toBe('OrderItemsRowA1b2')
+  })
+
+  it('types the variable of a select after the ticked columns', () => {
+    const { p } = withOrders()
+    const step = makeStep('sql', p, inputScope('GetOrderRequest'), { service: 'Orders', response: null })
+    if (step.type !== 'sql') throw new Error('not a sql step')
+    step.columns = ['order_id', 'note']
+    p.services[0]!.routes = [{ name: 'r', method: 'get', path: '/r', request: 'GetOrderRequest', response: 'GetOrderRequest', status: 200, steps: [step] }]
+    const scope = scopeAfter(p, inputScope('GetOrderRequest'), step)
+    const paths = candidates(p, scope).map((c) => [c.path, c.type.type.kind, c.type.optional])
+    expect(paths).toContainEqual([`${step.bind}.order_id`, 'string', false])
+    expect(paths).toContainEqual([`${step.bind}.note`, 'string', true]) // a nullable column is optional
+    expect(paths.map((x) => x[0])).not.toContain(`${step.bind}.amount`) // not ticked: not there
+  })
+
+  it('reads timestamps as text', () => {
+    const { p } = withOrders()
+    const step = makeStep('sql', p, inputScope('GetOrderRequest'), { service: 'Orders', response: null })
+    if (step.type !== 'sql') throw new Error('not a sql step')
+    p.services[0]!.routes = [{ name: 'r', method: 'get', path: '/r', request: 'GetOrderRequest', response: 'GetOrderRequest', status: 200, steps: [step] }]
+    const cand = candidates(p, scopeAfter(p, inputScope('GetOrderRequest'), step)).find((c) => c.path.endsWith('.created_at'))
+    expect(cand?.type.type.kind).toBe('string')
+  })
+
+  it('starts from the row the request already names: the key column is matched to `input.order_id`', () => {
+    const { p } = withOrders()
+    const scope = inputScope('GetOrderRequest') // has `order_id`
+    const step = makeStep('sql', p, scope, { service: 'Orders', response: null })
+    expect(step).toMatchObject({
+      op: 'select',
+      table: 'orders',
+      columns: ['order_id', 'amount', 'note', 'created_at'],
+      where: [{ column: 'order_id', op: 'eq', value: { kind: 'path', path: 'input.order_id' } }],
+    })
+  })
+
+  it('follows a renamed table and a renamed column in the SQL steps', () => {
+    const { p, svc } = withOrders()
+    const step = makeStep('sql', p, inputScope('GetOrderRequest'), { service: 'Orders', response: null })
+    if (step.type !== 'sql') throw new Error('not a sql step')
+    step.orderBy = 'amount'
+    step.values = [{ field: 'amount', value: { kind: 'literal', value: 1 } }]
+    svc.routes = [{ name: 'r', method: 'get', path: '/r', request: 'GetOrderRequest', response: 'GetOrderRequest', status: 200, steps: [step] }]
+    renameTable(p, 'Orders', 'orders', 'purchases')
+    renameColumn(p, 'Orders', 'purchases', 'order_id', 'id')
+    renameColumn(p, 'Orders', 'purchases', 'amount', 'total')
+    expect(svc.tables[0]!.name).toBe('purchases')
+    expect(svc.tables[0]!.columns.map((c) => c.name)).toEqual(['id', 'total', 'note', 'created_at'])
+    expect(step.table).toBe('purchases')
+    expect(step.columns).toEqual(['id', 'total', 'note', 'created_at'])
+    expect(step.where[0]!.column).toBe('id')
+    expect(step.orderBy).toBe('total')
+    expect(step.values[0]!.field).toBe('total')
   })
 })

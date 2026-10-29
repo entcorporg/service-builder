@@ -27,9 +27,16 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["deb", "appimage"],
     "category": "DeveloperTool",
     "shortDescription": "Visual builder for event-driven Rust backends",
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png"]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk3Mjg1MjE0RDVEQjRGMjIKUldRaVQ5dlZGRklvbDdtQjcwUHJBUVRIQ2QxS01FZy80bHBZeTdvK3UyOXpwZzROaVVlVTB6cTgK",
+      "endpoints": ["https://github.com/entcorporg/service-builder/releases/latest/download/latest.json"]
+    }
   }
 }

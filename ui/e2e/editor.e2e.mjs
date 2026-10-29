@@ -37,9 +37,20 @@ describe('editor', () => {
 
     await page.getByRole('tab', { name: /Code généré/ }).click()
     await page.waitForSelector('.code-view pre')
-    const dir = page.locator('.code-tree > div', { has: page.locator('h4', { hasText: /^services\/orders\/src$/ }) })
-    await dir.getByRole('button', { name: /flows.rs/ }).click()
+    assert.equal(await page.locator('.palette').count(), 0)
+    assert.equal(await page.locator('.inspector-panel').count(), 0)
+    const file = page.locator('[role="treeitem"][data-path="services/orders/src/flows/rpc.rs"]')
+    await file.click()
     assert.match(await page.locator('.code-main pre').innerText(), /pub async fn create_order/)
+
+    // Folders collapse and expand, from the mouse and from the keyboard.
+    const dir = page.locator('[role="treeitem"][data-path="services/orders/src/flows"]')
+    await dir.click()
+    assert.equal(await file.count(), 0)
+    await dir.focus()
+    await page.keyboard.press('ArrowRight')
+    assert.equal(await file.count(), 1)
+    assert.equal(await dir.getAttribute('aria-expanded'), 'true')
     await page.close()
   })
 
@@ -78,14 +89,297 @@ describe('editor', () => {
     await page.close()
   })
 
+  it('makes Notifications consume orders.created by dragging an edge from the topic', async () => {
+    const { page } = await open()
+    const edges = await page.locator('.react-flow__edge').count()
+    const from = page.locator('.react-flow__node', { hasText: 'orders.created' }).locator('.react-flow__handle.source')
+    const to = page.locator('.react-flow__node', { hasText: 'Notifications' }).locator('.react-flow__handle[data-handleid="in"]')
+    await from.dragTo(to)
+    await settle(page)
+    assert.equal(await page.locator('.react-flow__edge').count(), edges + 1)
+    assert.equal(await page.getByLabel('Nom du service').inputValue(), 'Notifications')
+    assert.ok((await page.locator('.card.consumer').allInnerTexts()).some((t) => t.includes('on_orders_created')))
+    assert.equal(await page.locator('.status').innerText(), 'Valide')
+
+    // Already consumed: a second drag adds nothing.
+    await from.dragTo(to)
+    await settle(page)
+    assert.equal(await page.locator('.react-flow__edge').count(), edges + 1)
+    await page.close()
+  })
+
+  it('declares Notifications as a producer of orders.created by dragging an edge from the service', async () => {
+    const { page } = await open()
+    const edges = await page.locator('.react-flow__edge').count()
+    const from = page.locator('.react-flow__node', { hasText: 'Notifications' }).locator('.react-flow__handle.source[data-handleid="out"]')
+    const to = page.locator('.react-flow__node', { hasText: 'orders.created' }).locator('.react-flow__handle.target')
+    await from.dragTo(to)
+    await settle(page)
+    assert.equal(await page.locator('.react-flow__edge').count(), edges + 1)
+    // Declared but nothing publishes yet: a warning, not an error.
+    assert.ok((await page.locator('.problems li').allInnerTexts()).some((t) => t.includes('W_PRODUCER_NEVER_PUBLISHES')))
+    await page.locator('.tree button', { hasText: 'orders.created' }).click()
+    assert.deepEqual(await page.locator('.producer .link-btn').allTextContents(), ['Orders', 'Notifications'])
+
+    // Drawing it again adds nothing.
+    await from.dragTo(to)
+    await settle(page)
+    assert.equal(await page.locator('.react-flow__edge').count(), edges + 1)
+    await page.close()
+  })
+
+  it('declares the producer when a Publish step is added, and errors when the declaration is removed', async () => {
+    const { page } = await open()
+    await page.locator('.node.service', { hasText: 'Notifications' }).click()
+    await page.locator('.card.consumer .card-toggle').first().click()
+    await page.locator('.add-step-btn').first().click()
+    await page.getByRole('menuitem', { name: /Publier un événement/ }).click()
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+    assert.ok(!(await page.locator('.problems li').allInnerTexts()).some((t) => t.includes('E_NOT_PRODUCER')))
+    await page.locator('.tree button', { hasText: 'orders.created' }).click()
+    assert.ok((await page.locator('.producer .link-btn').allTextContents()).includes('Notifications'))
+
+    // Orders publishes orders.created: it cannot stop being a producer while it does.
+    await page.getByRole('button', { name: 'Retirer Orders des producteurs' }).click()
+    await settle(page)
+    assert.ok((await page.locator('.problems li').allInnerTexts()).some((t) => t.includes('E_NOT_PRODUCER')))
+    assert.ok(await page.getByRole('button', { name: /Exporter le code/ }).isDisabled())
+    await page.close()
+  })
+
+  it('separates event, proto and API schemas', async () => {
+    const { page } = await open()
+    const group = (title) => page.getByRole('region', { name: `Schémas ${title}` })
+    assert.deepEqual(await group('Événements').locator('button.mono, button .mono').allTextContents(), ['OrderCreated', 'PaymentCompleted', 'PaymentFailed'])
+    assert.ok((await group('Proto (gRPC)').innerText()).includes('CreateOrderRequest'))
+    assert.ok((await group('API').innerText()).includes('OrderView'))
+
+    // New API schema: it shows up in its own group and is neither a topic payload nor a gRPC message.
+    await group('API').getByRole('button', { name: /Ajouter un schéma API/ }).click()
+    assert.ok((await group('API').innerText()).includes('NewApiSchema'))
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+    assert.equal(await page.getByLabel('Type de NewApiSchema').inputValue(), 'api')
+
+    await page.locator('.tree button', { hasText: 'orders.created' }).click()
+    const topicSchemas = await page.getByLabel('Message').locator('option').allTextContents()
+    assert.deepEqual(topicSchemas, ['OrderCreated', 'PaymentCompleted', 'PaymentFailed'])
+
+    // Turning the payload of a topic into a proto schema is reported.
+    await page.locator('.tree button', { hasText: 'OrderCreated' }).click()
+    await page.getByLabel('Type de OrderCreated').selectOption('proto')
+    await settle(page)
+    assert.ok((await page.locator('.problems li').allInnerTexts()).some((t) => t.includes('E_TOPIC_MESSAGE_KIND')))
+    assert.ok(await page.getByRole('button', { name: /Exporter le code/ }).isDisabled())
+    await page.close()
+  })
+
+  it('opens the endpoint configurator in place of the canvas', async () => {
+    const { page } = await open()
+    const orders = page.locator('.node.service', { hasText: 'Orders' })
+    assert.equal(await orders.locator('.route').count(), 2)
+
+    await orders.locator('.route', { hasText: '/orders' }).first().click()
+    await page.locator('.endpoint').waitFor()
+    assert.equal(await page.locator('.react-flow').count(), 0, 'the canvas is replaced')
+    assert.equal(await page.locator('.inspector-panel').count(), 0)
+    assert.equal(await page.getByLabel('Méthode de place_order').inputValue(), 'post')
+    assert.equal(await page.getByLabel('Chemin de place_order').inputValue(), '/orders')
+
+    // Two columns: the logic, and the JSON it receives and answers.
+    assert.ok(await page.getByRole('region', { name: 'Logique' }).locator('.card.step').count() >= 3)
+    const request = await page.getByLabel('Exemple de requête').innerText()
+    assert.match(request, /"amount": 0/)
+    assert.match(request, /"items": \[\s*"string"\s*\]/)
+    assert.match(await page.getByLabel('Exemple de réponse').innerText(), /"order_id": "string"/)
+
+    // Back to the architecture.
+    await page.getByRole('button', { name: /Architecture/ }).first().click()
+    await page.locator('.react-flow').waitFor()
+    assert.equal(await page.locator('.endpoint').count(), 0)
+    await page.close()
+  })
+
+  it('defines a new route in the configurator: path parameters, schemas and the JSON they make', async () => {
+    const { page } = await open()
+    await page.locator('.node.service', { hasText: 'Orders' }).click()
+    await page.getByRole('button', { name: 'Ajouter une route HTTP' }).click()
+    await page.locator('.endpoint').waitFor() // creating a route opens it
+    assert.equal(await page.getByLabel('Chemin de new_route').inputValue(), '/new-route')
+
+    // A path parameter that its request schema does not have.
+    await page.getByLabel('Chemin de new_route').fill('/things/{thing_id}')
+    await page.getByLabel('Chemin de new_route').press('Enter')
+    await settle(page)
+    assert.ok((await page.locator('.ep-problems').innerText()).includes('E_ROUTE_PARAM'))
+    assert.ok(await page.getByRole('button', { name: /Exporter le code/ }).isDisabled())
+
+    await page.getByLabel('Chemin de new_route').fill('/things/{id}')
+    await page.getByLabel('Chemin de new_route').press('Enter')
+    await page.getByLabel('Méthode de new_route').selectOption('put')
+    // A PUT carries the other fields in a JSON body: add one and see it in the example.
+    await page.getByRole('article', { name: 'Requête' }).getByRole('button', { name: '+ Ajouter un champ' }).click()
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+    assert.match(await page.getByLabel('Exemple de requête').innerText(), /"field_2": "string"/)
+    assert.doesNotMatch(await page.getByLabel('Exemple de requête').innerText(), /"id"/, 'the path parameter is not in the body')
+
+    // The route is listed under its service in the tree, and in the generated code.
+    assert.ok((await page.locator('.tree button.sub').allInnerTexts()).some((t) => t.includes('/things/{id}')))
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/transport/http.rs"]').click()
+    const code = await page.locator('.code-main pre').innerText()
+    assert.match(code, /"\/things\/\{id\}"/)
+    assert.match(code, /put\(handle_new_route\)/)
+    await page.close()
+  })
+
+  it('builds the response with the logic: a schema variable filled in Rust, then read field by field', async () => {
+    const { page } = await open()
+    await page.locator('.tree button.sub', { hasText: '/orders/{order_id}' }).click()
+    await page.getByRole('button', { name: /Construire la réponse par la logique/ }).click()
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+    // The variable shows in the logic, and every response field now reads it.
+    assert.ok((await page.getByRole('region', { name: 'Logique' }).innerText()).includes('result'))
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/flows/api.rs"]').click()
+    const code = await page.locator('.code-main pre').innerText()
+    assert.match(code, /let result: pb::OrderView = /)
+    assert.match(code, /order_id: result\.order_id\.clone\(\)/)
+    await page.close()
+  })
+
+  it('hides events, proto schemas and topics while an endpoint is open', async () => {
+    const { page } = await open()
+    const tree = page.locator('.tree')
+    assert.match(await tree.innerText(), /Topics/)
+    assert.match(await tree.innerText(), /Événements/)
+    await page.locator('.tree button.sub', { hasText: '/orders/{order_id}' }).click()
+    await page.locator('.endpoint').waitFor()
+    const apiTree = await tree.innerText()
+    for (const hidden of ['Topics', 'Événements', 'Proto', 'orders.created', 'OrderCreated', 'Customer']) assert.ok(!apiTree.includes(hidden), `${hidden} should be hidden`)
+    assert.ok(apiTree.includes('OrderView'), 'API schemas stay')
+    assert.ok(apiTree.includes('/orders/{order_id}'), 'services and routes stay')
+    assert.equal(await page.locator('.tile').count(), 0, 'the architecture tiles are out of the way too')
+    await page.getByRole('button', { name: /Architecture/ }).first().click()
+    assert.match(await page.locator('.tree').innerText(), /Topics/)
+    await page.close()
+  })
+
+  it('designs tables in their own view', async () => {
+    const { page } = await open()
+    await page.getByRole('tab', { name: /Tables/ }).click()
+    await page.locator('.tables-view').waitFor()
+    assert.equal(await page.locator('.palette').count(), 0)
+    assert.equal(await page.locator('.inspector-panel').count(), 0)
+    // The sample's table of Orders is there, with its generated SQL.
+    assert.equal(await page.getByLabel('Nom de la table').inputValue(), 'orders')
+    assert.match(await page.getByLabel('SQL de la table').innerText(), /PRIMARY KEY \(order_id\)/)
+    assert.equal(await page.getByLabel('Nom de la colonne').count(), 4)
+
+    // A new column, nullable until stated otherwise; then its name, its type, its default.
+    await page.getByRole('button', { name: '+ Ajouter une colonne' }).click()
+    await page.getByLabel('Nom de la colonne').nth(4).fill('discount')
+    await page.getByLabel('Nom de la colonne').nth(4).press('Enter')
+    await page.getByLabel('Type de la colonne').nth(4).selectOption('double')
+    await page.getByLabel('Valeur par défaut').nth(4).fill('0')
+    await page.getByLabel('Valeur par défaut').nth(4).press('Enter')
+    await settle(page)
+    assert.match(await page.getByLabel('SQL de la table').innerText(), /discount DOUBLE PRECISION DEFAULT 0/)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+
+    // A table for another service.
+    await page.getByRole('region', { name: 'Tables de Payments' }).getByRole('button', { name: /Ajouter une table/ }).click()
+    await page.waitForTimeout(250)
+    assert.equal(await page.getByLabel('Nom de la table').inputValue(), 'new_table')
+    await settle(page)
+
+    // The table shows up in the generated code, additively.
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/app/schema.rs"]').click()
+    const code = await page.locator('.code-main pre').innerText()
+    assert.match(code, /ADD COLUMN IF NOT EXISTS .{1,4}discount.{1,4} DOUBLE PRECISION DEFAULT 0/) // nullable: it can join a table that has rows
+    await page.close()
+  })
+
+  it('types the result of a SQL block after the ticked columns', async () => {
+    const { page } = await open()
+    await page.locator('.tree button.sub', { hasText: '/orders/{order_id}' }).click()
+    const sql = page.getByRole('region', { name: 'Logique' }).locator('.card.step', { hasText: 'SQL' }).first()
+    assert.equal(await page.getByLabel('Table', { exact: true }).inputValue(), 'orders')
+    assert.match(await page.getByLabel('Requête SQL').innerText(), /SELECT order_id, status FROM orders WHERE order_id = input.order_id LIMIT 1/)
+    // The variable and the fields the next steps can read.
+    const prediction = await page.getByLabel('Variable produite').innerText()
+    assert.match(prediction, /order\.order_id/)
+    assert.match(prediction, /order\.status/)
+    assert.doesNotMatch(prediction, /order\.amount/)
+
+    // Ticking a column adds it to what the next steps can read.
+    await page.locator('fieldset.columns label', { hasText: 'amount' }).locator('input').check()
+    assert.match(await page.getByLabel('Variable produite').innerText(), /order\.amount/)
+
+    // Unticking the column that the answer reads is caught: the result no longer has it.
+    await page.locator('fieldset.columns label', { hasText: 'status' }).locator('input').uncheck()
+    await settle(page)
+    assert.doesNotMatch(await page.getByLabel('Variable produite').innerText(), /order\.status/)
+    assert.ok((await page.locator('.problems li').allInnerTexts()).some((t) => t.includes('E_UNKNOWN_PATH')))
+    await page.locator('fieldset.columns label', { hasText: 'status' }).locator('input').check()
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+    assert.ok(await sql.count() >= 1)
+    await page.close()
+  })
+
+  it('adds a SQL block that starts from the key the request carries', async () => {
+    const { page } = await open()
+    await page.locator('.tree button.sub', { hasText: '/orders/{order_id}' }).click()
+    await page.getByRole('region', { name: 'Logique' }).locator('.add-step-btn').click()
+    await page.getByRole('menuitem', { name: /SQL/ }).click()
+    // A second read of the same table: its variable gets its own name, and the key is already matched.
+    const preview = page.getByLabel('Requête SQL').last()
+    assert.match(await preview.innerText(), /WHERE order_id = input\.order_id/)
+    assert.match(await page.getByLabel('Variable produite').last().innerText(), /order2\.order_id/)
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+
+    // An update without a condition is refused: it would touch every row.
+    await page.getByRole('button', { name: 'Modifier', exact: true }).last().click()
+    await page.locator('.condition').last().getByRole('button', { name: 'Retirer la condition' }).click()
+    await settle(page)
+    assert.ok((await page.locator('.problems li').allInnerTexts()).some((t) => t.includes('E_SQL_NO_WHERE')))
+    await page.close()
+  })
+
+  it('sets the outbox attempts for the whole project and generates them into the services', async () => {
+    const { page } = await open()
+    await page.getByLabel('Tentatives avant DLQ').fill('8')
+    await settle(page)
+    assert.equal(await page.locator('.status').innerText(), 'Valide')
+    await page.getByLabel('Tentatives avant DLQ').fill('0') // out of range: clamped to 1
+    await settle(page)
+    assert.equal(await page.getByLabel('Tentatives avant DLQ').inputValue(), '1')
+    assert.equal(await page.locator('.status').innerText(), 'Valide')
+    await page.getByLabel('Tentatives avant DLQ').fill('8')
+    await settle(page)
+
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/app/config.rs"]').click()
+    assert.match(await page.locator('.code-main pre').innerText(), /OUTBOX_MAX_ATTEMPTS", "8"/)
+    await page.locator('[role="treeitem"][data-path="services/orders/src/transport/outbox.rs"]').click()
+    assert.match(await page.locator('.code-main pre').innerText(), /Relay::new/)
+    await page.close()
+  })
+
   it('keeps the project valid when a topic and a message are renamed', async () => {
     const { page } = await open()
     await page.locator('.tree button', { hasText: 'orders.created' }).click()
     await page.getByLabel('Nom du topic').fill('orders.accepted')
     await page.getByLabel('Nom du topic').press('Enter')
     await page.locator('.tree button', { hasText: 'OrderCreated' }).click()
-    await page.getByLabel('Nom du message').fill('OrderAccepted')
-    await page.getByLabel('Nom du message').press('Enter')
+    await page.getByLabel('Nom du schéma').fill('OrderAccepted')
+    await page.getByLabel('Nom du schéma').press('Enter')
     await settle(page)
     assert.equal(await page.locator('.status').innerText(), 'Valide')
     assert.match(await page.locator('.node.topic', { hasText: 'orders.accepted' }).innerText(), /OrderAccepted/)
@@ -110,8 +404,69 @@ describe('editor', () => {
     await page.getByRole('button', { name: /Exporter le code/ }).click()
     await page.waitForTimeout(1500)
     assert.match(fs.readFileSync(path.join(out, 'contracts/src/lib.rs'), 'utf8'), /ORDERS_ACCEPTED/)
-    assert.ok(fs.existsSync(path.join(out, 'services/orders/src/flows.rs')))
+    assert.ok(fs.existsSync(path.join(out, 'services/orders/src/flows/rpc.rs')))
     await page.close()
     fs.rmSync(tmp, { recursive: true, force: true })
+  })
+})
+
+describe('auto-update', () => {
+  let browser
+  before(async () => (browser = await launchBrowser()))
+  after(async () => browser?.close())
+
+  const open = async (opts) => {
+    const app = await openApp(browser, URL, opts)
+    await app.page.waitForTimeout(400)
+    return app
+  }
+  const button = (page) => page.getByRole('button', { name: 'Mettre à jour' })
+
+  it('checks the release feed at launch and announces the new version on the button', async () => {
+    const { page, calls, errors } = await open({ update: { version: '0.2.0' } })
+    assert.deepEqual(calls, ['plugin:updater|check'])
+    assert.match(await button(page).innerText(), /v0\.2\.0/)
+    assert.equal(await button(page).isEnabled(), true)
+    assert.deepEqual(errors, [])
+    await page.close()
+  })
+
+  it('keeps a plain button when the app is current and says so on click', async () => {
+    const { page, calls } = await open()
+    assert.equal((await button(page).innerText()).trim(), 'Mettre à jour')
+    await button(page).click()
+    await page.waitForSelector('.toast.info')
+    assert.match(await page.locator('.toast').innerText(), /à jour \(v0\.1\.0\)/)
+    assert.deepEqual(calls, ['plugin:updater|check', 'plugin:updater|check'])
+    await page.close()
+  })
+
+  it('stays silent at launch when the feed is unreachable, reports it when asked', async () => {
+    const { page } = await open({ updateFails: true })
+    assert.equal(await page.locator('.toast').count(), 0)
+    await button(page).click()
+    await page.waitForSelector('.toast.error')
+    assert.match(await page.locator('.toast').innerText(), /Recherche de mise à jour impossible/)
+    await page.close()
+  })
+
+  it('installs the update and restarts the app when clicked', async () => {
+    const { page, calls, asked } = await open({ update: { version: '0.2.0' } })
+    await button(page).click()
+    await page.waitForTimeout(300)
+    assert.equal(asked.length, 1)
+    assert.match(asked[0], /version 0\.2\.0.*redémarrer/)
+    assert.deepEqual(calls, ['plugin:updater|check', 'plugin:updater|download_and_install', 'plugin:process|restart'])
+    await page.close()
+  })
+
+  it('sits next to “Exporter le code” and fits the toolbar at the minimum width', async () => {
+    const { page } = await open({ update: { version: '0.2.0' }, viewport: { width: 1100, height: 700 } })
+    const update = await button(page).boundingBox()
+    const exportBtn = await page.getByRole('button', { name: /Exporter le code/ }).boundingBox()
+    assert.ok(update.x + update.width <= exportBtn.x + 1, 'update button is left of export')
+    assert.ok(exportBtn.x + exportBtn.width <= 1100, 'export button stays inside the window')
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true)
+    await page.close()
   })
 })

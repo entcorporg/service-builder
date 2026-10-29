@@ -16,3 +16,6 @@ sb-app = { path = "../crates/sb-app" }
 sb-model = { path = "../crates/sb-model" }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+tauri-plugin-process = "2"
+tauri-plugin-updater = "2"
+serde_json = { workspace = true }

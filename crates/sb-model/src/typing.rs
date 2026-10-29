@@ -285,6 +285,7 @@ mod tests {
         let mut p = Project::new("demo");
         p.messages = vec![
             Message {
+                kind: Default::default(),
                 name: "Customer".into(),
                 fields: vec![
                     field("name", FieldType::String),
@@ -292,6 +293,7 @@ mod tests {
                 ],
             },
             Message {
+                kind: Default::default(),
                 name: "Order".into(),
                 fields: vec![
                     field("id", FieldType::String),

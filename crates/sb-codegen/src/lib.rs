@@ -53,6 +53,9 @@ pub fn generate(project: &Project) -> Result<Vec<GeneratedFile>, CodegenError> {
     if has_errors(&diagnostics) {
         return Err(CodegenError::Invalid(diagnostics));
     }
+    // The rows read by SQL steps are typed like messages (never written to the .proto).
+    let typed = project.with_sql_rows();
+    let project = &typed;
     let mut files = workspace::files(project);
     for svc in &project.services {
         files.extend(service::generate(project, svc)?);
@@ -63,6 +66,11 @@ pub fn generate(project: &Project) -> Result<Vec<GeneratedFile>, CodegenError> {
             .map_err(|e| CodegenError::Internal(format!("{} is not valid Rust: {e}", f.path)))?;
     }
     Ok(files)
+}
+
+/// Directory of a service inside the generated workspace (`services/orders`).
+pub fn service_dir(service: &sb_model::Service) -> String {
+    service::dir(service)
 }
 
 /// Formats the Rust files with `rustfmt` when it is installed (best effort: files are left
@@ -146,20 +154,44 @@ mod tests {
                 "contracts/src/lib.rs",
                 "docker-compose.yml",
                 "runtime/Cargo.toml",
+                "runtime/src/db.rs",
                 "runtime/src/lib.rs",
+                "runtime/src/outbox.rs",
                 "services/notifications/Cargo.toml",
-                "services/notifications/src/ctx.rs",
-                "services/notifications/src/flows.rs",
+                "services/notifications/src/app/bootstrap.rs",
+                "services/notifications/src/app/config.rs",
+                "services/notifications/src/app/ctx.rs",
+                "services/notifications/src/app/mod.rs",
+                "services/notifications/src/flows/consumers.rs",
+                "services/notifications/src/flows/mod.rs",
                 "services/notifications/src/main.rs",
+                "services/notifications/src/transport/kafka.rs",
+                "services/notifications/src/transport/mod.rs",
                 "services/orders/Cargo.toml",
-                "services/orders/src/ctx.rs",
-                "services/orders/src/flows.rs",
+                "services/orders/src/app/bootstrap.rs",
+                "services/orders/src/app/config.rs",
+                "services/orders/src/app/ctx.rs",
+                "services/orders/src/app/mod.rs",
+                "services/orders/src/app/schema.rs",
+                "services/orders/src/flows/api.rs",
+                "services/orders/src/flows/mod.rs",
+                "services/orders/src/flows/rpc.rs",
                 "services/orders/src/main.rs",
-                "services/orders/src/server.rs",
+                "services/orders/src/transport/grpc.rs",
+                "services/orders/src/transport/http.rs",
+                "services/orders/src/transport/mod.rs",
+                "services/orders/src/transport/outbox.rs",
                 "services/payments/Cargo.toml",
-                "services/payments/src/ctx.rs",
-                "services/payments/src/flows.rs",
+                "services/payments/src/app/bootstrap.rs",
+                "services/payments/src/app/config.rs",
+                "services/payments/src/app/ctx.rs",
+                "services/payments/src/app/mod.rs",
+                "services/payments/src/flows/consumers.rs",
+                "services/payments/src/flows/mod.rs",
                 "services/payments/src/main.rs",
+                "services/payments/src/transport/kafka.rs",
+                "services/payments/src/transport/mod.rs",
+                "services/payments/src/transport/outbox.rs",
             ]
         );
     }
@@ -167,26 +199,35 @@ mod tests {
     #[test]
     fn rpc_flow_snapshot() {
         let files = generate(&sample::orders()).unwrap();
-        let flows = file(&files, "services/orders/src/flows.rs");
+        let flows = file(&files, "services/orders/src/flows/rpc.rs");
         assert!(
             flows.contains("pub async fn create_order(ctx: &Ctx, input: pb::CreateOrderRequest)")
         );
         assert!(flows.contains("let order_id: String = eda_runtime::new_id();"));
-        assert!(flows.contains("ctx.producer"));
+        assert!(flows.contains(
+            "eda_runtime::outbox::enqueue(&mut tx, topics::ORDERS_CREATED, Some(&key), &event)"
+        ));
+        assert!(
+            !flows.contains("ctx.producer"),
+            "flows never talk to Kafka directly"
+        );
         assert!(flows.contains("topics::ORDERS_CREATED"));
-        assert!(flows.contains("return Ok(pb::CreateOrderResponse {"));
+        assert!(flows.contains("let mut tx = ctx.db.begin().await?;"));
+        // The transaction (state + queued events) is committed before the RPC answers.
+        let commit = flows.find("tx.commit().await?;").unwrap();
+        assert!(commit < flows.find("return Ok(reply);").unwrap());
         assert!(flows.contains("// publish to orders.created"));
     }
 
     #[test]
     fn consumer_flow_uses_branch_and_rpc_client() {
         let files = generate(&sample::orders()).unwrap();
-        let payments = file(&files, "services/payments/src/flows.rs");
+        let payments = file(&files, "services/payments/src/flows/consumers.rs");
         assert!(payments.contains("if (approved.clone()) == (true) {"));
         assert!(payments.contains("} else {"));
-        let notifications = file(&files, "services/notifications/src/flows.rs");
+        let notifications = file(&files, "services/notifications/src/flows/consumers.rs");
         assert!(notifications.contains("ctx.orders.clone().cancel_order("));
-        let ctx = file(&files, "services/notifications/src/ctx.rs");
+        let ctx = file(&files, "services/notifications/src/app/ctx.rs");
         assert!(
             ctx.contains("pub orders: pb::orders_client::OrdersClient<tonic::transport::Channel>")
         );
@@ -194,16 +235,299 @@ mod tests {
     }
 
     #[test]
-    fn main_wires_consumers_and_server() {
+    fn main_only_sequences_the_start_up() {
         let files = generate(&sample::orders()).unwrap();
         let orders = file(&files, "services/orders/src/main.rs");
-        assert!(orders.contains("OrdersServer::new"));
-        assert!(orders.contains("ORDERS_PORT"));
+        // Orders has both an RPC and HTTP routes: the two servers run side by side.
+        assert!(orders.contains("transport::grpc::serve(&config, ctx.clone())"));
+        assert!(orders.contains("transport::http::serve(&config, ctx)"));
+        assert!(!orders.contains("spawn_consumers"));
         let payments = file(&files, "services/payments/src/main.rs");
-        assert!(payments.contains("eda_runtime::consume::<pb::OrderCreated"));
-        assert!(payments.contains("\"payments-on_order_created\""));
-        assert!(payments.contains("ctrl_c"));
-        assert!(!payments.contains("mod server"));
+        assert!(payments.contains("transport::kafka::spawn_consumers(&config, &ctx)"));
+        assert!(payments.contains("app::bootstrap::wait_for_shutdown()"));
+        // No topic, group or message type in `main`: that is the transport's business.
+        for needle in [
+            "eda_runtime::consume",
+            "topics::",
+            "pb::",
+            "tonic",
+            "ctrl_c",
+        ] {
+            assert!(!payments.contains(needle), "main.rs mentions {needle}");
+            assert!(!orders.contains(needle), "main.rs mentions {needle}");
+        }
+    }
+
+    #[test]
+    fn transports_hold_the_wiring() {
+        let files = generate(&sample::orders()).unwrap();
+        let grpc = file(&files, "services/orders/src/transport/grpc.rs");
+        assert!(grpc.contains("OrdersServer::new"));
+        assert!(grpc.contains("flows::rpc::create_order"));
+        let kafka = file(&files, "services/payments/src/transport/kafka.rs");
+        assert!(kafka.contains("eda_runtime::consume::<pb::OrderCreated"));
+        assert!(kafka.contains("\"payments-on_order_created\""));
+        assert!(kafka.contains("flows::consumers::on_order_created"));
+        assert!(file(&files, "services/orders/src/app/config.rs").contains("ORDERS_PORT"));
+        assert!(file(&files, "services/payments/src/app/bootstrap.rs").contains("ctrl_c"));
+        // Flows know neither Kafka nor tonic wiring.
+        let flows = file(&files, "services/payments/src/flows/consumers.rs");
+        assert!(!flows.contains("eda_runtime::consume"));
+    }
+
+    #[test]
+    fn routes_become_axum_handlers_that_delegate_to_flows() {
+        let files = generate(&sample::orders()).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        assert!(http.contains(".route(\"/orders\", post(handle_place_order))"));
+        assert!(http.contains(".route(\"/orders/{order_id}\", get(handle_get_order))"));
+        // A body for POST (+ the status of the route), a query string for GET, path parameters read by name.
+        assert!(http.contains("Json(input): Json<pb::PlaceOrderBody>"));
+        assert!(http.contains("(StatusCode::CREATED, Json(body))"));
+        assert!(http.contains("Query(mut input): Query<pb::GetOrderRequest>"));
+        assert!(http.contains("input.order_id = param(&path, \"order_id\")?;"));
+        assert!(http.contains("flows::api::get_order(&ctx, input)"));
+        // Errors: the flow's `HttpError` picks the status, anything else stays out of the answer.
+        assert!(http.contains("eda_runtime::http::HttpError"));
+        assert!(http.contains("\"internal error\""));
+
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        assert!(api.contains("pub async fn place_order(ctx: &Ctx, input: pb::PlaceOrderBody)"));
+        assert!(api.contains("let mut tx = ctx.db.begin().await?;"));
+        assert!(api.contains("eda_runtime::outbox::enqueue(&mut tx, topics::ORDERS_CREATED"));
+        assert!(api.contains("return Ok(reply);"));
+
+        let config = file(&files, "services/orders/src/app/config.rs");
+        assert!(config.contains("ORDERS_HTTP_PORT"));
+        assert!(config.contains("\"8081\""));
+        assert!(config.contains("CORS_ORIGINS"));
+        assert!(file(&files, "services/orders/Cargo.toml").contains("axum.workspace = true"));
+    }
+
+    #[test]
+    fn a_response_can_be_built_by_the_logic_and_read_field_by_field() {
+        use sb_model::{Assignment, Expr, FieldType, Step};
+        let mut p = sample::orders();
+        let path = |p: &str| Expr::Path { path: p.into() };
+        p.services[0].routes[1].steps = vec![
+            Step::Let {
+                id: "v".into(),
+                name: "view".into(),
+                value_type: FieldType::Message {
+                    name: "OrderView".into(),
+                },
+                value: Expr::Raw {
+                    code: "{ pb::OrderView { order_id: input.order_id.clone(), ..Default::default() } }"
+                        .into(),
+                },
+            },
+            Step::Respond {
+                id: "r".into(),
+                fields: vec![
+                    Assignment {
+                        field: "order_id".into(),
+                        value: path("view.order_id"),
+                    },
+                    Assignment {
+                        field: "status".into(),
+                        value: path("view.status"),
+                    },
+                ],
+            },
+        ];
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        assert!(api.contains("let view: pb::OrderView = { pb::OrderView {"));
+        assert!(api.contains("order_id: view.order_id.clone(),"));
+    }
+
+    #[test]
+    fn sql_steps_become_typed_queries_in_the_transaction() {
+        let files = generate(&sample::orders()).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        // Insert: the placeholders follow the order of the values.
+        assert!(api.contains(
+            "INSERT INTO \\\"orders\\\" (\\\"order_id\\\", \\\"amount\\\") VALUES ($1, $2)"
+        ));
+        assert!(api.contains(".execute(&mut *tx)"));
+        // Select one: a row struct of the ticked columns, 404 when nothing matches.
+        assert!(api.contains("struct OrdersRowH6 {"));
+        assert!(api.contains("WHERE \\\"order_id\\\" = $1 LIMIT 1"));
+        assert!(api.contains("fetch_optional(&mut *tx)"));
+        assert!(api.contains("HttpError::not_found"));
+        assert!(api.contains("order_id: order.order_id.clone(),"));
+        // The tables are created at start-up, additively.
+        let schema = file(&files, "services/orders/src/app/schema.rs");
+        assert!(schema.contains("CREATE TABLE IF NOT EXISTS \\\"orders\\\""));
+        assert!(schema.contains("PRIMARY KEY (\\\"order_id\\\")"));
+        assert!(
+            schema.contains(
+                "ADD COLUMN IF NOT EXISTS \\\"status\\\" TEXT NOT NULL DEFAULT 'PENDING'"
+            )
+        );
+        assert!(
+            file(&files, "services/orders/src/app/bootstrap.rs")
+                .contains("crate::app::schema::apply(&db)")
+        );
+        // Services without a table get nothing.
+        assert!(
+            !files
+                .iter()
+                .any(|f| f.path == "services/payments/src/app/schema.rs")
+        );
+    }
+
+    #[test]
+    fn timestamps_and_uuids_are_read_as_text_and_written_through_a_cast() {
+        use sb_model::{Column, ColumnType, SqlOp, Step};
+        let mut p = sample::orders();
+        let table = &mut p.services[0].tables[0];
+        table.columns.push(Column::new("ext_id", ColumnType::Uuid));
+        table.columns[3].nullable = false;
+        if let Step::Sql { columns, .. } = &mut p.services[0].routes[1].steps[0] {
+            columns.push("created_at".into());
+            columns.push("ext_id".into());
+        }
+        // The new column has to be written by the insert.
+        if let Step::Sql {
+            op: SqlOp::Insert,
+            values,
+            ..
+        } = &mut p.services[0].routes[0].steps[1]
+        {
+            values.push(sb_model::Assignment {
+                field: "ext_id".into(),
+                value: sb_model::Expr::Path {
+                    path: "order_id".into(),
+                },
+            });
+            values.push(sb_model::Assignment {
+                field: "created_at".into(),
+                value: sb_model::Expr::Raw {
+                    code: "\"2026-01-01T00:00:00Z\".to_string()".into(),
+                },
+            });
+        }
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        assert!(api.contains("to_char(\\\"created_at\\\" AT TIME ZONE 'UTC'"));
+        assert!(api.contains("\\\"ext_id\\\"::text AS \\\"ext_id\\\""));
+        assert!(api.contains("$3::uuid"));
+        assert!(api.contains("$4::timestamptz"));
+    }
+
+    #[test]
+    fn routes_sharing_a_path_are_served_by_one_method_router() {
+        let mut p = sample::orders();
+        let mut delete = p.services[0].routes[1].clone();
+        delete.name = "delete_order".into();
+        delete.method = sb_model::HttpMethod::Delete;
+        p.services[0].routes.push(delete);
+        let files = generate(&p).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        assert!(http.contains(
+            ".route(\"/orders/{order_id}\", get(handle_get_order).delete(handle_delete_order))"
+        ));
+        // Only the free functions that are used are imported.
+        assert!(http.contains("routing::{get, post}"));
+    }
+
+    #[test]
+    fn services_without_routes_do_not_pull_the_http_stack() {
+        let files = generate(&sample::orders()).unwrap();
+        for svc in ["payments", "notifications"] {
+            assert!(!file(&files, &format!("services/{svc}/Cargo.toml")).contains("axum"));
+            assert!(
+                !file(&files, &format!("services/{svc}/src/app/config.rs")).contains("http_port")
+            );
+        }
+    }
+
+    #[test]
+    fn api_schemas_are_json_in_the_contracts() {
+        let files = generate(&sample::orders()).unwrap();
+        let build = file(&files, "contracts/build.rs");
+        assert!(
+            build.contains(
+                "for message in [\"PlaceOrderBody\", \"GetOrderRequest\", \"OrderView\"]"
+            )
+        );
+        assert!(build.contains("serde::Serialize, serde::Deserialize"));
+        assert!(file(&files, "contracts/Cargo.toml").contains("serde.workspace = true"));
+        // A project without API schemas keeps the plain build script.
+        let mut p = sample::orders();
+        p.services[0].routes.clear();
+        p.messages.retain(|m| m.kind != sb_model::MessageKind::Api);
+        let plain = generate(&p).unwrap();
+        assert!(!file(&plain, "contracts/build.rs").contains("serde"));
+    }
+
+    #[test]
+    fn publishing_goes_through_the_outbox_and_its_relay() {
+        let files = generate(&sample::orders()).unwrap();
+        // Services that publish start the relay; the one that only consumes and calls does not.
+        for svc in ["orders", "payments"] {
+            let main = file(&files, &format!("services/{svc}/src/main.rs"));
+            assert!(main.contains("transport::outbox::spawn_relay(&config, &ctx)?;"));
+            let boot = file(&files, &format!("services/{svc}/src/app/bootstrap.rs"));
+            assert!(boot.contains("eda_runtime::outbox::migrate(&db)"));
+            let config = file(&files, &format!("services/{svc}/src/app/config.rs"));
+            assert!(config.contains("OUTBOX_MAX_ATTEMPTS"), "{svc}");
+            assert!(
+                config.contains("\"5\""),
+                "default attempts come from the project"
+            );
+        }
+        let notifications = file(&files, "services/notifications/src/main.rs");
+        assert!(!notifications.contains("outbox"));
+        assert!(!file(&files, "services/notifications/src/app/bootstrap.rs").contains("outbox"));
+        // Every service owns a database, configurable per service.
+        let config = file(&files, "services/orders/src/app/config.rs");
+        assert!(config.contains("ORDERS_DATABASE_URL"));
+        assert!(config.contains("localhost:5432/orders"));
+        assert!(file(&files, "services/orders/src/app/ctx.rs").contains("pub db: sqlx::PgPool"));
+    }
+
+    #[test]
+    fn dead_letter_topics_are_provisioned_and_named() {
+        let files = generate(&sample::orders()).unwrap();
+        let boot = file(&files, "services/orders/src/app/bootstrap.rs");
+        assert!(boot.contains("topics::ORDERS_CREATED_DLQ"));
+        let contracts = file(&files, "contracts/src/lib.rs");
+        assert!(contracts.contains("pub const ORDERS_CREATED_DLQ: &str = \"orders.created.dlq\";"));
+    }
+
+    #[test]
+    fn declared_producers_are_documented_and_provision_their_topic() {
+        let mut p = sample::orders();
+        // Notifications owns a new topic but has no step publishing there yet.
+        p.topics[0].producers.push("Notifications".into());
+        let files = generate(&p).unwrap();
+        assert!(
+            file(&files, "contracts/src/lib.rs").contains("Produced by Orders, Notifications.")
+        );
+        assert!(file(&files, "README.md").contains("- produces `orders.created`"));
+        let boot = file(&files, "services/notifications/src/app/bootstrap.rs");
+        assert!(boot.contains("topics::ORDERS_CREATED_DLQ"));
+        // No step publishes, so no relay and no outbox table for it.
+        assert!(!file(&files, "services/notifications/src/main.rs").contains("outbox"));
+    }
+
+    #[test]
+    fn the_attempts_setting_reaches_the_services() {
+        let mut p = sample::orders();
+        p.outbox.max_attempts = 9;
+        let files = generate(&p).unwrap();
+        assert!(file(&files, "services/orders/src/app/config.rs").contains("\"9\""));
+    }
+
+    #[test]
+    fn local_infrastructure_has_a_database() {
+        let files = generate(&sample::orders()).unwrap();
+        let compose = file(&files, "docker-compose.yml");
+        assert!(compose.contains("postgres:16"));
+        assert!(compose.contains("postgres-data"));
+        assert!(file(&files, "Cargo.toml").contains("sqlx"));
     }
 
     #[test]
@@ -243,7 +567,8 @@ mod tests {
         }
         // Whether or not rustfmt is installed, comments survive.
         assert!(
-            file(&files, "services/orders/src/flows.rs").contains("// publish to orders.created")
+            file(&files, "services/orders/src/flows/rpc.rs")
+                .contains("// publish to orders.created")
         );
     }
 

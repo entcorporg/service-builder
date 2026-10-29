@@ -14,6 +14,13 @@ pub fn check(project: &Project) -> Vec<Diagnostic> {
                 &mut out,
             );
         }
+        for (ri, r) in s.routes.iter().enumerate() {
+            steps(
+                &format!("/services/{si}/routes/{ri}/steps"),
+                &r.steps,
+                &mut out,
+            );
+        }
         for (ci, c) in s.consumers.iter().enumerate() {
             steps(
                 &format!("/services/{si}/consumers/{ci}/steps"),
@@ -34,6 +41,14 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
             Step::Publish { payload, .. } => assignments(payload, &format!("{path}/payload"), out),
             Step::CallRpc { request, .. } => assignments(request, &format!("{path}/request"), out),
             Step::Respond { fields, .. } => assignments(fields, &format!("{path}/fields"), out),
+            Step::Sql {
+                conditions, values, ..
+            } => {
+                for (j, c) in conditions.iter().enumerate() {
+                    expr(&c.value, &format!("{path}/where/{j}/value"), out);
+                }
+                assignments(values, &format!("{path}/values"), out);
+            }
             Step::Branch {
                 condition,
                 then,

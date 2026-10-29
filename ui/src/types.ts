@@ -12,8 +12,12 @@ export interface Field {
   tag?: number
 }
 
+/** What a schema is for: Kafka payload, gRPC message / shared type, or HTTP API (not generated yet). */
+export type MessageKind = 'event' | 'proto' | 'api'
+
 export interface Message {
   name: string
+  kind: MessageKind
   fields: Field[]
 }
 
@@ -28,6 +32,8 @@ export interface Topic {
   partitions: number
   replicationFactor: number
   keyField: string | null
+  /** Services allowed to publish here: the owners of the event. */
+  producers: string[]
   position: Position
 }
 
@@ -47,6 +53,32 @@ export interface Assignment {
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
+export type ColumnType = 'string' | 'bool' | 'int32' | 'int64' | 'float' | 'double' | 'timestamp' | 'uuid'
+
+export interface Column {
+  name: string
+  type: ColumnType
+  nullable: boolean
+  primaryKey: boolean
+  /** SQL expression used when an insert gives no value (`now()`, `0`, `'new'`). */
+  default: string | null
+}
+
+/** A table of the database of a service. */
+export interface Table {
+  name: string
+  columns: Column[]
+}
+
+export type SqlOp = 'select' | 'insert' | 'update' | 'delete'
+
+/** `column <op> value`; the conditions of a step are all required (AND). */
+export interface SqlCondition {
+  column: string
+  op: CmpOp
+  value: Expr
+}
+
 export type Step =
   | { type: 'log'; id: string; level: LogLevel; message: string }
   | { type: 'let'; id: string; name: string; valueType: FieldType; value: Expr }
@@ -54,6 +86,25 @@ export type Step =
   | { type: 'callRpc'; id: string; service: string; method: string; request: Assignment[]; bind: string | null }
   | { type: 'branch'; id: string; condition: Condition; then: Step[]; otherwise: Step[] }
   | { type: 'respond'; id: string; fields: Assignment[] }
+  | {
+      type: 'sql'
+      id: string
+      op: SqlOp
+      table: string
+      /** Select: the variable receiving the row (or the list of rows with `many`). */
+      bind: string | null
+      /** Select: the columns read, which type the variable. */
+      columns: string[]
+      many: boolean
+      /** Select: convert the rows into this schema. */
+      into: string | null
+      where: SqlCondition[]
+      /** Insert and update: the value of each column (`field` is the column name). */
+      values: Assignment[]
+      orderBy: string | null
+      descending: boolean
+      limit: number | null
+    }
   | { type: 'code'; id: string; code: string }
 
 export type StepType = Step['type']
@@ -62,6 +113,20 @@ export interface Rpc {
   name: string
   request: string
   response: string
+  steps: Step[]
+}
+
+export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete'
+
+/** An HTTP endpoint for the front. `{params}` of the path fill fields of `request`; the rest comes from the JSON body or the query. */
+export interface Route {
+  name: string
+  method: HttpMethod
+  path: string
+  request: string
+  response: string
+  /** Success status: 200, 201 or 202. */
+  status: number
   steps: Step[]
 }
 
@@ -75,7 +140,11 @@ export interface Consumer {
 export interface Service {
   name: string
   port: number
+  /** Port of the HTTP API, needed as soon as there is a route. */
+  httpPort: number | null
   rpcs: Rpc[]
+  routes: Route[]
+  tables: Table[]
   consumers: Consumer[]
   position: Position
 }
@@ -84,6 +153,8 @@ export interface Project {
   schemaVersion: number
   name: string
   broker: { bootstrapServers: string }
+  /** Publish attempts before an event is moved to its `<topic>.dlq`. */
+  outbox: { maxAttempts: number }
   messages: Message[]
   topics: Topic[]
   services: Service[]

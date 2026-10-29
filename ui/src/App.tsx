@@ -1,11 +1,13 @@
 import { useEffect, useRef } from 'react'
-import { openProject, saveProject, saveProjectAs } from './actions'
+import { checkForUpdate, openProject, saveProject, saveProjectAs } from './actions'
 import { api } from './bridge'
 import { Canvas } from './components/Canvas'
+import { EndpointEditor } from './components/EndpointEditor'
 import { CodeView } from './components/CodeView'
 import { Inspector } from './components/Inspector'
 import { Palette } from './components/Palette'
 import { Problems } from './components/Problems'
+import { TablesView } from './components/TablesView'
 import { Toolbar } from './components/Toolbar'
 import { useStore } from './store'
 
@@ -63,25 +65,41 @@ function Toast() {
 
 export default function App() {
   const view = useStore((s) => s.view)
+  const selection = useStore((s) => s.selection)
+  // A selected route replaces the canvas by the endpoint configurator.
+  const endpoint = view === 'architecture' && selection?.kind === 'route' ? selection : null
   useAnalysis()
   useShortcuts()
 
   // The first launch opens the demo project so the canvas is never blank.
   useEffect(() => {
     void api.sampleProject().then((p) => useStore.getState().load(p, null))
+    void checkForUpdate({ silent: true })
   }, [])
 
   return (
-    <div className="app">
+    <div className={`app view-${endpoint ? 'endpoint' : view}`}>
       <Toolbar />
-      <Palette />
+      {view === 'architecture' && <Palette />}
       <main className="center">
-        <div className="stage">{view === 'architecture' ? <Canvas /> : <CodeView />}</div>
+        <div className="stage">
+          {view === 'tables' ? (
+            <TablesView />
+          ) : endpoint ? (
+            <EndpointEditor service={endpoint.service} route={endpoint.route} />
+          ) : view === 'architecture' ? (
+            <Canvas />
+          ) : (
+            <CodeView />
+          )}
+        </div>
         <Problems />
       </main>
-      <aside className="inspector-panel" aria-label="Inspecteur">
-        <Inspector />
-      </aside>
+      {view === 'architecture' && !endpoint && (
+        <aside className="inspector-panel" aria-label="Inspecteur">
+          <Inspector />
+        </aside>
+      )}
       <Toast />
     </div>
   )

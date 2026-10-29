@@ -21,7 +21,11 @@ export async function launchBrowser() {
   return chromium.launch(process.env.SB_CHROMIUM ? { executablePath: process.env.SB_CHROMIUM } : {})
 }
 
-export async function openApp(browser, url, { dialogs = {}, viewport = { width: 1480, height: 920 } } = {}) {
+// `update` is the release the fake feed announces ({ version, body }), or null for an up-to-date app;
+// `updateFails` makes the feed unreachable. `calls` lists the updater/process commands the UI issued, `asked` the confirmation questions shown.
+export async function openApp(browser, url, { dialogs = {}, viewport = { width: 1480, height: 920 }, update = null, updateFails = false } = {}) {
+  const calls = []
+  const asked = []
   const page = await browser.newPage({ viewport })
   const errors = []
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()))
@@ -53,8 +57,22 @@ export async function openApp(browser, url, { dialogs = {}, viewport = { width: 
         return dialogs.open ?? null
       case 'plugin:dialog|save':
         return dialogs.save ?? null
-      case 'plugin:dialog|ask':
-        return true
+      case 'plugin:dialog|message':
+        // `ask` is a message with custom buttons; answering with the OK label means “yes”.
+        asked.push(args.message)
+        return args.buttons?.OkCancelCustom?.[0] ?? 'Yes'
+      case 'plugin:app|version':
+        return '0.1.0'
+      case 'plugin:updater|check':
+        calls.push(cmd)
+        if (updateFails) throw new Error('feed unreachable')
+        return update && { rid: 7, currentVersion: '0.1.0', version: update.version, date: null, body: update.body ?? null, rawJson: {} }
+      case 'plugin:updater|download_and_install':
+      case 'plugin:process|restart':
+        calls.push(cmd)
+        return null
+      case 'plugin:resources|close':
+        return null
       default:
         throw new Error(`unmocked command ${cmd}`)
     }
@@ -71,5 +89,5 @@ export async function openApp(browser, url, { dialogs = {}, viewport = { width: 
   })
   await page.goto(url)
   await page.waitForSelector('.node.service')
-  return { page, errors }
+  return { page, errors, calls, asked }
 }

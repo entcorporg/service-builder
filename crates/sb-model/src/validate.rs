@@ -8,7 +8,9 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::names::{is_pascal_ident, is_snake_ident, is_topic_name, snake, topic_const};
+use crate::names::{
+    is_pascal_ident, is_snake_ident, is_topic_name, route_params, route_shape, snake, topic_const,
+};
 use crate::project::*;
 use crate::typing::{
     Scope, TemplatePart, TypeRef, coerce_literal, infer_literal, parse_template, resolve_path,
@@ -37,8 +39,10 @@ pub fn has_errors(diagnostics: &[Diagnostic]) -> bool {
 }
 
 pub fn validate(project: &Project) -> Vec<Diagnostic> {
+    // The rows read by SQL steps are typed like messages (appended: indexes do not move).
+    let typed = project.with_sql_rows();
     let mut c = Checker {
-        project,
+        project: &typed,
         out: Vec::new(),
     };
     c.project();
@@ -65,7 +69,17 @@ struct Env<'a> {
     handler: Handler<'a>,
 }
 
-const RESERVED_VARS: [&str; 2] = ["input", "ctx"];
+fn kind_label(kind: MessageKind) -> &'static str {
+    match kind {
+        MessageKind::Event => "an event schema",
+        MessageKind::Proto => "a proto schema",
+        MessageKind::Api => "an API schema",
+        MessageKind::Row => "a SQL row",
+    }
+}
+
+/// `tx` is the database transaction every handler runs in.
+const RESERVED_VARS: [&str; 3] = ["input", "ctx", "tx"];
 
 impl<'a> Checker<'a> {
     fn error(&mut self, code: &str, path: impl Into<String>, message: impl Into<String>) {
@@ -112,6 +126,13 @@ impl<'a> Checker<'a> {
                 "the Kafka bootstrap servers are empty",
             );
         }
+        if !(1..=MAX_OUTBOX_ATTEMPTS).contains(&p.outbox.max_attempts) {
+            self.error(
+                "E_OUTBOX_ATTEMPTS",
+                "/outbox/maxAttempts",
+                format!("an event gets between 1 and {MAX_OUTBOX_ATTEMPTS} publish attempts before it is moved to the DLQ"),
+            );
+        }
     }
 
     // ---- messages --------------------------------------------------------------------
@@ -130,6 +151,9 @@ impl<'a> Checker<'a> {
             }
         }
         for (i, m) in p.messages.iter().enumerate() {
+            if m.kind == MessageKind::Row {
+                continue; // derived from a SQL step, not part of the project
+            }
             let base = format!("/messages/{i}");
             if !is_pascal_ident(&m.name) {
                 self.error(
@@ -171,13 +195,43 @@ impl<'a> Checker<'a> {
                         format!("field `{}` is defined twice in `{}`", f.name, m.name),
                     );
                 }
-                if let FieldType::Message { name } = &f.ty
-                    && p.message(name).is_none()
+                if let FieldType::Message { name } = &f.ty {
+                    match p.message(name) {
+                        None => self.error(
+                            "E_UNKNOWN_MESSAGE",
+                            format!("{fp}/type"),
+                            format!("field `{}` references unknown message `{name}`", f.name),
+                        ),
+                        // Events and proto schemas share building blocks; API schemas live apart.
+                        Some(target)
+                            if (target.kind == MessageKind::Api)
+                                != (m.kind == MessageKind::Api) =>
+                        {
+                            self.error(
+                                "E_SCHEMA_KIND_MIX",
+                                format!("{fp}/type"),
+                                format!(
+                                    "`{}` is {} and cannot contain `{name}`, which is {}",
+                                    m.name,
+                                    kind_label(m.kind),
+                                    kind_label(target.kind)
+                                ),
+                            );
+                        }
+                        Some(_) => {}
+                    }
+                }
+                if m.kind == MessageKind::Api
+                    && matches!(f.ty, FieldType::Bytes | FieldType::Timestamp)
                 {
                     self.error(
-                        "E_UNKNOWN_MESSAGE",
+                        "E_API_FIELD_TYPE",
                         format!("{fp}/type"),
-                        format!("field `{}` references unknown message `{name}`", f.name),
+                        format!(
+                            "field `{}`: `{}` has no JSON form in API schemas yet (use string, bool, int32, int64, float, double or another API schema)",
+                            f.name,
+                            if f.ty == FieldType::Bytes { "bytes" } else { "timestamp" }
+                        ),
                     );
                 }
                 if f.repeated && f.optional {
@@ -280,6 +334,16 @@ impl<'a> Checker<'a> {
                     ),
                 );
             }
+            if t.name.to_ascii_lowercase().ends_with(".dlq") {
+                self.error(
+                    "E_TOPIC_RESERVED",
+                    format!("{base}/name"),
+                    format!(
+                        "`{}` ends with `.dlq`, which is reserved for dead-letter topics (`<topic>.dlq` is created for every topic)",
+                        t.name
+                    ),
+                );
+            }
             if !names.insert(t.name.as_str()) {
                 self.error(
                     "E_DUPLICATE_TOPIC",
@@ -300,6 +364,23 @@ impl<'a> Checker<'a> {
                     ),
                 );
             }
+            let mut seen = HashSet::new();
+            for (j, producer) in t.producers.iter().enumerate() {
+                let pp = format!("{base}/producers/{j}");
+                if p.service(producer).is_none() {
+                    self.error(
+                        "E_UNKNOWN_SERVICE",
+                        pp,
+                        format!("topic `{}` lists unknown producer `{producer}`", t.name),
+                    );
+                } else if !seen.insert(producer.as_str()) {
+                    self.error(
+                        "E_DUPLICATE_PRODUCER",
+                        pp,
+                        format!("`{producer}` is listed twice as producer of `{}`", t.name),
+                    );
+                }
+            }
             let Some(msg) = p.message(&t.message) else {
                 self.error(
                     "E_UNKNOWN_MESSAGE",
@@ -308,6 +389,18 @@ impl<'a> Checker<'a> {
                 );
                 continue;
             };
+            if msg.kind != MessageKind::Event {
+                self.error(
+                    "E_TOPIC_MESSAGE_KIND",
+                    format!("{base}/message"),
+                    format!(
+                        "topic `{}` carries `{}`, which is {}: a topic needs an event schema",
+                        t.name,
+                        msg.name,
+                        kind_label(msg.kind)
+                    ),
+                );
+            }
             if t.partitions < 1 {
                 self.error(
                     "E_PARTITIONS",
@@ -384,13 +477,39 @@ impl<'a> Checker<'a> {
                     format!("port {} is already used by `{other}`", s.port),
                 );
             }
-            if s.rpcs.is_empty() && s.consumers.is_empty() {
+            if !s.routes.is_empty() {
+                match s.http_port {
+                    None | Some(0) => self.error(
+                        "E_HTTP_PORT",
+                        format!("{base}/httpPort"),
+                        format!(
+                            "`{}` has HTTP routes: give it an HTTP port (1 to 65535)",
+                            s.name
+                        ),
+                    ),
+                    Some(port) => {
+                        if let Some(other) = ports.insert(port, &s.name) {
+                            self.error(
+                                "E_DUPLICATE_PORT",
+                                format!("{base}/httpPort"),
+                                format!("port {port} is already used by `{other}`"),
+                            );
+                        }
+                    }
+                }
+            }
+            if s.rpcs.is_empty() && s.consumers.is_empty() && s.routes.is_empty() {
                 self.warn(
                     "W_EMPTY_SERVICE",
                     base.clone(),
-                    format!("service `{}` has no RPC and no consumer", s.name),
+                    format!(
+                        "service `{}` has no RPC, no HTTP route and no consumer",
+                        s.name
+                    ),
                 );
             }
+            self.routes(s, &base);
+            self.tables(s, &base);
 
             let mut rpc_names = HashSet::new();
             for (j, r) in s.rpcs.iter().enumerate() {
@@ -415,6 +534,8 @@ impl<'a> Checker<'a> {
                 }
                 let req_ok = self.require_message(&r.request, &format!("{rp}/request"));
                 let res_ok = self.require_message(&r.response, &format!("{rp}/response"));
+                self.require_proto(&r.request, &format!("{rp}/request"));
+                self.require_proto(&r.response, &format!("{rp}/response"));
                 if req_ok && res_ok {
                     let env = Env {
                         service: s,
@@ -491,6 +612,429 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn routes(&mut self, s: &Service, base: &str) {
+        let p = self.project;
+        let mut names = HashSet::new();
+        let mut shapes: BTreeMap<(&'static str, String), &str> = BTreeMap::new();
+        for (j, r) in s.routes.iter().enumerate() {
+            let rp = format!("{base}/routes/{j}");
+            if !is_snake_ident(&r.name) {
+                self.error(
+                    "E_ROUTE_NAME",
+                    format!("{rp}/name"),
+                    format!(
+                        "route name `{}` must be snake_case (e.g. `{}`)",
+                        r.name,
+                        snake(&r.name)
+                    ),
+                );
+            }
+            if !names.insert(r.name.as_str()) {
+                self.error(
+                    "E_DUPLICATE_ROUTE_NAME",
+                    format!("{rp}/name"),
+                    format!("route `{}` is defined twice in `{}`", r.name, s.name),
+                );
+            }
+            let params = match route_params(&r.path) {
+                Ok(params) => {
+                    if let Some(other) =
+                        shapes.insert((r.method.as_str(), route_shape(&r.path)), &r.name)
+                    {
+                        self.error(
+                            "E_DUPLICATE_ROUTE",
+                            format!("{rp}/path"),
+                            format!(
+                                "`{} {}` is already served by route `{other}`",
+                                r.method.as_str(),
+                                r.path
+                            ),
+                        );
+                    }
+                    params
+                }
+                Err(why) => {
+                    self.error("E_ROUTE_PATH", format!("{rp}/path"), why);
+                    vec![]
+                }
+            };
+            if !(200..=202).contains(&r.status) {
+                self.error(
+                    "E_ROUTE_STATUS",
+                    format!("{rp}/status"),
+                    "the success status must be 200, 201 or 202",
+                );
+            }
+            let req_ok = self.require_message(&r.request, &format!("{rp}/request"));
+            let res_ok = self.require_message(&r.response, &format!("{rp}/response"));
+            self.require_api(&r.request, &format!("{rp}/request"));
+            self.require_api(&r.response, &format!("{rp}/response"));
+            if !req_ok || !res_ok {
+                continue;
+            }
+
+            let request = p.message(&r.request).expect("checked");
+            for param in &params {
+                match request.field(param) {
+                    None => self.error(
+                        "E_ROUTE_PARAM",
+                        format!("{rp}/path"),
+                        format!("`{{{param}}}` has no field `{param}` in `{}`", r.request),
+                    ),
+                    Some(f)
+                        if f.repeated
+                            || f.optional
+                            || !matches!(
+                                f.ty,
+                                FieldType::String
+                                    | FieldType::Bool
+                                    | FieldType::Int32
+                                    | FieldType::Int64
+                            ) =>
+                    {
+                        self.error(
+                            "E_ROUTE_PARAM",
+                            format!("{rp}/path"),
+                            format!(
+                                "field `{param}` of `{}` fills `{{{param}}}`: it must be a required string, bool, int32 or int64",
+                                r.request
+                            ),
+                        );
+                    }
+                    Some(_) => {}
+                }
+            }
+            if !r.method.has_body() {
+                for f in request.fields.iter().filter(|f| !params.contains(&f.name)) {
+                    if f.repeated || f.ty.is_message() {
+                        self.error(
+                            "E_ROUTE_QUERY_FIELD",
+                            format!("{rp}/request"),
+                            format!(
+                                "field `{}` of `{}` comes from the query string of a {}: only single scalar values fit (use POST, PUT or PATCH for a body)",
+                                f.name,
+                                r.request,
+                                r.method.as_str()
+                            ),
+                        );
+                    }
+                }
+            }
+
+            let env = Env {
+                service: s,
+                handler: Handler::Rpc {
+                    response: &r.response,
+                },
+            };
+            let mut scope = Scope::with_input(&r.request);
+            let returns = self.steps(&env, &format!("{rp}/steps"), &r.steps, &mut scope);
+            if !returns {
+                self.warn(
+                    "W_NO_RESPOND",
+                    rp,
+                    format!(
+                        "`{} {}` does not always end with a Respond step; it will answer with an empty `{}`",
+                        r.method.as_str(),
+                        r.path,
+                        r.response
+                    ),
+                );
+            }
+        }
+    }
+
+    // ---- tables and SQL ---------------------------------------------------------------
+
+    fn tables(&mut self, s: &Service, base: &str) {
+        let mut names = HashSet::new();
+        for (i, t) in s.tables.iter().enumerate() {
+            let tp = format!("{base}/tables/{i}");
+            if !is_snake_ident(&t.name) {
+                self.error(
+                    "E_TABLE_NAME",
+                    format!("{tp}/name"),
+                    format!(
+                        "table name `{}` must be snake_case (e.g. `{}`)",
+                        t.name,
+                        snake(&t.name)
+                    ),
+                );
+            } else if t.name == "outbox" {
+                self.error(
+                    "E_TABLE_RESERVED",
+                    format!("{tp}/name"),
+                    "`outbox` is the table of the published events, pick another name",
+                );
+            }
+            if !names.insert(t.name.as_str()) {
+                self.error(
+                    "E_DUPLICATE_TABLE",
+                    format!("{tp}/name"),
+                    format!("table `{}` is defined twice in `{}`", t.name, s.name),
+                );
+            }
+            if t.columns.is_empty() {
+                self.error(
+                    "E_TABLE_EMPTY",
+                    &tp,
+                    format!("table `{}` has no column", t.name),
+                );
+            } else if !t.columns.iter().any(|c| c.primary_key) {
+                self.warn(
+                    "W_TABLE_NO_PK",
+                    &tp,
+                    format!("table `{}` has no primary key", t.name),
+                );
+            }
+            let mut columns = HashSet::new();
+            for (j, c) in t.columns.iter().enumerate() {
+                let cp = format!("{tp}/columns/{j}");
+                if !is_snake_ident(&c.name) {
+                    self.error(
+                        "E_COLUMN_NAME",
+                        format!("{cp}/name"),
+                        format!(
+                            "column name `{}` must be snake_case (e.g. `{}`)",
+                            c.name,
+                            snake(&c.name)
+                        ),
+                    );
+                }
+                if !columns.insert(c.name.as_str()) {
+                    self.error(
+                        "E_DUPLICATE_COLUMN",
+                        format!("{cp}/name"),
+                        format!("column `{}` is defined twice in `{}`", c.name, t.name),
+                    );
+                }
+                if c.primary_key && c.nullable {
+                    self.error(
+                        "E_PK_NULLABLE",
+                        &cp,
+                        format!("`{}` is a primary key: it cannot be null", c.name),
+                    );
+                }
+                if let Some(d) = &c.default
+                    && (d.contains(';') || d.contains("--") || d.contains('\n'))
+                {
+                    self.error(
+                        "E_COLUMN_DEFAULT",
+                        format!("{cp}/default"),
+                        "a default is one SQL expression (no `;`, no comment, no line break)",
+                    );
+                }
+            }
+        }
+    }
+
+    /// The type of the values a column holds, as a flow sees it.
+    fn column_type(c: &Column) -> TypeRef {
+        let mut t = TypeRef::scalar(c.ty.field_type());
+        t.optional = c.nullable;
+        t
+    }
+
+    fn sql(&mut self, env: &Env, path: &str, step: &Step, scope: &mut Scope) {
+        let Step::Sql {
+            id,
+            op,
+            table,
+            bind,
+            columns,
+            many,
+            into,
+            conditions,
+            values,
+            order_by,
+            ..
+        } = step
+        else {
+            return;
+        };
+        let Some(t) = env.service.table(table) else {
+            self.error(
+                "E_UNKNOWN_TABLE",
+                format!("{path}/table"),
+                format!(
+                    "`{}` has no table `{table}`: design it in the Tables view",
+                    env.service.name
+                ),
+            );
+            return;
+        };
+        let column = |name: &str| t.column(name);
+
+        for (i, c) in conditions.iter().enumerate() {
+            let cp = format!("{path}/where/{i}");
+            match column(&c.column) {
+                None => self.error(
+                    "E_UNKNOWN_COLUMN",
+                    format!("{cp}/column"),
+                    format!("table `{table}` has no column `{}`", c.column),
+                ),
+                Some(col) => {
+                    self.check_expr(
+                        scope,
+                        &c.value,
+                        Some(&Self::column_type(col)),
+                        &format!("{cp}/value"),
+                    );
+                }
+            }
+        }
+        if matches!(op, SqlOp::Update | SqlOp::Delete) && conditions.is_empty() {
+            self.error(
+                "E_SQL_NO_WHERE",
+                format!("{path}/where"),
+                "an update or a delete without a condition would touch every row: add one",
+            );
+        }
+
+        match op {
+            SqlOp::Select => {
+                if columns.is_empty() {
+                    self.error(
+                        "E_SQL_NO_COLUMNS",
+                        format!("{path}/columns"),
+                        "tick at least one column to read",
+                    );
+                }
+                for (i, name) in columns.iter().enumerate() {
+                    if column(name).is_none() {
+                        self.error(
+                            "E_UNKNOWN_COLUMN",
+                            format!("{path}/columns/{i}"),
+                            format!("table `{table}` has no column `{name}`"),
+                        );
+                    }
+                }
+                if let Some(o) = order_by
+                    && column(o).is_none()
+                {
+                    self.error(
+                        "E_UNKNOWN_COLUMN",
+                        format!("{path}/orderBy"),
+                        format!("table `{table}` has no column `{o}`"),
+                    );
+                }
+                let Some(var) = bind else {
+                    self.error(
+                        "E_SQL_BIND",
+                        format!("{path}/bind"),
+                        "name the variable that receives the result",
+                    );
+                    return;
+                };
+                self.check_var_name(var, &format!("{path}/bind"));
+                let ty = match into {
+                    Some(schema) => {
+                        self.sql_into(path, table, columns, t, schema);
+                        TypeRef {
+                            repeated: *many,
+                            ..TypeRef::message(schema)
+                        }
+                    }
+                    None => {
+                        if *many {
+                            self.error(
+                                "E_SQL_MANY_INTO",
+                                format!("{path}/into"),
+                                "a list of rows has to be converted into a schema (`into`) to be used",
+                            );
+                        }
+                        TypeRef::message(sql_row_name(table, id))
+                    }
+                };
+                scope.bind(var.clone(), ty);
+            }
+            SqlOp::Insert | SqlOp::Update => {
+                let mut seen = HashSet::new();
+                for (i, a) in values.iter().enumerate() {
+                    let vp = format!("{path}/values/{i}");
+                    if !seen.insert(a.field.as_str()) {
+                        self.error(
+                            "E_SQL_DUPLICATE_COLUMN",
+                            &vp,
+                            format!("`{}` is set twice", a.field),
+                        );
+                    }
+                    match column(&a.field) {
+                        None => self.error(
+                            "E_UNKNOWN_COLUMN",
+                            format!("{vp}/field"),
+                            format!("table `{table}` has no column `{}`", a.field),
+                        ),
+                        Some(col) => {
+                            self.check_expr(
+                                scope,
+                                &a.value,
+                                Some(&Self::column_type(col)),
+                                &format!("{vp}/value"),
+                            );
+                        }
+                    }
+                }
+                if *op == SqlOp::Update && values.is_empty() {
+                    self.error(
+                        "E_SQL_NO_VALUES",
+                        format!("{path}/values"),
+                        "give at least one column a new value",
+                    );
+                }
+                if *op == SqlOp::Insert {
+                    for col in t.columns.iter().filter(|c| c.is_required_on_insert()) {
+                        if !values.iter().any(|a| a.field == col.name) {
+                            self.error(
+                                "E_SQL_MISSING_VALUE",
+                                format!("{path}/values"),
+                                format!("column `{}` has no default and is not nullable: give it a value", col.name),
+                            );
+                        }
+                    }
+                }
+            }
+            SqlOp::Delete => {}
+        }
+    }
+
+    /// `into`: every field of the schema is filled by the column of the same name, with the same type.
+    fn sql_into(&mut self, path: &str, table: &str, columns: &[String], t: &Table, schema: &str) {
+        let Some(msg) = self.project.message(schema) else {
+            self.error(
+                "E_UNKNOWN_MESSAGE",
+                format!("{path}/into"),
+                format!("unknown message `{schema}`"),
+            );
+            return;
+        };
+        if msg.kind == MessageKind::Row {
+            return;
+        }
+        for f in &msg.fields {
+            let ok = match t.column(&f.name).filter(|_| columns.contains(&f.name)) {
+                None => Err(format!("no ticked column `{}` fills it", f.name)),
+                Some(c) if f.repeated || f.ty != c.ty.field_type() => Err(format!(
+                    "`{}` is a {} column, the field is {}",
+                    c.name,
+                    c.ty.sql(),
+                    TypeRef::of_field(f)
+                )),
+                Some(c) if c.nullable && !f.optional => {
+                    Err("the column can be null but the field is not optional".to_string())
+                }
+                Some(_) => Ok(()),
+            };
+            if let Err(why) = ok {
+                self.error(
+                    "E_SQL_INTO_FIELD",
+                    format!("{path}/into"),
+                    format!("`{schema}.{}` cannot be read from `{table}`: {why}", f.name),
+                );
+            }
+        }
+    }
+
     fn require_message(&mut self, name: &str, path: &str) -> bool {
         if self.project.message(name).is_some() {
             return true;
@@ -501,6 +1045,38 @@ impl<'a> Checker<'a> {
             format!("unknown message `{name}`"),
         );
         false
+    }
+
+    /// The request and response of an HTTP route must be API schemas.
+    fn require_api(&mut self, name: &str, path: &str) {
+        if let Some(m) = self.project.message(name)
+            && m.kind != MessageKind::Api
+        {
+            self.error(
+                "E_ROUTE_SCHEMA_KIND",
+                path,
+                format!(
+                    "`{name}` is {}: an HTTP route needs an API schema",
+                    kind_label(m.kind)
+                ),
+            );
+        }
+    }
+
+    /// A gRPC request or response must be a proto schema.
+    fn require_proto(&mut self, name: &str, path: &str) {
+        if let Some(m) = self.project.message(name)
+            && m.kind != MessageKind::Proto
+        {
+            self.error(
+                "E_RPC_MESSAGE_KIND",
+                path,
+                format!(
+                    "`{name}` is {}: a gRPC request or response needs a proto schema",
+                    kind_label(m.kind)
+                ),
+            );
+        }
     }
 
     // ---- steps -----------------------------------------------------------------------
@@ -549,16 +1125,39 @@ impl<'a> Checker<'a> {
                 ..
             } => {
                 let ty = TypeRef::scalar(value_type.clone());
-                if !ty.is_simple_scalar() {
-                    self.error(
+                match value_type {
+                    // A whole schema, built with Rust (queries over several tables, say), that a
+                    // Respond step or a Publish can then read field by field.
+                    FieldType::Message { name } => {
+                        if p.message(name).is_none() {
+                            self.error(
+                                "E_UNKNOWN_MESSAGE",
+                                format!("{path}/valueType"),
+                                format!("unknown message `{name}`"),
+                            );
+                        }
+                        if !matches!(value, Expr::Raw { .. }) {
+                            self.error(
+                                "E_LET_VALUE",
+                                format!("{path}/value"),
+                                format!("a `{name}` variable is built with Rust code, e.g. `pb::{name} {{ .. }}`"),
+                            );
+                        }
+                    }
+                    _ if !ty.is_simple_scalar() => self.error(
                         "E_LET_TYPE",
                         format!("{path}/valueType"),
-                        "variables can only hold string, bool, int32, int64, float or double",
-                    );
+                        "variables hold a string, bool, int32, int64, float, double, or a schema built with Rust",
+                    ),
+                    _ => {}
                 }
                 self.check_var_name(name, &format!("{path}/name"));
                 self.check_expr(scope, value, Some(&ty), &format!("{path}/value"));
                 scope.bind(name.clone(), ty);
+                false
+            }
+            Step::Sql { .. } => {
+                self.sql(env, path, step, scope);
                 false
             }
             Step::Publish { topic, payload, .. } => {
@@ -569,6 +1168,16 @@ impl<'a> Checker<'a> {
                         format!("unknown topic `{topic}`"),
                     ),
                     Some(t) => {
+                        if !t.producers.contains(&env.service.name) {
+                            self.error(
+                                "E_NOT_PRODUCER",
+                                format!("{path}/topic"),
+                                format!(
+                                    "`{}` is not a producer of `{topic}`: declare it on the topic (draw the arrow from the service to the topic)",
+                                    env.service.name
+                                ),
+                            );
+                        }
                         if let Some(msg) = p.message(&t.message) {
                             self.assignments(msg, payload, scope, &format!("{path}/payload"));
                             if let Some(key) = &t.key_field
@@ -823,17 +1432,13 @@ impl<'a> Checker<'a> {
 
     fn graph_warnings(&mut self) {
         let p = self.project;
-        let mut published: BTreeSet<&str> = BTreeSet::new();
+        // (service, topic) pairs with a Publish step.
+        let mut published: BTreeSet<(&str, &str)> = BTreeSet::new();
         for s in &p.services {
-            let handler_steps = s
-                .rpcs
-                .iter()
-                .flat_map(|r| &r.steps)
-                .chain(s.consumers.iter().flat_map(|c| &c.steps));
-            for step in handler_steps {
+            for step in s.handler_steps() {
                 step.walk(&mut |st| {
                     if let Step::Publish { topic, .. } = st {
-                        published.insert(topic);
+                        published.insert((s.name.as_str(), topic.as_str()));
                     }
                 });
             }
@@ -844,12 +1449,26 @@ impl<'a> Checker<'a> {
             .flat_map(|s| s.consumers.iter().map(|c| c.topic.as_str()))
             .collect();
         for (i, t) in p.topics.iter().enumerate() {
-            if !published.contains(t.name.as_str()) {
+            if t.producers.is_empty() {
                 self.warn(
                     "W_TOPIC_NO_PRODUCER",
                     format!("/topics/{i}"),
-                    format!("nothing publishes on topic `{}`", t.name),
+                    format!("no service produces topic `{}`", t.name),
                 );
+            }
+            for (j, producer) in t.producers.iter().enumerate() {
+                if p.service(producer).is_some()
+                    && !published.contains(&(producer.as_str(), t.name.as_str()))
+                {
+                    self.warn(
+                        "W_PRODUCER_NEVER_PUBLISHES",
+                        format!("/topics/{i}/producers/{j}"),
+                        format!(
+                            "`{producer}` is a producer of `{}` but none of its steps publishes there",
+                            t.name
+                        ),
+                    );
+                }
             }
             if !consumed.contains(t.name.as_str()) {
                 self.warn(
@@ -894,6 +1513,7 @@ mod tests {
     fn bad_names() {
         let mut p = Project::new("1 bad");
         p.messages.push(Message {
+            kind: Default::default(),
             name: "orderCreated".into(),
             fields: vec![Field::new("OrderId", FieldType::String)],
         });
@@ -929,6 +1549,7 @@ mod tests {
     fn detects_message_cycle() {
         let mut p = Project::new("cyc");
         let msg = |name: &str, other: &str| Message {
+            kind: Default::default(),
             name: name.into(),
             fields: vec![Field::new(
                 "other",
@@ -958,6 +1579,449 @@ mod tests {
             .find(|d| d.code == "E_TYPE_MISMATCH")
             .expect("mismatch");
         assert_eq!(hit.path, "/services/0/rpcs/0/steps/2/payload/2/value");
+    }
+
+    #[test]
+    fn topics_carry_events_and_rpcs_use_proto_schemas() {
+        let mut p = sample::orders();
+        assert!(errors(&p).iter().all(|c| !c.contains("KIND")));
+        // A proto schema on a topic.
+        p.topics[0].message = "Customer".into();
+        assert!(errors(&p).contains(&"E_TOPIC_MESSAGE_KIND".into()));
+        p.topics[0].message = "OrderCreated".into();
+        // An event as a gRPC response.
+        p.services[0].rpcs[0].response = "OrderCreated".into();
+        assert!(errors(&p).contains(&"E_RPC_MESSAGE_KIND".into()));
+    }
+
+    #[test]
+    fn api_schemas_stay_apart_from_protobuf_ones() {
+        let mut p = sample::orders();
+        let mut api = p.messages[0].clone();
+        api.name = "CustomerDto".into();
+        api.kind = MessageKind::Api;
+        p.messages.push(api);
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        // An API schema is not a topic payload, nor a gRPC message, and cannot be nested in them.
+        p.topics[0].message = "CustomerDto".into();
+        assert!(errors(&p).contains(&"E_TOPIC_MESSAGE_KIND".into()));
+        p.topics[0].message = "OrderCreated".into();
+        p.messages[5].fields[1].ty = FieldType::Message {
+            name: "CustomerDto".into(),
+        };
+        assert!(errors(&p).contains(&"E_SCHEMA_KIND_MIX".into()));
+        p.messages[5].fields[1].ty = FieldType::Message {
+            name: "Customer".into(),
+        };
+        // ...and the reverse.
+        let last = p.messages.len() - 1;
+        p.messages[last].fields[0].ty = FieldType::Message {
+            name: "Customer".into(),
+        };
+        assert!(errors(&p).contains(&"E_SCHEMA_KIND_MIX".into()));
+    }
+
+    #[test]
+    fn a_schema_cannot_take_the_name_of_a_service() {
+        let mut p = sample::orders();
+        p.messages.push(Message {
+            name: "Orders".into(),
+            kind: MessageKind::Api,
+            fields: vec![],
+        });
+        assert!(errors(&p).contains(&"E_NAME_CLASH".into()));
+    }
+
+    fn route_of(p: &mut Project) -> &mut Route {
+        &mut p.services[0].routes[0]
+    }
+
+    #[test]
+    fn the_sample_routes_are_valid() {
+        assert!(errors(&sample::orders()).is_empty());
+    }
+
+    #[test]
+    fn routes_need_an_http_port_that_is_free() {
+        let mut p = sample::orders();
+        p.services[0].http_port = None;
+        assert!(errors(&p).contains(&"E_HTTP_PORT".into()));
+        p.services[0].http_port = Some(50052); // Payments' gRPC port
+        assert!(errors(&p).contains(&"E_DUPLICATE_PORT".into()));
+        p.services[0].http_port = Some(8081);
+        assert!(errors(&p).is_empty());
+    }
+
+    #[test]
+    fn route_paths_methods_and_names_are_checked() {
+        let mut p = sample::orders();
+        route_of(&mut p).path = "orders".into();
+        assert!(errors(&p).contains(&"E_ROUTE_PATH".into()));
+        route_of(&mut p).path = "/orders".into();
+
+        route_of(&mut p).name = "PlaceOrder".into();
+        assert!(errors(&p).contains(&"E_ROUTE_NAME".into()));
+        route_of(&mut p).name = "get_order".into();
+        assert!(errors(&p).contains(&"E_DUPLICATE_ROUTE_NAME".into()));
+        route_of(&mut p).name = "place_order".into();
+
+        // Same method and same shape, whatever the parameter is called.
+        let mut other = p.services[0].routes[1].clone();
+        other.name = "get_order_again".into();
+        other.path = "/orders/{order_id}".into();
+        p.services[0].routes.push(other);
+        assert!(errors(&p).contains(&"E_DUPLICATE_ROUTE".into()));
+        // Another method on the same path is fine.
+        p.services[0].routes[2].method = HttpMethod::Delete;
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+
+        route_of(&mut p).status = 404;
+        assert!(errors(&p).contains(&"E_ROUTE_STATUS".into()));
+    }
+
+    #[test]
+    fn route_schemas_must_be_api_schemas() {
+        let mut p = sample::orders();
+        route_of(&mut p).request = "CreateOrderRequest".into();
+        assert!(errors(&p).contains(&"E_ROUTE_SCHEMA_KIND".into()));
+        route_of(&mut p).request = "PlaceOrderBody".into();
+        route_of(&mut p).response = "OrderCreated".into();
+        assert!(errors(&p).contains(&"E_ROUTE_SCHEMA_KIND".into()));
+    }
+
+    #[test]
+    fn path_parameters_fill_scalar_required_fields() {
+        let mut p = sample::orders();
+        p.services[0].routes[1].path = "/orders/{id}".into();
+        assert!(
+            errors(&p).contains(&"E_ROUTE_PARAM".into()),
+            "no such field"
+        );
+        p.services[0].routes[1].path = "/orders/{order_id}".into();
+        let field = |p: &mut Project| {
+            p.messages
+                .iter_mut()
+                .find(|m| m.name == "GetOrderRequest")
+                .unwrap()
+                .fields
+                .remove(0)
+        };
+        let mut f = field(&mut p);
+        let restore = |p: &mut Project, f: Field| {
+            p.messages
+                .iter_mut()
+                .find(|m| m.name == "GetOrderRequest")
+                .unwrap()
+                .fields
+                .insert(0, f)
+        };
+        f.repeated = true;
+        restore(&mut p, f.clone());
+        assert!(errors(&p).contains(&"E_ROUTE_PARAM".into()), "repeated");
+        field(&mut p);
+        f.repeated = false;
+        f.optional = true;
+        restore(&mut p, f);
+        assert!(errors(&p).contains(&"E_ROUTE_PARAM".into()), "optional");
+    }
+
+    #[test]
+    fn a_query_string_only_carries_single_scalars() {
+        let mut p = sample::orders();
+        let get = p
+            .messages
+            .iter_mut()
+            .find(|m| m.name == "GetOrderRequest")
+            .unwrap();
+        let mut tags = Field::new("tags", FieldType::String);
+        tags.repeated = true;
+        get.fields.push(tags);
+        assert!(errors(&p).contains(&"E_ROUTE_QUERY_FIELD".into()));
+        // The same schema is fine behind a body.
+        p.services[0].routes[1].method = HttpMethod::Put;
+        assert!(!errors(&p).contains(&"E_ROUTE_QUERY_FIELD".into()));
+    }
+
+    #[test]
+    fn api_schemas_have_no_bytes_or_timestamp_yet() {
+        let mut p = sample::orders();
+        let view = p
+            .messages
+            .iter_mut()
+            .find(|m| m.name == "OrderView")
+            .unwrap();
+        view.fields
+            .push(Field::new("created_at", FieldType::Timestamp));
+        assert!(errors(&p).contains(&"E_API_FIELD_TYPE".into()));
+    }
+
+    #[test]
+    fn route_steps_are_checked_like_rpc_steps() {
+        let mut p = sample::orders();
+        // `tx` is reserved, publishing needs the producer declaration, a route answers with Respond.
+        let publish = p.services[0].routes[0]
+            .steps
+            .iter_mut()
+            .find(|s| matches!(s, Step::Publish { .. }))
+            .unwrap();
+        let Step::Publish { topic, .. } = publish else {
+            panic!("sample layout changed")
+        };
+        *topic = "payments.completed".into();
+        assert!(errors(&p).contains(&"E_NOT_PRODUCER".into()));
+        let steps = &mut p.services[0].routes[1].steps;
+        steps.pop();
+        let d = validate(&p);
+        assert!(
+            d.iter()
+                .any(|d| d.code == "W_NO_RESPOND" && d.path == "/services/0/routes/1")
+        );
+    }
+
+    #[test]
+    fn outbox_attempts_must_be_in_range() {
+        let mut p = sample::orders();
+        assert!(!errors(&p).contains(&"E_OUTBOX_ATTEMPTS".into()));
+        for bad in [0, MAX_OUTBOX_ATTEMPTS + 1] {
+            p.outbox.max_attempts = bad;
+            assert!(errors(&p).contains(&"E_OUTBOX_ATTEMPTS".into()), "{bad}");
+        }
+        p.outbox.max_attempts = 1;
+        assert!(!errors(&p).contains(&"E_OUTBOX_ATTEMPTS".into()));
+    }
+
+    #[test]
+    fn dead_letter_suffix_is_reserved() {
+        let mut p = sample::orders();
+        p.topics[0].name = "orders.created.dlq".into();
+        assert!(errors(&p).contains(&"E_TOPIC_RESERVED".into()));
+    }
+
+    #[test]
+    fn a_variable_can_hold_a_schema_built_with_rust() {
+        let mut p = sample::orders();
+        let let_step = |value_type: FieldType, value: Expr| Step::Let {
+            id: "v".into(),
+            name: "view".into(),
+            value_type,
+            value,
+        };
+        let view = |p: &Project| p.message("OrderView").is_some();
+        assert!(view(&p));
+        let message = || FieldType::Message {
+            name: "OrderView".into(),
+        };
+        let raw = |code: &str| Expr::Raw { code: code.into() };
+
+        p.services[0].routes[1]
+            .steps
+            .insert(0, let_step(message(), raw("pb::OrderView::default()")));
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+
+        // Only Rust code can build it.
+        p.services[0].routes[1].steps[0] = let_step(message(), Expr::Literal { value: "x".into() });
+        assert!(errors(&p).contains(&"E_LET_VALUE".into()));
+        // The schema must exist.
+        p.services[0].routes[1].steps[0] = let_step(
+            FieldType::Message {
+                name: "Nope".into(),
+            },
+            raw("pb::Nope::default()"),
+        );
+        assert!(errors(&p).contains(&"E_UNKNOWN_MESSAGE".into()));
+        // Other types are still refused.
+        p.services[0].routes[1].steps[0] = let_step(FieldType::Bytes, raw("vec![]"));
+        assert!(errors(&p).contains(&"E_LET_TYPE".into()));
+    }
+
+    #[test]
+    fn a_schema_variable_feeds_the_response() {
+        let mut p = sample::orders();
+        p.services[0].routes[1].steps = vec![
+            Step::Let {
+                id: "v".into(),
+                name: "view".into(),
+                value_type: FieldType::Message {
+                    name: "OrderView".into(),
+                },
+                value: Expr::Raw {
+                    code: "pb::OrderView::default()".into(),
+                },
+            },
+            Step::Respond {
+                id: "r".into(),
+                fields: vec![
+                    Assignment {
+                        field: "order_id".into(),
+                        value: Expr::Path {
+                            path: "view.order_id".into(),
+                        },
+                    },
+                    Assignment {
+                        field: "status".into(),
+                        value: Expr::Path {
+                            path: "view.status".into(),
+                        },
+                    },
+                ],
+            },
+        ];
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+    }
+
+    fn sql_step(p: &mut Project, route: usize, at: usize) -> &mut Step {
+        &mut p.services[0].routes[route].steps[at]
+    }
+
+    #[test]
+    fn tables_are_checked() {
+        let mut p = sample::orders();
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        let table = |p: &mut Project| p.services[0].tables[0].clone();
+        let mut t = table(&mut p);
+        t.name = "Orders".into();
+        p.services[0].tables = vec![t.clone()];
+        assert!(errors(&p).contains(&"E_TABLE_NAME".into()));
+        t.name = "outbox".into();
+        p.services[0].tables = vec![t.clone()];
+        assert!(errors(&p).contains(&"E_TABLE_RESERVED".into()));
+        t.name = "orders".into();
+        p.services[0].tables = vec![t.clone(), t.clone()];
+        assert!(errors(&p).contains(&"E_DUPLICATE_TABLE".into()));
+        t.columns.push(t.columns[0].clone());
+        p.services[0].tables = vec![t.clone()];
+        assert!(errors(&p).contains(&"E_DUPLICATE_COLUMN".into()));
+        t.columns.pop();
+        t.columns[0].nullable = true;
+        p.services[0].tables = vec![t.clone()];
+        assert!(errors(&p).contains(&"E_PK_NULLABLE".into()));
+        t.columns[0].nullable = false;
+        t.columns[2].default = Some("'x'; drop table orders".into());
+        p.services[0].tables = vec![t.clone()];
+        assert!(errors(&p).contains(&"E_COLUMN_DEFAULT".into()));
+        t.columns.clear();
+        p.services[0].tables = vec![t];
+        assert!(errors(&p).contains(&"E_TABLE_EMPTY".into()));
+    }
+
+    #[test]
+    fn a_table_without_a_primary_key_warns() {
+        let mut p = sample::orders();
+        p.services[0].tables[0].columns[0].primary_key = false;
+        assert!(validate(&p).iter().any(|d| d.code == "W_TABLE_NO_PK"));
+    }
+
+    #[test]
+    fn a_select_types_the_variable_after_the_ticked_columns() {
+        let mut p = sample::orders();
+        // `get_order` reads `order_id` and `status`: the response can read both, and only both.
+        assert!(errors(&p).is_empty());
+        if let Step::Sql { columns, .. } = sql_step(&mut p, 1, 0) {
+            columns.retain(|c| c != "status");
+        }
+        assert!(
+            errors(&p).contains(&"E_UNKNOWN_PATH".into()),
+            "`order.status` is no longer read"
+        );
+    }
+
+    #[test]
+    fn sql_steps_check_tables_columns_and_values() {
+        let mut p = sample::orders();
+        if let Step::Sql { table, .. } = sql_step(&mut p, 1, 0) {
+            *table = "nope".into();
+        }
+        assert!(errors(&p).contains(&"E_UNKNOWN_TABLE".into()));
+
+        let mut p = sample::orders();
+        if let Step::Sql {
+            conditions,
+            columns,
+            ..
+        } = sql_step(&mut p, 1, 0)
+        {
+            conditions[0].column = "nope".into();
+            columns.push("also_nope".into());
+        }
+        let e = errors(&p);
+        assert!(
+            e.iter().filter(|c| *c == "E_UNKNOWN_COLUMN").count() >= 2,
+            "{e:?}"
+        );
+
+        // A condition is typed by its column: an int64 column against a string.
+        let mut p = sample::orders();
+        if let Step::Sql { conditions, .. } = sql_step(&mut p, 1, 0) {
+            conditions[0].column = "amount".into();
+        }
+        assert!(errors(&p).contains(&"E_TYPE_MISMATCH".into()));
+    }
+
+    #[test]
+    fn an_insert_gives_every_column_that_has_no_default() {
+        let mut p = sample::orders();
+        if let Step::Sql { values, .. } = sql_step(&mut p, 0, 1) {
+            values.retain(|a| a.field != "amount");
+        }
+        assert!(errors(&p).contains(&"E_SQL_MISSING_VALUE".into()));
+    }
+
+    #[test]
+    fn an_update_or_a_delete_needs_a_condition() {
+        for op in [SqlOp::Update, SqlOp::Delete] {
+            let mut p = sample::orders();
+            if let Step::Sql {
+                op: o,
+                conditions,
+                values,
+                ..
+            } = sql_step(&mut p, 0, 1)
+            {
+                *o = op;
+                conditions.clear();
+                values.truncate(1);
+            }
+            assert!(errors(&p).contains(&"E_SQL_NO_WHERE".into()), "{op:?}");
+        }
+    }
+
+    #[test]
+    fn a_list_of_rows_is_converted_into_a_schema() {
+        let mut p = sample::orders();
+        if let Step::Sql { many, .. } = sql_step(&mut p, 1, 0) {
+            *many = true;
+        }
+        assert!(errors(&p).contains(&"E_SQL_MANY_INTO".into()));
+        // `OrderView` is filled by `order_id` and `status`, both ticked: that works.
+        if let Step::Sql { into, .. } = sql_step(&mut p, 1, 0) {
+            *into = Some("OrderView".into());
+        }
+        assert!(!errors(&p).contains(&"E_SQL_MANY_INTO".into()));
+        assert!(
+            !errors(&p).contains(&"E_SQL_INTO_FIELD".into()),
+            "{:?}",
+            errors(&p)
+        );
+        // A field the columns cannot fill.
+        p.messages
+            .iter_mut()
+            .find(|m| m.name == "OrderView")
+            .unwrap()
+            .fields
+            .push(Field::new("total", FieldType::Int64));
+        assert!(errors(&p).contains(&"E_SQL_INTO_FIELD".into()));
+    }
+
+    #[test]
+    fn tx_is_a_reserved_variable_name() {
+        let mut p = sample::orders();
+        p.services[1].consumers[0].steps.push(Step::Let {
+            id: "x".into(),
+            name: "tx".into(),
+            value_type: FieldType::String,
+            value: Expr::Literal { value: "x".into() },
+        });
+        assert!(errors(&p).contains(&"E_RESERVED_NAME".into()));
     }
 
     #[test]
@@ -1032,6 +2096,42 @@ mod tests {
     }
 
     #[test]
+    fn publishing_requires_being_a_declared_producer() {
+        let mut p = sample::orders();
+        assert!(!errors(&p).contains(&"E_NOT_PRODUCER".into()));
+        // Payments publishes payments.completed; take that declaration away.
+        p.topics[1].producers.clear();
+        assert!(errors(&p).contains(&"E_NOT_PRODUCER".into()));
+        // Declaring another service is not enough.
+        p.topics[1].producers.push("Notifications".into());
+        assert!(errors(&p).contains(&"E_NOT_PRODUCER".into()));
+        p.topics[1].producers.push("Payments".into());
+        assert!(!errors(&p).contains(&"E_NOT_PRODUCER".into()));
+    }
+
+    #[test]
+    fn producers_must_exist_and_be_unique() {
+        let mut p = sample::orders();
+        p.topics[0].producers.push("Ghost".into());
+        assert!(errors(&p).contains(&"E_UNKNOWN_SERVICE".into()));
+        p.topics[0].producers = vec!["Orders".into(), "Orders".into()];
+        assert!(errors(&p).contains(&"E_DUPLICATE_PRODUCER".into()));
+    }
+
+    #[test]
+    fn a_producer_without_a_publish_step_warns() {
+        let mut p = sample::orders();
+        p.topics[0].producers.push("Notifications".into());
+        let d = validate(&p);
+        assert!(
+            d.iter().any(
+                |d| d.code == "W_PRODUCER_NEVER_PUBLISHES" && d.path == "/topics/0/producers/1"
+            )
+        );
+        assert!(!has_errors(&d));
+    }
+
+    #[test]
     fn orphan_topic_warns() {
         let mut p = sample::orders();
         p.topics.push(Topic {
@@ -1040,6 +2140,7 @@ mod tests {
             partitions: 1,
             replication_factor: 1,
             key_field: None,
+            producers: vec![],
             position: Position::default(),
         });
         let c = codes(&p);

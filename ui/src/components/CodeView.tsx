@@ -6,6 +6,7 @@ import rust from 'highlight.js/lib/languages/rust'
 import yaml from 'highlight.js/lib/languages/yaml'
 import { useMemo } from 'react'
 import { useStore } from '../store'
+import { FileTree } from './FileTree'
 import { Icon } from './Icon'
 
 hljs.registerLanguage('rust', rust)
@@ -36,16 +37,7 @@ export function CodeView() {
     return lang ? hljs.highlight(file.content, { language: lang }).value : escapeHtml(file.content)
   }, [file])
 
-  // Group by directory for a readable tree.
-  const groups = useMemo(() => {
-    const m = new Map<string, string[]>()
-    for (const f of files) {
-      const i = f.path.lastIndexOf('/')
-      const dir = i < 0 ? '.' : f.path.slice(0, i)
-      m.set(dir, [...(m.get(dir) ?? []), f.path])
-    }
-    return [...m.entries()].sort(([a], [b]) => (a === '.' ? -1 : b === '.' ? 1 : a.localeCompare(b)))
-  }, [files])
+  const paths = useMemo(() => files.map((f) => f.path), [files])
 
   if (files.length === 0) {
     return (
@@ -58,17 +50,9 @@ export function CodeView() {
 
   return (
     <div className="code-view">
-      <nav className="code-tree" aria-label="Fichiers générés">
-        {groups.map(([dir, paths]) => (
-          <div key={dir}>
-            <h4 className="mono">{dir}</h4>
-            {paths.map((p) => (
-              <button key={p} type="button" className={p === file?.path ? 'active' : ''} onClick={() => setActive(p)}>
-                <Icon name="file" size={13} /> <span className="mono">{p.slice(p.lastIndexOf('/') + 1)}</span>
-              </button>
-            ))}
-          </div>
-        ))}
+      <nav className="code-tree">
+        <h3>Fichiers</h3>
+        <FileTree paths={paths} active={file?.path ?? null} onSelect={setActive} />
       </nav>
       <div className="code-main">
         <header>

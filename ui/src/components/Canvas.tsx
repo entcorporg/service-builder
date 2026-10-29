@@ -6,6 +6,7 @@ import {
   Handle,
   MarkerType,
   MiniMap,
+  type Connection,
   type Edge,
   type Node,
   type NodeChange,
@@ -17,7 +18,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { type DragEvent, useCallback, useEffect, useMemo, useState } from 'react'
-import { addService, addTopic, walkSteps } from '../model'
+import { addService, addTopic, canConsume, canProduce, connectConsumer, declareProducer, walkSteps } from '../model'
 import { useStore } from '../store'
 import type { Diagnostic, Project, Service, Topic } from '../types'
 import { Icon } from './Icon'
@@ -58,13 +59,27 @@ function ServiceNode({ data, selected }: NodeProps<Node<ServiceData, 'service'>>
             <span className="mono">{r.name}</span>
           </li>
         ))}
+        {service.routes.map((r) => (
+          <li
+            key={r.name}
+            className="route nodrag nopan"
+            title="Configurer cet endpoint"
+            onClick={(e) => {
+              e.stopPropagation()
+              useStore.getState().select({ kind: 'route', service: service.name, route: r.name })
+            }}
+          >
+            <span className={`tag-pill http ${r.method}`}>{r.method.toUpperCase()}</span>
+            <span className="mono route-path">{r.path}</span>
+          </li>
+        ))}
         {service.consumers.map((c) => (
           <li key={c.name} className="consumer">
             <span className="tag-pill consumer">KAFKA</span>
             <span className="mono">{c.name}</span>
           </li>
         ))}
-        {service.rpcs.length === 0 && service.consumers.length === 0 && <li className="none">vide</li>}
+        {service.rpcs.length === 0 && service.routes.length === 0 && service.consumers.length === 0 && <li className="none">vide</li>}
       </ul>
       <Handle type="source" position={Position.Right} id="out" />
       <Handle type="source" position={Position.Bottom} id="rpc-out" />
@@ -105,7 +120,7 @@ function countFor(diagnostics: Diagnostic[], prefix: string) {
   }
 }
 
-/** The graph is derived from the project: edges are never edited directly. */
+/** The graph is derived from the project: edges are never stored, drawing one edits the project (see `onConnect`). */
 export function buildGraph(project: Project, diagnostics: Diagnostic[], selected: string | null) {
   const nodes: SbNode[] = []
   const edges: Edge[] = []
@@ -120,9 +135,10 @@ export function buildGraph(project: Project, diagnostics: Diagnostic[], selected
       data: { service, ...countFor(diagnostics, `/services/${i}`) },
     })
 
-    const published = new Set<string>()
+    // Declared producers and publishing steps both draw the arrow (a step without declaration is also an error).
+    const published = new Set<string>(project.topics.filter((t) => t.producers.includes(service.name)).map((t) => t.name))
     const called = new Map<string, Set<string>>()
-    const handlers = [...service.rpcs.map((r) => r.steps), ...service.consumers.map((c) => c.steps)]
+    const handlers = [...service.rpcs.map((r) => r.steps), ...service.routes.map((r) => r.steps), ...service.consumers.map((c) => c.steps)]
     for (const steps of handlers) {
       walkSteps(steps, (s) => {
         if (s.type === 'publish' && s.topic) published.add(s.topic)
@@ -181,6 +197,18 @@ export function buildGraph(project: Project, diagnostics: Diagnostic[], selected
   return { nodes, edges }
 }
 
+type Link = { kind: 'consume' | 'produce'; topic: string; service: string }
+
+// Two arrows are drawable, both declare something: topic → service creates a consumer, service → topic
+// makes the service a producer. RPC calls come from steps, the publishing itself from a Publish step.
+function parse(c: { source: string; sourceHandle?: string | null; target: string; targetHandle?: string | null }): Link | null {
+  if (c.source.startsWith('top:') && c.sourceHandle === 'out' && c.target.startsWith('svc:') && c.targetHandle === 'in')
+    return { kind: 'consume', topic: c.source.slice('top:'.length), service: c.target.slice('svc:'.length) }
+  if (c.source.startsWith('svc:') && c.sourceHandle === 'out' && c.target.startsWith('top:') && c.targetHandle === 'in')
+    return { kind: 'produce', topic: c.target.slice('top:'.length), service: c.source.slice('svc:'.length) }
+  return null
+}
+
 function CanvasInner() {
   const project = useStore((s) => s.project)
   const diagnostics = useStore((s) => s.analysis.diagnostics)
@@ -208,6 +236,24 @@ function CanvasInner() {
     // Selection is owned by the store; moves and measured sizes are applied locally.
     setNodes((ns) => applyNodeChanges(changes.filter((c) => c.type === 'position' || c.type === 'dimensions'), ns))
   }, [])
+
+  const isValidConnection = useCallback(
+    (c: Connection | Edge) => {
+      const link = parse(c)
+      if (!link) return false
+      return link.kind === 'consume' ? canConsume(project, link.service, link.topic) : canProduce(project, link.service, link.topic)
+    },
+    [project],
+  )
+  const onConnect = (c: Connection) => {
+    const link = parse(c)
+    if (!link) return
+    let done = false
+    edit((p) => {
+      done = link.kind === 'consume' ? !!connectConsumer(p, link.service, link.topic) : declareProducer(p, link.service, link.topic)
+    })
+    if (done) select({ kind: 'service', name: link.service })
+  }
 
   const onDragOver = (e: DragEvent) => {
     if (e.dataTransfer.types.includes(DND_TYPE)) {
@@ -245,7 +291,8 @@ function CanvasInner() {
             if (target) target.position = { x: Math.round(n.position.x), y: Math.round(n.position.y) }
           })
         }
-        nodesConnectable={false}
+        onConnect={onConnect}
+        isValidConnection={isValidConnection}
         deleteKeyCode={null}
         fitView
         fitViewOptions={{ padding: 0.1, maxZoom: 1 }}

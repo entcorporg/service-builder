@@ -55,8 +55,8 @@ Un projet d'exemple (Orders → Payments → Notifications) est chargé au déma
 ```
 contracts/      messages + stubs gRPC (générés depuis le .proto, sans protoc grâce à protox) et noms de topics
 runtime/        producer / consumer Kafka, création des topics, DLQ (identique pour tous les projets)
-services/<nom>/ un binaire par service : serveur gRPC, consumers, flows.rs (la logique dessinée)
-docker-compose.yml   un Kafka local (KRaft) sur localhost:9092
+services/<nom>/ un binaire par service : main.rs (démarrage), app/ (config, contexte), transport/ (gRPC, HTTP, Kafka), flows/ (la logique dessinée)
+docker-compose.yml   un Kafka local (KRaft) sur localhost:9092 et un PostgreSQL sur localhost:5432 (une base par service)
 ```
 
 ```sh
@@ -70,6 +70,31 @@ Pour compiler : un toolchain C/C++, `cmake`, `pkg-config` et les en-têtes OpenS
 
 Garanties de livraison : les consumers sont **at-least-once** (l'offset est validé après le handler). Un
 message qui échoue 3 fois, ou qui n'est pas décodable, est écrit sur `<topic>.dlq`. Écrivez des handlers idempotents.
+
+## Mises à jour et versions
+
+**Dans l'application.** Au lancement, Service Builder interroge les releases GitHub
+(`releases/latest/download/latest.json`). Si une version plus récente existe, le bouton **Mettre à jour**, à côté de
+*Exporter le code*, affiche son numéro ; un clic télécharge le paquet, vérifie sa signature, l'installe et relance
+l'application (une confirmation prévient si le projet a des modifications non enregistrées). Sans nouvelle version,
+le bouton lance une recherche à la demande. Une recherche impossible (hors ligne, aucune release) est silencieuse au
+lancement et signalée quand on clique. Sous Linux, seul l'AppImage se met à jour seul ; le `.deb` se réinstalle.
+
+**Dans la CI** (`.github/workflows/ci.yml`). Deux règles :
+
+1. **Chaque changement annonce son type de mise à jour**, par une mention dans le titre ou la description de la PR,
+   ou dans un message de commit : `[minor]` (0.0.**X**), `[normal]` (0.**X**.0) ou `[major]` (**X**.0.0). Une PR sans
+   mention échoue ; si plusieurs mentions coexistent, la plus forte l'emporte.
+2. **Un push sur `main` avec mention incrémente la version**, une fois tous les tests passés : `0.1.0` + `[normal]`
+   donne `0.2.0` (les nombres à droite repartent à zéro). La CI écrit la nouvelle version dans `Cargo.toml`,
+   `Cargo.lock`, `tauri.conf.json` et les deux `package.json`, commite `chore(release): vX.Y.Z [skip ci]`, pose le
+   tag `vX.Y.Z`, puis construit les paquets signés et publie la release GitHub avec le `latest.json` que lit l'application.
+   Sans mention, rien n'est publié.
+
+Réglage unique, à faire une fois : ajouter la clé privée de signature aux secrets du dépôt
+(`gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/service-builder.key`). La clé publique correspondante est dans
+`src-tauri/tauri.conf.json` ; sans la clé privée, les mises à jour ne peuvent pas être signées. Si `main` est protégée,
+autorisez `github-actions[bot]` à y pousser le commit de version.
 
 ## En ligne de commande
 
@@ -87,6 +112,7 @@ cargo run -p sb-app --bin sb -- generate projet.sb.json ./out
 cargo test --workspace                 # modèle, validation, générateur, logique applicative
 pnpm --dir ui test                     # logique TypeScript (typage, renommages en cascade)
 cargo build -p sb-app --bin sb && pnpm --dir ui e2e   # scénarios Playwright, avec le vrai code Rust
+node --test scripts/release.test.mjs   # détection du type de mise à jour et incrément de version
 ```
 
 Le test le plus important n'est pas dans cette liste : le workspace **généré** doit compiler
@@ -97,10 +123,15 @@ La CI le fait.
 
 À savoir avant de s'en servir sérieusement :
 
-- **Le code généré n'a pas été exécuté contre un broker Kafka** : il compile (sans warning) mais le
-  comportement à l'exécution (consumers, DLQ, appels gRPC entre services) n'a pas été éprouvé de bout en bout.
-- Les flèches du canvas sont **dérivées** du modèle : on ne peut pas les tracer à la souris, on configure
-  les étapes dans l'inspecteur.
+- **Le code généré n'a pas été exécuté de bout en bout** : il compile (sans warning). Le relais de l'outbox
+  (réveil `NOTIFY`, reprises, ordre par clé, DLQ) a été éprouvé contre un vrai PostgreSQL et un vrai broker, mais
+  pas les consumers ni les appels gRPC entre services démarrés ensemble.
+- Les flèches du canvas sont **dérivées** du modèle. On ne peut tracer à la souris que *topic → service* (cela crée
+  un consumer) et *service → topic* (cela déclare le producteur) ; publier et appeler un RPC se configurent dans les
+  étapes de l'inspecteur.
+- Le bloc SQL lit une seule table à la fois (pas de jointure, pas de clé étrangère dans la conception des tables) ; l'API HTTP n'a ni authentification, ni spécification OpenAPI générée, ni validation des champs obligatoires.
+- Les tables se conçoivent dans la vue **Tables** et se lisent avec le bloc SQL ; les migrations sont additives (pas de
+  renommage ni de suppression de colonne). Pas d'inbox (déduplication côté consumer).
 - Pas d'annuler/rétablir. L'export **écrase** les fichiers générés : la logique sur mesure passe par
   l'étape *Code Rust*, pas par l'édition des fichiers exportés.
 - Renommer un champ met à jour les mappings qui le ciblent, mais pas les expressions qui le *lisent*

@@ -28,6 +28,14 @@ pub fn rust_scalar(ty: &FieldType) -> &'static str {
     }
 }
 
+/// Rust type of a variable declared by a Let step: a scalar, or a schema (`pb::OrderView`).
+pub fn rust_let_type(ty: &FieldType) -> String {
+    match ty {
+        FieldType::Message { name } => format!("pb::{name}"),
+        other => rust_scalar(other).to_string(),
+    }
+}
+
 /// Expression reading a variable or a (nested) field, as an owned value whose Rust type
 /// is the declared type of the last field.
 ///
@@ -232,6 +240,7 @@ mod tests {
         use sb_model::{Field, Message};
         let mut p = Project::new("x");
         let m = |name: &str, f: Field| Message {
+            kind: Default::default(),
             name: name.into(),
             fields: vec![f],
         };

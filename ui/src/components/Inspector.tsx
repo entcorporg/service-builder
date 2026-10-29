@@ -1,7 +1,8 @@
-import { addConsumer, addRpc, servicesUsingTopic, renameField, renameMessage, renameRpc, renameService, renameTopic, addMessage, nextTag } from '../model'
-import { inputScope, SCALARS, typeOfField } from '../scope'
+import { addConsumer, addRoute, addRpc, consumersOf, declareProducer, KIND_LABELS, KINDS, removeService, renameMessage, renameRpc, renameService, renameTopic, addMessage } from '../model'
+import { inputScope, typeOfField } from '../scope'
 import { useStore } from '../store'
-import type { Field, FieldType, Project } from '../types'
+import type { MessageKind, Project } from '../types'
+import { MessageSelect, SchemaFields } from './SchemaFields'
 import { type HandlerCtx, StepList } from './StepList'
 import { Collapsible, CommitInput, Empty, IconButton, NumberInput, Row, Section } from './ui'
 
@@ -15,14 +16,31 @@ export function Inspector() {
     case 'messages':
       return <MessagesInspector focus={selection.name} />
     default:
-      return (
-        <div className="inspector-empty">
-          <h3>Rien de sélectionné</h3>
-          <p>Cliquez sur un service ou un topic dans le canvas pour configurer ses RPC, ses consumers et leur logique.</p>
-          <p>Glissez un <strong>Service</strong> ou un <strong>Topic</strong> depuis la colonne de gauche pour construire votre architecture.</p>
-        </div>
-      )
+      return <ProjectInspector />
   }
+}
+
+// ---- project ----------------------------------------------------------------------
+
+function ProjectInspector() {
+  const attempts = useStore((s) => s.project.outbox?.maxAttempts ?? 5)
+  const edit = useStore((s) => s.edit)
+  return (
+    <>
+      <div className="inspector-empty">
+        <h3>Rien de sélectionné</h3>
+        <p>Cliquez sur un service ou un topic dans le canvas pour configurer ses RPC, ses consumers et leur logique.</p>
+        <p>Glissez un <strong>Service</strong> ou un <strong>Topic</strong> depuis la colonne de gauche pour construire votre architecture.</p>
+      </div>
+      <div className="inspector">
+        <Section title="Publication des événements" icon="publish">
+          <Row label="Tentatives" hint="Chaque événement publié passe par l’outbox du service (même transaction que le flow). Si Kafka le refuse après ce nombre de tentatives, il est déplacé sur <topic>.dlq.">
+            <NumberInput value={attempts} min={1} step={1} label="Tentatives avant DLQ" onChange={(v) => edit((p) => (p.outbox = { maxAttempts: Math.min(100, Math.max(1, Math.round(v))) }))} />
+          </Row>
+        </Section>
+      </div>
+    </>
+  )
 }
 
 // ---- service ----------------------------------------------------------------------
@@ -45,6 +63,11 @@ function ServiceInspector({ name }: { name: string }) {
         <Row label="Port gRPC">
           <NumberInput value={service.port} min={1} label="Port" onChange={(v) => edit((p) => (svc(p).port = v))} />
         </Row>
+        {service.routes.length > 0 && (
+          <Row label="Port HTTP" hint="Port de l’API HTTP (les routes ci-dessous)">
+            <NumberInput value={service.httpPort ?? 0} min={1} label="Port HTTP" onChange={(v) => edit((p) => (svc(p).httpPort = v))} />
+          </Row>
+        )}
       </Section>
 
       <Section title="RPC (gRPC)" icon="callRpc" action={<IconButton icon="plus" title="Ajouter un RPC" onClick={() => edit((p) => addRpc(p, svc(p)))} />}>
@@ -63,10 +86,10 @@ function ServiceInspector({ name }: { name: string }) {
                 <CommitInput value={rpc.name} mono label="Nom du RPC" onCommit={(v) => edit((p) => renameRpc(p, service.name, rpc.name, v))} />
               </Row>
               <Row label="Requête">
-                <MessageSelect value={rpc.request} onChange={(v) => edit((p) => (svc(p).rpcs[ri]!.request = v))} />
+                <MessageSelect kind="proto" value={rpc.request} onChange={(v) => edit((p) => (svc(p).rpcs[ri]!.request = v))} />
               </Row>
               <Row label="Réponse">
-                <MessageSelect value={rpc.response} onChange={(v) => edit((p) => (svc(p).rpcs[ri]!.response = v))} />
+                <MessageSelect kind="proto" value={rpc.response} onChange={(v) => edit((p) => (svc(p).rpcs[ri]!.response = v))} />
               </Row>
               <h4 className="steps-title">Logique</h4>
               <StepList
@@ -79,6 +102,38 @@ function ServiceInspector({ name }: { name: string }) {
             </Collapsible>
           )
         })}
+      </Section>
+
+      <Section
+        title="API HTTP"
+        icon="publish"
+        action={
+          <IconButton
+            icon="plus"
+            title="Ajouter une route HTTP"
+            onClick={() => {
+              let route = ''
+              edit((p) => {
+                route = addRoute(p, svc(p)).name
+              })
+              select({ kind: 'route', service: service.name, route })
+            }}
+          />
+        }
+      >
+        {service.routes.length === 0 && <Empty>Aucune route : ce service ne reçoit aucune requête HTTP du front.</Empty>}
+        <ul className="plain-list routes">
+          {service.routes.map((route, ri) => (
+            <li key={ri} className="route-item">
+              <button type="button" className="route-open" title="Ouvrir le configurateur d’endpoint" onClick={() => select({ kind: 'route', service: service.name, route: route.name })}>
+                <span className={`tag-pill http ${route.method}`}>{route.method.toUpperCase()}</span>
+                <strong className="mono route-path">{route.path}</strong>
+                <span className="step-summary">{route.steps.length} étape{route.steps.length > 1 ? 's' : ''}</span>
+              </button>
+              <IconButton icon="trash" title={`Supprimer la route ${route.name}`} danger onClick={() => edit((p) => svc(p).routes.splice(ri, 1))} />
+            </li>
+          ))}
+        </ul>
       </Section>
 
       <Section
@@ -140,25 +195,13 @@ function ServiceInspector({ name }: { name: string }) {
         type="button"
         className="danger-btn"
         onClick={() => {
-          edit((p) => p.services.splice(index, 1))
+          edit((p) => removeService(p, service.name))
           select(null)
         }}
       >
         Supprimer le service
       </button>
     </div>
-  )
-}
-
-function MessageSelect(props: { value: string; onChange: (v: string) => void }) {
-  const messages = useStore((s) => s.project.messages)
-  return (
-    <select aria-label="Message" value={props.value} onChange={(e) => props.onChange(e.target.value)}>
-      {!messages.some((m) => m.name === props.value) && <option value={props.value}>{props.value || 'Choisir…'}</option>}
-      {messages.map((m) => (
-        <option key={m.name}>{m.name}</option>
-      ))}
-    </select>
   )
 }
 
@@ -176,7 +219,8 @@ function TopicInspector({ name }: { name: string }) {
     const t = typeOfField(f)
     return !t.repeated && !t.optional && ['string', 'int32', 'int64', 'bool'].includes(t.type.kind)
   })
-  const users = servicesUsingTopic(project, topic.name)
+  const consumers = consumersOf(project, topic.name)
+  const candidates = project.services.filter((s) => !topic.producers.includes(s.name))
 
   return (
     <div className="inspector">
@@ -185,7 +229,7 @@ function TopicInspector({ name }: { name: string }) {
           <CommitInput value={topic.name} mono label="Nom du topic" onCommit={(v) => { edit((p) => renameTopic(p, topic.name, v)); select({ kind: 'topic', name: v }) }} />
         </Row>
         <Row label="Événement" hint="Message protobuf transporté">
-          <MessageSelect value={topic.message} onChange={(v) => edit((p) => { const t = p.topics[index]!; t.message = v; t.keyField = null })} />
+          <MessageSelect kind="event" value={topic.message} onChange={(v) => edit((p) => { const t = p.topics[index]!; t.message = v; t.keyField = null })} />
         </Row>
         <Row label="Clé" hint="Les événements de même clé restent ordonnés">
           <select aria-label="Champ clé" value={topic.keyField ?? ''} onChange={(e) => edit((p) => (p.topics[index]!.keyField = e.target.value === '' ? null : e.target.value))}>
@@ -203,10 +247,29 @@ function TopicInspector({ name }: { name: string }) {
           <NumberInput value={topic.replicationFactor} min={1} label="Facteur de réplication" onChange={(v) => edit((p) => (p.topics[index]!.replicationFactor = v))} />
         </Row>
       </Section>
-      <Section title="Utilisé par" icon="service">
-        {users.length === 0 ? <Empty>Aucun service ne publie ni ne consomme ce topic.</Empty> : (
+      <Section title="Producteurs" icon="publish">
+        {topic.producers.length === 0 && <Empty>Aucun service ne produit ce topic : tirez une flèche d’un service vers lui, ou ajoutez-en un ci-dessous.</Empty>}
+        <ul className="plain-list">
+          {topic.producers.map((name) => (
+            <li key={name} className="producer">
+              <button type="button" className="link-btn" onClick={() => select({ kind: 'service', name })}>{name}</button>
+              <IconButton icon="x" title={`Retirer ${name} des producteurs`} danger onClick={() => edit((p) => (p.topics[index]!.producers = p.topics[index]!.producers.filter((x) => x !== name)))} />
+            </li>
+          ))}
+        </ul>
+        {candidates.length > 0 && (
+          <select aria-label="Ajouter un producteur" value="" onChange={(e) => e.target.value && edit((p) => declareProducer(p, e.target.value, topic.name))}>
+            <option value="">+ Ajouter un producteur…</option>
+            {candidates.map((s) => (
+              <option key={s.name}>{s.name}</option>
+            ))}
+          </select>
+        )}
+      </Section>
+      <Section title="Consommé par" icon="service">
+        {consumers.length === 0 ? <Empty>Aucun service ne consomme ce topic : tirez une flèche du topic vers un service.</Empty> : (
           <ul className="plain-list">
-            {users.map((s) => (
+            {consumers.map((s) => (
               <li key={s.name}>
                 <button type="button" className="link-btn" onClick={() => select({ kind: 'service', name: s.name })}>{s.name}</button>
               </li>
@@ -223,109 +286,45 @@ function TopicInspector({ name }: { name: string }) {
 
 // ---- messages ---------------------------------------------------------------------
 
-const TYPE_OPTIONS: string[] = [...SCALARS, 'bytes', 'timestamp']
-
-function typeValue(t: FieldType): string {
-  return t.kind === 'message' ? `msg:${t.name}` : t.kind
-}
-
-function parseType(v: string): FieldType {
-  return v.startsWith('msg:') ? { kind: 'message', name: v.slice(4) } : ({ kind: v } as FieldType)
-}
-
 function MessagesInspector({ focus }: { focus?: string }) {
   const project = useStore((s) => s.project)
   const edit = useStore((s) => s.edit)
   return (
     <div className="inspector">
-      <Section title="Schémas (protobuf)" icon="schema" action={<IconButton icon="plus" title="Ajouter un message" onClick={() => edit((p) => addMessage(p))} />}>
-        {project.messages.length === 0 && <Empty>Aucun message. Les messages décrivent les événements Kafka et les requêtes/réponses gRPC.</Empty>}
-        {project.messages.map((m, mi) => (
-          <Collapsible
-            key={m.name}
-            defaultOpen={focus ? focus === m.name : project.messages.length <= 3}
-            title={<><strong className="mono">{m.name}</strong><span className="step-summary">{m.fields.length} champ{m.fields.length > 1 ? 's' : ''}</span></>}
-            actions={<IconButton icon="trash" title={`Supprimer ${m.name}`} danger onClick={() => edit((p) => p.messages.splice(mi, 1))} />}
+      {KINDS.map((kind) => {
+        const entries = project.messages.map((m, mi) => ({ m, mi })).filter((e) => e.m.kind === kind)
+        return (
+          <Section
+            key={kind}
+            title={KIND_LABELS[kind].title}
+            icon="schema"
+            action={<IconButton icon="plus" title={`Ajouter un schéma ${KIND_LABELS[kind].one}`} onClick={() => edit((p) => addMessage(p, undefined, kind))} />}
           >
-            <Row label="Nom">
-              <CommitInput value={m.name} mono label="Nom du message" onCommit={(v) => edit((p) => renameMessage(p, m.name, v))} />
-            </Row>
-            <div className="fields">
-              {m.fields.map((f, fi) => (
-                <FieldRow
-                  key={fi}
-                  field={f}
-                  index={fi}
-                  tag={f.tag ?? fi + 1}
-                  onRename={(v) => edit((p) => renameField(p, m.name, f.name, v))}
-                  onChange={(fn) => edit((p) => fn(p.messages[mi]!.fields[fi]!))}
-                  onDelete={() => edit((p) => p.messages[mi]!.fields.splice(fi, 1))}
-                />
-              ))}
-            </div>
-            <button
-              type="button"
-              className="link-btn"
-              onClick={() =>
-                edit((p) => {
-                  const msg = p.messages[mi]!
-                  const used = msg.fields.map((x) => x.name)
-                  let n = msg.fields.length + 1
-                  while (used.includes(`field_${n}`)) n++
-                  msg.fields.push({ name: `field_${n}`, type: { kind: 'string' }, repeated: false, optional: false, tag: nextTag(msg) })
-                })
-              }
-            >
-              + Ajouter un champ
-            </button>
-          </Collapsible>
-        ))}
-      </Section>
-    </div>
-  )
-}
-
-function FieldRow(props: {
-  field: Field
-  index: number
-  tag: number
-  onRename: (v: string) => void
-  onChange: (fn: (f: Field) => void) => void
-  onDelete: () => void
-}) {
-  const messages = useStore((s) => s.project.messages)
-  const f = props.field
-  const isMsg = f.type.kind === 'message'
-  return (
-    <div className="field-row">
-      <span className="tag" title="Numéro de champ protobuf, stable">#{props.tag}</span>
-      <CommitInput value={f.name} mono label="Nom du champ" onCommit={props.onRename} />
-      <select aria-label="Type du champ" value={typeValue(f.type)} onChange={(e) => props.onChange((x) => { x.type = parseType(e.target.value); if (x.type.kind === 'message') x.optional = false })}>
-        <optgroup label="Types simples">
-          {TYPE_OPTIONS.map((k) => (
-            <option key={k} value={k}>{k}</option>
-          ))}
-        </optgroup>
-        {messages.length > 0 && (
-          <optgroup label="Messages">
-            {messages.map((m) => (
-              <option key={m.name} value={`msg:${m.name}`}>{m.name}</option>
+            <p className="kind-hint">{KIND_LABELS[kind].hint}</p>
+            {entries.length === 0 && <Empty>Aucun schéma de ce type.</Empty>}
+            {entries.map(({ m, mi }) => (
+              <Collapsible
+                key={m.name}
+                defaultOpen={focus ? focus === m.name : project.messages.length <= 3}
+                title={<><strong className="mono">{m.name}</strong><span className="step-summary">{m.fields.length} champ{m.fields.length > 1 ? 's' : ''}</span></>}
+                actions={<IconButton icon="trash" title={`Supprimer ${m.name}`} danger onClick={() => edit((p) => p.messages.splice(mi, 1))} />}
+              >
+                <Row label="Nom">
+                  <CommitInput value={m.name} mono label="Nom du schéma" onCommit={(v) => edit((p) => renameMessage(p, m.name, v))} />
+                </Row>
+                <Row label="Type" hint={KIND_LABELS[m.kind].hint}>
+                  <select aria-label={`Type de ${m.name}`} value={m.kind} onChange={(e) => edit((p) => (p.messages[mi]!.kind = e.target.value as MessageKind))}>
+                    {KINDS.map((k) => (
+                      <option key={k} value={k}>{KIND_LABELS[k].one}</option>
+                    ))}
+                  </select>
+                </Row>
+                <SchemaFields index={mi} />
+              </Collapsible>
             ))}
-          </optgroup>
-        )}
-        {f.type.kind === 'message' && !messages.some((m) => m.name === (f.type as { name: string }).name) && (
-          <option value={typeValue(f.type)}>{(f.type as { name: string }).name} (inconnu)</option>
-        )}
-      </select>
-      <label className="check" title="Liste">
-        <input type="checkbox" checked={f.repeated} onChange={(e) => props.onChange((x) => { x.repeated = e.target.checked; if (e.target.checked) x.optional = false })} />
-        []
-      </label>
-      <label className="check" title="Optionnel (présence suivie)">
-        <input type="checkbox" checked={f.optional} disabled={isMsg || f.repeated} onChange={(e) => props.onChange((x) => (x.optional = e.target.checked))} />
-        ?
-      </label>
-      <IconButton icon="trash" title={`Supprimer ${f.name}`} danger onClick={props.onDelete} />
+          </Section>
+        )
+      })}
     </div>
   )
 }

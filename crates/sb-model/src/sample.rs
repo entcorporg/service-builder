@@ -24,17 +24,33 @@ fn msg_field(name: &str, message: &str) -> Field {
 fn message(name: &str, fields: Vec<Field>) -> Message {
     Message {
         name: name.into(),
+        kind: MessageKind::Proto,
         fields,
     }
 }
 
-fn topic(name: &str, message: &str, key: &str, x: f64, y: f64) -> Topic {
+fn api(name: &str, fields: Vec<Field>) -> Message {
+    Message {
+        kind: MessageKind::Api,
+        ..message(name, fields)
+    }
+}
+
+fn event(name: &str, fields: Vec<Field>) -> Message {
+    Message {
+        kind: MessageKind::Event,
+        ..message(name, fields)
+    }
+}
+
+fn topic(name: &str, message: &str, key: &str, producer: &str, x: f64, y: f64) -> Topic {
     Topic {
         name: name.into(),
         message: message.into(),
         partitions: 3,
         replication_factor: 1,
         key_field: Some(key.into()),
+        producers: vec![producer.into()],
         position: Position { x, y },
     }
 }
@@ -55,6 +71,24 @@ fn set(field: &str, value: Expr) -> Assignment {
     Assignment {
         field: field.into(),
         value,
+    }
+}
+
+fn orders_table() -> Table {
+    let mut order_id = Column::new("order_id", ColumnType::String);
+    order_id.primary_key = true;
+    let mut status = Column::new("status", ColumnType::String);
+    status.default = Some("'PENDING'".into());
+    let mut created_at = Column::new("created_at", ColumnType::Timestamp);
+    created_at.default = Some("now()".into());
+    Table {
+        name: "orders".into(),
+        columns: vec![
+            order_id,
+            Column::new("amount", ColumnType::Int64),
+            status,
+            created_at,
+        ],
     }
 }
 
@@ -88,7 +122,7 @@ pub fn orders() -> Project {
             vec![field("order_id", string()), field("reason", string())],
         ),
         message("CancelOrderResponse", vec![field("status", string())]),
-        message(
+        event(
             "OrderCreated",
             vec![
                 field("order_id", string()),
@@ -97,25 +131,53 @@ pub fn orders() -> Project {
                 items,
             ],
         ),
-        message(
+        event(
             "PaymentCompleted",
             vec![field("order_id", string()), field("reference", string())],
         ),
-        message(
+        event(
             "PaymentFailed",
             vec![field("order_id", string()), field("reason", string())],
         ),
+        api(
+            "PlaceOrderBody",
+            vec![field("amount", FieldType::Int64), {
+                let mut f = field("items", string());
+                f.repeated = true;
+                f
+            }],
+        ),
+        api("GetOrderRequest", vec![field("order_id", string())]),
+        api(
+            "OrderView",
+            vec![field("order_id", string()), field("status", string())],
+        ),
     ];
     p.topics = vec![
-        topic("orders.created", "OrderCreated", "order_id", 230.0, 120.0),
+        topic(
+            "orders.created",
+            "OrderCreated",
+            "order_id",
+            "Orders",
+            230.0,
+            120.0,
+        ),
         topic(
             "payments.completed",
             "PaymentCompleted",
             "order_id",
+            "Payments",
             690.0,
             30.0,
         ),
-        topic("payments.failed", "PaymentFailed", "order_id", 690.0, 200.0),
+        topic(
+            "payments.failed",
+            "PaymentFailed",
+            "order_id",
+            "Payments",
+            690.0,
+            200.0,
+        ),
     ];
 
     let orders = Service {
@@ -176,6 +238,94 @@ pub fn orders() -> Project {
                 ],
             },
         ],
+        http_port: Some(8081),
+        tables: vec![orders_table()],
+        routes: vec![
+            Route {
+                name: "place_order".into(),
+                method: HttpMethod::Post,
+                path: "/orders".into(),
+                request: "PlaceOrderBody".into(),
+                response: "OrderView".into(),
+                status: 201,
+                steps: vec![
+                    Step::Let {
+                        id: "h1".into(),
+                        name: "order_id".into(),
+                        value_type: FieldType::String,
+                        value: raw("eda_runtime::new_id()"),
+                    },
+                    Step::Sql {
+                        id: "h5".into(),
+                        op: SqlOp::Insert,
+                        table: "orders".into(),
+                        bind: None,
+                        columns: vec![],
+                        many: false,
+                        into: None,
+                        conditions: vec![],
+                        values: vec![
+                            set("order_id", path("order_id")),
+                            set("amount", path("input.amount")),
+                        ],
+                        order_by: None,
+                        descending: false,
+                        limit: None,
+                    },
+                    Step::Publish {
+                        id: "h2".into(),
+                        topic: "orders.created".into(),
+                        payload: vec![
+                            set("order_id", path("order_id")),
+                            set("amount", path("input.amount")),
+                            set("items", path("input.items")),
+                        ],
+                    },
+                    Step::Respond {
+                        id: "h3".into(),
+                        fields: vec![
+                            set("order_id", path("order_id")),
+                            set("status", lit("PENDING")),
+                        ],
+                    },
+                ],
+            },
+            Route {
+                name: "get_order".into(),
+                method: HttpMethod::Get,
+                path: "/orders/{order_id}".into(),
+                request: "GetOrderRequest".into(),
+                response: "OrderView".into(),
+                status: 200,
+                steps: vec![
+                    Step::Sql {
+                        id: "h6".into(),
+                        op: SqlOp::Select,
+                        table: "orders".into(),
+                        bind: Some("order".into()),
+                        columns: vec!["order_id".into(), "status".into()],
+                        many: false,
+                        into: None,
+                        conditions: vec![SqlCondition {
+                            column: "order_id".into(),
+                            op: CmpOp::Eq,
+                            value: path("input.order_id"),
+                        }],
+                        values: vec![],
+                        order_by: None,
+                        descending: false,
+                        limit: None,
+                    },
+                    Step::Respond {
+                        id: "h4".into(),
+                        fields: vec![
+                            set("order_id", path("order.order_id")),
+                            set("status", path("order.status")),
+                        ],
+                    },
+                ],
+            },
+        ],
         consumers: vec![],
     };
 
@@ -184,6 +334,9 @@ pub fn orders() -> Project {
         port: 50052,
         position: Position { x: 460.0, y: 120.0 },
         rpcs: vec![],
+        http_port: None,
+        routes: vec![],
+        tables: vec![],
         consumers: vec![Consumer {
             name: "on_order_created".into(),
             topic: "orders.created".into(),
@@ -228,6 +381,9 @@ pub fn orders() -> Project {
         port: 50053,
         position: Position { x: 920.0, y: 120.0 },
         rpcs: vec![],
+        http_port: None,
+        routes: vec![],
+        tables: vec![],
         consumers: vec![
             Consumer {
                 name: "on_payment_completed".into(),
