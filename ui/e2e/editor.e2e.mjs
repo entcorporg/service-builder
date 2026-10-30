@@ -380,6 +380,64 @@ describe('editor', () => {
     await page.close()
   })
 
+  it('limits the rate of a route, and sets the status and cookies of its response', async () => {
+    const { page } = await open()
+    // A gRPC handler has no 429 nor cookie: the step is not offered.
+    await page.locator('.node.service', { hasText: 'Orders' }).click()
+    await page.locator('.card.rpc .card-toggle', { hasText: 'CreateOrder' }).click()
+    await page.locator('.add-step-btn').first().click()
+    assert.equal(await page.getByRole('menuitem', { name: /Limiter le débit/ }).count(), 0)
+    await page.locator('.add-step-btn').first().click()
+
+    // The sample's `place_order` limits and sets a cookie.
+    await page.locator('.tree button.sub', { hasText: '/orders' }).first().click()
+    await page.locator('.endpoint').waitFor()
+    const limit = page.locator('.card.step', { hasText: 'Limiter le débit' })
+    assert.match(await limit.innerText(), /100 par 60 s/)
+    assert.equal(await limit.getByLabel('Essais maximum').inputValue(), '100')
+    const respond = page.locator('.card.step', { hasText: 'Répondre' })
+    assert.equal(await respond.getByLabel('Statut de la réponse').inputValue(), '201')
+    assert.equal(await respond.getByLabel('Nom du cookie').inputValue(), 'last_order')
+    assert.equal(await respond.getByLabel('HttpOnly').isChecked(), true)
+    assert.equal(await respond.getByLabel('Secure').isChecked(), true)
+    assert.equal(await respond.getByLabel('Durée du cookie (secondes)').inputValue(), '3600')
+
+    // A second cookie: `SameSite=None` on a cookie that is not Secure is refused by browsers, and by the editor.
+    await respond.getByRole('button', { name: '+ Ajouter un cookie' }).click()
+    const second = respond.getByRole('group', { name: 'Cookie session' })
+    await second.getByLabel('SameSite').selectOption('none')
+    await second.getByLabel('Secure').uncheck()
+    await settle(page)
+    assert.match(await page.locator('.status').innerText(), /erreur/)
+    assert.ok((await page.locator('.problems li').allInnerTexts()).some((t) => t.includes('E_COOKIE_SAMESITE')))
+    await second.getByLabel('Secure').check()
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+
+    // A limit by e-mail-like key on the other route, then everything in the generated code.
+    await page.locator('.tree button.sub', { hasText: '/orders/{order_id}' }).click()
+    await page.locator('.endpoint').waitFor()
+    await page.locator('.add-step-btn').first().click()
+    await page.getByRole('menuitem', { name: /Limiter le débit/ }).click()
+    const added = page.locator('.card.step', { hasText: 'Limiter le débit' })
+    assert.equal(await added.getByLabel('Clé : source').inputValue(), 'literal')
+    await added.getByLabel('Clé : source').selectOption('path')
+    await added.getByLabel('Clé : champ').selectOption('input.order_id')
+    await added.getByLabel('Essais maximum').fill('7')
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/flows/api.rs"]').click()
+    const code = await page.locator('.code-main pre').innerText()
+    assert.match(code, /eda_runtime::rate_limit::check\("h8", &\("place_order"\.to_string\(\)\), 100, 60\)\?;/)
+    assert.match(code, /rate_limit::check\([^)]*&\(input\.order_id\.clone\(\)\), 7, 900\)\?;/)
+    assert.match(code, /\.status\(201\)/)
+    assert.match(code, /Cookie::new\("last_order", order_id\.clone\(\)\)\.max_age\(3600\)/)
+    assert.match(code, /Cookie::new\("session"/)
+    await page.close()
+  })
+
   it('hides events, proto schemas and topics while an endpoint is open', async () => {
     const { page } = await open()
     const tree = page.locator('.tree')

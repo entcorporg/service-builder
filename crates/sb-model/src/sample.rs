@@ -220,6 +220,8 @@ pub fn orders() -> Project {
                             set("status", lit("PENDING")),
                             set("note", path("input.customer.name")),
                         ],
+                        status: None,
+                        cookies: vec![],
                     },
                 ],
             },
@@ -236,6 +238,8 @@ pub fn orders() -> Project {
                     Step::Respond {
                         id: "c2".into(),
                         fields: vec![set("status", lit("CANCELLED"))],
+                        status: None,
+                        cookies: vec![],
                     },
                 ],
             },
@@ -251,6 +255,13 @@ pub fn orders() -> Project {
                 response: "OrderView".into(),
                 status: 201,
                 steps: vec![
+                    // At most 100 orders a minute for the whole service.
+                    Step::RateLimit {
+                        id: "h8".into(),
+                        key: lit("place_order"),
+                        max: 100,
+                        window_secs: 60,
+                    },
                     Step::Branch {
                         id: "h0".into(),
                         condition: Condition::Compare {
@@ -308,6 +319,13 @@ pub fn orders() -> Project {
                             set("order_id", path("order_id")),
                             set("status", lit("PENDING")),
                         ],
+                        status: Some(201),
+                        // Remembers the last order for the front: not readable by scripts.
+                        cookies: vec![{
+                            let mut c = Cookie::new("last_order", path("order_id"));
+                            c.max_age_secs = Some(3600);
+                            c
+                        }],
                     },
                 ],
             },
@@ -343,6 +361,8 @@ pub fn orders() -> Project {
                             set("order_id", path("order.order_id")),
                             set("status", path("order.status")),
                         ],
+                        status: None,
+                        cookies: vec![],
                     },
                 ],
             },

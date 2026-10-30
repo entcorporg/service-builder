@@ -586,12 +586,27 @@ pub enum Step {
         #[serde(default)]
         otherwise: Vec<Step>,
     },
-    /// Return the RPC response (RPC handlers only).
+    /// Return the RPC or route response. An HTTP route can also pick its success `status` and set `cookies`.
     #[serde(rename_all = "camelCase")]
     Respond {
         id: String,
         #[serde(default)]
         fields: Vec<Assignment>,
+        /// Routes: the success status (200, 201 or 202), instead of the route's own.
+        #[serde(default)]
+        status: Option<u16>,
+        /// Routes: `Set-Cookie` headers.
+        #[serde(default)]
+        cookies: Vec<Cookie>,
+    },
+    /// Counts this attempt under `key` and, past `max` attempts in the last `window_secs`, ends the route
+    /// with a 429 and a `Retry-After`. A sliding window per key, kept in the memory of the process.
+    #[serde(rename_all = "camelCase")]
+    RateLimit {
+        id: String,
+        key: Expr,
+        max: u32,
+        window_secs: u32,
     },
     /// A query on a table of the service's database, in the transaction of the handler. A
     /// `Select` binds `bind`, typed after the ticked columns: that is what the next steps read.
@@ -669,6 +684,53 @@ pub enum Step {
     Code { id: String, code: String },
 }
 
+/// A `Set-Cookie` of a route response. Safe by default: `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Cookie {
+    pub name: String,
+    pub value: Expr,
+    /// Seconds before it expires; `0` deletes it. Absent: a session cookie.
+    #[serde(default)]
+    pub max_age_secs: Option<u32>,
+    #[serde(default = "default_true")]
+    pub http_only: bool,
+    #[serde(default = "default_true")]
+    pub secure: bool,
+    #[serde(default)]
+    pub same_site: SameSite,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum SameSite {
+    #[default]
+    Lax,
+    Strict,
+    /// Sent cross-site: browsers then require `Secure`.
+    None,
+}
+
+impl Cookie {
+    pub fn new(name: impl Into<String>, value: Expr) -> Self {
+        Self {
+            name: name.into(),
+            value,
+            max_age_secs: None,
+            http_only: true,
+            secure: true,
+            same_site: SameSite::Lax,
+            path: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SqlOp {
@@ -710,6 +772,7 @@ impl Step {
             | Step::Respond { id, .. }
             | Step::Sql { id, .. }
             | Step::Fail { id, .. }
+            | Step::RateLimit { id, .. }
             | Step::HashPassword { id, .. }
             | Step::VerifyPassword { id, .. }
             | Step::RandomToken { id, .. }

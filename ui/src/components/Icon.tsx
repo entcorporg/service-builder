@@ -15,6 +15,7 @@ const PATHS = {
   callRpc: 'M7 7h13l-4-4M17 17H4l4 4',
   branch: 'M6 3v12M18 9a3 3 0 100-6 3 3 0 000 6zM6 21a3 3 0 100-6 3 3 0 000 6zM18 9c0 6-12 3-12 6',
   respond: 'M20 4v7a4 4 0 01-4 4H4M9 10l-5 5 5 5',
+  rateLimit: 'M12 22a10 10 0 100-20 10 10 0 000 20zM12 6v6l4 2',
   hashPassword: 'M7 11V8a5 5 0 0110 0v3M5 11h14v10H5zM12 15v2',
   verifyPassword: 'M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6zM8.5 12l2.5 2.5L15.5 10',
   randomToken: 'M3 8h18v8H3zM7 12h.01M12 12h.01M17 12h.01',

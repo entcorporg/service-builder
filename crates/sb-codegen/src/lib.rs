@@ -158,6 +158,7 @@ mod tests {
                 "runtime/src/db.rs",
                 "runtime/src/lib.rs",
                 "runtime/src/outbox.rs",
+                "runtime/src/rate_limit.rs",
                 "services/notifications/Cargo.toml",
                 "services/notifications/src/app/bootstrap.rs",
                 "services/notifications/src/app/config.rs",
@@ -284,7 +285,13 @@ mod tests {
         assert!(http.contains(".route(\"/orders/{order_id}\", get(handle_get_order))"));
         // A body for POST (+ the status of the route), a query string for GET, path parameters read by name.
         assert!(http.contains("Json(input): Json<pb::PlaceOrderBody>"));
-        assert!(http.contains("(StatusCode::CREATED, Json(body))"));
+        // `place_order` sets a status and a cookie in its Respond: it answers with a `Reply`; `get_order` does not.
+        assert!(http.contains(") -> Result<Response, ApiError>"));
+        assert!(http.contains(".unwrap_or(StatusCode::CREATED)"));
+        assert!(
+            http.contains("response.headers_mut().append(axum::http::header::SET_COOKIE, value);")
+        );
+        assert!(http.contains("(StatusCode::OK, Json(body))"));
         assert!(http.contains("Query(mut input): Query<pb::GetOrderRequest>"));
         assert!(http.contains("input.order_id = param(&path, \"order_id\")?;"));
         assert!(http.contains("flows::api::get_order(&ctx, input)"));
@@ -297,6 +304,14 @@ mod tests {
         assert!(api.contains("let mut tx = ctx.db.begin().await?;"));
         assert!(api.contains("eda_runtime::outbox::enqueue(&mut tx, topics::ORDERS_CREATED"));
         assert!(api.contains("return Ok(reply);"));
+        assert!(api.contains("-> anyhow::Result<eda_runtime::http::Reply<pb::OrderView>>"));
+        assert!(api.contains("pub async fn get_order(ctx: &Ctx, input: pb::GetOrderRequest) -> anyhow::Result<pb::OrderView>"));
+        assert!(api.contains(
+            "return Ok(eda_runtime::http::Reply::new(reply).status(201).cookie(eda_runtime::http::Cookie::new(\"last_order\", order_id.clone()).max_age(3600)));"
+        ));
+        assert!(api.contains(
+            "eda_runtime::rate_limit::check(\"h8\", &(\"place_order\".to_string()), 100, 60)?;"
+        ));
 
         let config = file(&files, "services/orders/src/app/config.rs");
         assert!(config.contains("ORDERS_HTTP_PORT"));
@@ -335,8 +350,7 @@ mod tests {
                         field: "status".into(),
                         value: path("view.status"),
                     },
-                ],
-            },
+                ], status: None, cookies: vec![]},
         ];
         let files = generate(&p).unwrap();
         let api = file(&files, "services/orders/src/flows/api.rs");
@@ -396,7 +410,7 @@ mod tests {
             op: SqlOp::Insert,
             values,
             ..
-        } = &mut p.services[0].routes[0].steps[2]
+        } = &mut p.services[0].routes[0].steps[3]
         {
             values.push(sb_model::Assignment {
                 field: "ext_id".into(),
@@ -433,7 +447,7 @@ mod tests {
             op: SqlOp::Insert,
             values,
             ..
-        } = &mut p.services[0].routes[0].steps[2]
+        } = &mut p.services[0].routes[0].steps[3]
         {
             values.push(sb_model::Assignment {
                 field: "meta".into(),
@@ -684,6 +698,43 @@ mod tests {
         assert!(file(&files, "runtime/src/crypto.rs").contains("spawn_blocking"));
         assert!(file(&files, "runtime/Cargo.toml").contains("argon2.workspace = true"));
         assert!(file(&files, "Cargo.toml").contains("argon2 = \"0.6\""));
+    }
+
+    #[test]
+    fn cookies_keep_the_safe_defaults_unless_relaxed() {
+        use sb_model::{Cookie, Expr, SameSite, Step};
+        let mut p = sample::orders();
+        let value = || Expr::Path {
+            path: "order_id".into(),
+        };
+        let mut theme = Cookie::new(
+            "theme",
+            Expr::Literal {
+                value: "dark".into(),
+            },
+        );
+        theme.http_only = false;
+        theme.secure = false;
+        theme.same_site = SameSite::Strict;
+        theme.path = Some("/app".into());
+        let mut cross = Cookie::new("cross", value());
+        cross.same_site = SameSite::None;
+        let mut gone = Cookie::new("old", Expr::Literal { value: "".into() });
+        gone.max_age_secs = Some(0);
+        if let Some(Step::Respond { cookies, .. }) = p.services[0].routes[0].steps.last_mut() {
+            cookies.extend([theme, cross, gone]);
+        }
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&p)),
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        assert!(api.contains(".cookie(eda_runtime::http::Cookie::new(\"theme\", \"dark\".to_string()).path(\"/app\").http_only(false).secure(false).same_site(eda_runtime::http::SameSite::Strict))"));
+        assert!(api.contains(".cookie(eda_runtime::http::Cookie::new(\"cross\", order_id.clone()).same_site(eda_runtime::http::SameSite::None))"));
+        // `Max-Age=0` is how a cookie is deleted (logout).
+        assert!(api.contains("Cookie::new(\"old\", \"\".to_string()).max_age(0)"));
     }
 
     #[test]

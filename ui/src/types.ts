@@ -52,6 +52,20 @@ export interface Assignment {
   value: Expr
 }
 
+export type SameSite = 'lax' | 'strict' | 'none'
+
+/** A `Set-Cookie` of a route response: `HttpOnly`, `Secure`, `SameSite=Lax` unless relaxed. */
+export interface Cookie {
+  name: string
+  value: Expr
+  /** `0` deletes it; null is a session cookie. */
+  maxAgeSecs: number | null
+  httpOnly: boolean
+  secure: boolean
+  sameSite: SameSite
+  path: string | null
+}
+
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
 export type ColumnType = 'string' | 'bool' | 'int32' | 'int64' | 'float' | 'double' | 'timestamp' | 'uuid' | 'jsonb'
@@ -114,7 +128,9 @@ export type Step =
   | { type: 'publish'; id: string; topic: string; payload: Assignment[] }
   | { type: 'callRpc'; id: string; service: string; method: string; request: Assignment[]; bind: string | null }
   | { type: 'branch'; id: string; condition: Condition; then: Step[]; otherwise: Step[] }
-  | { type: 'respond'; id: string; fields: Assignment[] }
+  | { type: 'respond'; id: string; fields: Assignment[]; status: number | null; cookies: Cookie[] }
+  /** Past `max` attempts under `key` in `windowSecs`: a 429 with `Retry-After`. In memory, per process. */
+  | { type: 'rateLimit'; id: string; key: Expr; max: number; windowSecs: number }
   /** argon2id (off the async runtime) of `input`: the PHC string to store. */
   | { type: 'hashPassword'; id: string; input: Expr; bind: string }
   /** `bind` is a bool; `stored` may be absent (unknown account), the check then costs the same. */

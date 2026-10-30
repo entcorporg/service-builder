@@ -40,7 +40,15 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
             Step::Let { value, .. } => expr(value, &format!("{path}/value"), out),
             Step::Publish { payload, .. } => assignments(payload, &format!("{path}/payload"), out),
             Step::CallRpc { request, .. } => assignments(request, &format!("{path}/request"), out),
-            Step::Respond { fields, .. } => assignments(fields, &format!("{path}/fields"), out),
+            Step::Respond {
+                fields, cookies, ..
+            } => {
+                assignments(fields, &format!("{path}/fields"), out);
+                for (j, c) in cookies.iter().enumerate() {
+                    expr(&c.value, &format!("{path}/cookies/{j}/value"), out);
+                }
+            }
+            Step::RateLimit { key, .. } => expr(key, &format!("{path}/key"), out),
             Step::HashPassword { input, .. } | Step::Sha256 { input, .. } => {
                 expr(input, &format!("{path}/input"), out)
             }
