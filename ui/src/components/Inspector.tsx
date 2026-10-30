@@ -1,4 +1,4 @@
-import { addConsumer, addRoute, addRpc, consumersOf, declareProducer, KIND_LABELS, KINDS, removeService, renameMessage, renameRpc, renameService, renameTopic, addMessage } from '../model'
+import { addConsumer, addJob, addRoute, addRpc, consumersOf, declareProducer, KIND_LABELS, KINDS, removeService, renameMessage, renameRpc, renameService, renameTopic, addMessage } from '../model'
 import { inputScope, typeOfField } from '../scope'
 import { useStore } from '../store'
 import type { MessageKind, Project } from '../types'
@@ -191,6 +191,41 @@ function ServiceInspector({ name }: { name: string }) {
         })}
       </Section>
 
+      <Section
+        title="Tâches planifiées"
+        icon="update"
+        action={<IconButton icon="plus" title="Ajouter une tâche planifiée" onClick={() => edit((p) => addJob(svc(p)))} />}
+      >
+        {service.jobs.length === 0 && <Empty>Aucune tâche : rien ne s’exécute ici sans requête ni événement.</Empty>}
+        {service.jobs.map((job, ji) => (
+          <Collapsible
+            key={ji}
+            tone="consumer"
+            title={<><strong className="mono">{job.name}</strong><span className="step-summary">toutes les {everyLabel(job.everySecs)}</span></>}
+            actions={<IconButton icon="trash" title={`Supprimer la tâche ${job.name}`} danger onClick={() => edit((p) => svc(p).jobs.splice(ji, 1))} />}
+          >
+            <Row label="Nom">
+              <CommitInput value={job.name} mono label="Nom de la tâche" onCommit={(v) => edit((p) => (svc(p).jobs[ji]!.name = v))} />
+            </Row>
+            <Row label="Toutes les" hint="En secondes, de 1 à 2 592 000 (30 jours). Un premier passage a lieu au démarrage.">
+              <NumberInput label="Période de la tâche (secondes)" min={1} value={job.everySecs} onChange={(n) => edit((p) => (svc(p).jobs[ji]!.everySecs = n))} />
+            </Row>
+            <small className="muted">
+              Chaque instance du service exécute la tâche : ses étapes doivent pouvoir se répéter sans dommage (un <code>DELETE</code> de ce qui a
+              expiré, par exemple). Pas de <code>input</code> ici, et personne à qui répondre.
+            </small>
+            <h4 className="steps-title">Logique</h4>
+            <StepList
+              steps={job.steps}
+              base={`/services/${index}/jobs/${ji}/steps`}
+              scope={{}}
+              ctx={{ service: service.name, response: null }}
+              locate={(p) => svc(p).jobs[ji]!.steps}
+            />
+          </Collapsible>
+        ))}
+      </Section>
+
       <button
         type="button"
         className="danger-btn"
@@ -203,6 +238,14 @@ function ServiceInspector({ name }: { name: string }) {
       </button>
     </div>
   )
+}
+
+/** `420` → `7 min`, `3600` → `1 h`: the period of a job, as a person says it. */
+export function everyLabel(secs: number): string {
+  if (secs % 86400 === 0) return `${secs / 86400} j`
+  if (secs % 3600 === 0) return `${secs / 3600} h`
+  if (secs % 60 === 0) return `${secs / 60} min`
+  return `${secs} s`
 }
 
 // ---- topic ------------------------------------------------------------------------

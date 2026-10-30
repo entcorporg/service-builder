@@ -125,6 +125,7 @@ export function sqlRows(project: Project): Map<string, Message> {
     visit(svc, svc.rpcs.flatMap((r) => r.steps))
     visit(svc, svc.routes.flatMap((r) => r.steps))
     visit(svc, svc.consumers.flatMap((c) => c.steps))
+    visit(svc, svc.jobs.flatMap((j) => j.steps))
   }
   rowsCache.set(project, rows)
   return rows

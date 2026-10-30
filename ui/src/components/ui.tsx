@@ -74,7 +74,7 @@ export function Row(props: { label: string; children: ReactNode; hint?: string }
 
 export function Section(props: { title: string; icon?: IconName; action?: ReactNode; children: ReactNode }) {
   return (
-    <section className="section">
+    <section className="section" aria-label={props.title}>
       <header className="section-head">
         {props.icon && <Icon name={props.icon} size={14} />}
         <h3>{props.title}</h3>

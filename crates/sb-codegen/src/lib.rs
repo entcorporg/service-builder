@@ -156,6 +156,7 @@ mod tests {
                 "runtime/Cargo.toml",
                 "runtime/src/crypto.rs",
                 "runtime/src/db.rs",
+                "runtime/src/jobs.rs",
                 "runtime/src/lib.rs",
                 "runtime/src/outbox.rs",
                 "runtime/src/rate_limit.rs",
@@ -176,6 +177,7 @@ mod tests {
                 "services/orders/src/app/mod.rs",
                 "services/orders/src/app/schema.rs",
                 "services/orders/src/flows/api.rs",
+                "services/orders/src/flows/jobs.rs",
                 "services/orders/src/flows/mod.rs",
                 "services/orders/src/flows/rpc.rs",
                 "services/orders/src/main.rs",
@@ -183,6 +185,7 @@ mod tests {
                 "services/orders/src/transport/http.rs",
                 "services/orders/src/transport/mod.rs",
                 "services/orders/src/transport/outbox.rs",
+                "services/orders/src/transport/scheduler.rs",
                 "services/payments/Cargo.toml",
                 "services/payments/src/app/bootstrap.rs",
                 "services/payments/src/app/config.rs",
@@ -761,6 +764,44 @@ mod tests {
         // The table is created, with the timestamp column the clock is compared with.
         let schema = file(&files, "services/orders/src/app/schema.rs");
         assert!(schema.contains("\\\"expires_at\\\" TIMESTAMPTZ NOT NULL"));
+    }
+
+    #[test]
+    fn jobs_are_scheduled_and_stopped_with_the_service() {
+        let mut p = sample::orders();
+        sample::add_single_use_token(&mut p);
+        sample::add_cleaner_job(&mut p);
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&p)),
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        let files = generate(&p).unwrap();
+        // The flow has no input and runs in its own transaction.
+        let jobs = file(&files, "services/orders/src/flows/jobs.rs");
+        assert!(jobs.contains("pub async fn cleaner(ctx: &Ctx) -> anyhow::Result<()>"));
+        assert!(jobs.contains("let mut tx = ctx.db.begin().await?;"));
+        assert!(jobs.contains("DELETE FROM \\\"auth_tokens\\\" WHERE \\\"expires_at\\\" <= now()"));
+        assert!(jobs.contains("tx.commit().await?;"));
+        assert!(!jobs.contains("input"), "{jobs}");
+        let scheduler = file(&files, "services/orders/src/transport/scheduler.rs");
+        assert!(scheduler.contains("Duration::from_secs(420)"));
+        assert!(scheduler.contains("flows::jobs::cleaner(&ctx).await"));
+        // main starts them, and stops them whatever ended the service.
+        let main = file(&files, "services/orders/src/main.rs");
+        assert!(main.contains("let scheduler = transport::scheduler::Scheduler::spawn(&ctx);"));
+        assert!(main.contains("scheduler.stop().await;"));
+        assert!(main.find("scheduler.stop()").unwrap() < main.rfind("result").unwrap());
+        // A service with no job gets none of it.
+        let mut without = sample::orders();
+        without.services[0].jobs.clear();
+        let plain = generate(&without).unwrap();
+        assert!(
+            !plain
+                .iter()
+                .any(|f| f.path.ends_with("scheduler.rs") || f.path.ends_with("flows/jobs.rs"))
+        );
+        assert!(!file(&plain, "services/orders/src/main.rs").contains("scheduler"));
     }
 
     #[test]
