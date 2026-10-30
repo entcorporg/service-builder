@@ -38,7 +38,7 @@ function literalDefault(kind: string, repeated: boolean): string | number | bool
 }
 
 
-const STEP_ORDER: StepType[] = ['publish', 'sql', 'callRpc', 'branch', 'let', 'log', 'respond', 'fail', 'rateLimit', 'hashPassword', 'verifyPassword', 'randomToken', 'sha256', 'code']
+const STEP_ORDER: StepType[] = ['publish', 'sql', 'callRpc', 'branch', 'let', 'log', 'respond', 'fail', 'rateLimit', 'verifyHmac', 'hashPassword', 'verifyPassword', 'randomToken', 'sha256', 'code']
 
 export function StepList({ steps, base, scope, ctx, locate }: ListProps) {
   const project = useStore((s) => s.project)
@@ -68,10 +68,14 @@ export function StepList({ steps, base, scope, ctx, locate }: ListProps) {
       <AddStep
         allowRespond={ctx.response !== null}
         allowFail={ctx.http === true}
+        // The signature is checked before the body is read: the first step of the route itself, once.
+        allowSignature={ctx.http === true && /\/routes\/\d+\/steps$/.test(base) && !steps.some((s) => s.type === 'verifyHmac')}
         onAdd={(type) =>
           edit((p) => {
             const step = makeStep(type, p, endScope, ctx)
-            locate(p).push(step)
+            // A signature is checked before anything else runs.
+            if (step.type === 'verifyHmac') locate(p).unshift(step)
+            else locate(p).push(step)
             // Publishing needs the service to own the topic: declare it, like drawing the arrow would.
             if (step.type === 'publish') declareProducer(p, ctx.service, step.topic)
           })
@@ -81,7 +85,7 @@ export function StepList({ steps, base, scope, ctx, locate }: ListProps) {
   )
 }
 
-function AddStep(props: { allowRespond: boolean; allowFail: boolean; onAdd: (t: StepType) => void }) {
+function AddStep(props: { allowRespond: boolean; allowFail: boolean; allowSignature: boolean; onAdd: (t: StepType) => void }) {
   const [open, setOpen] = useState(false)
   return (
     <div className="add-step">
@@ -90,7 +94,7 @@ function AddStep(props: { allowRespond: boolean; allowFail: boolean; onAdd: (t: 
       </button>
       {open && (
         <div className="widget-grid" role="menu">
-          {STEP_ORDER.filter((t) => (t !== 'respond' || props.allowRespond) && ((t !== 'fail' && t !== 'rateLimit') || props.allowFail)).map((t) => (
+          {STEP_ORDER.filter((t) => (t !== 'respond' || props.allowRespond) && ((t !== 'fail' && t !== 'rateLimit') || props.allowFail) && (t !== 'verifyHmac' || props.allowSignature)).map((t) => (
             <button
               key={t}
               type="button"
@@ -158,6 +162,8 @@ function summary(step: Step): string {
       return `${step.status} ${step.message}`
     case 'rateLimit':
       return `${step.max} par ${step.windowSecs} s`
+    case 'verifyHmac':
+      return step.header
     case 'hashPassword':
     case 'randomToken':
     case 'sha256':
@@ -504,6 +510,33 @@ function StepBody(props: {
         </div>
       ) : (
         <Empty>« Répondre » n’a de sens que dans un RPC ou une route.</Empty>
+      )
+    }
+
+    case 'verifyHmac': {
+      const u = as<'verifyHmac'>(props.update)
+      return (
+        <div className="stack">
+          <div className="form-row">
+            <span>En-tête</span>
+            <input className="mono" aria-label="En-tête de la signature" value={step.header} spellCheck={false} onChange={(e) => u((s) => (s.header = e.target.value))} />
+          </div>
+          <div className="form-row">
+            <span>Secret</span>
+            <input className="mono" aria-label="Variable d’environnement du secret" value={step.secretEnv} spellCheck={false} onChange={(e) => u((s) => (s.secretEnv = e.target.value))} />
+          </div>
+          <div className="form-row">
+            <span>Tolérance</span>
+            <NumberInput label="Tolérance d’horloge (secondes)" min={1} value={step.toleranceSecs} onChange={(n) => u((s) => (s.toleranceSecs = n))} />
+            <small className="muted">secondes</small>
+          </div>
+          <small className="muted">
+            La signature est le HMAC-SHA256 de <code>horodatage.corps</code>, envoyée dans l’en-tête sous la forme <code>t=…,v1=…</code> (le schéma de
+            Stripe). Elle est vérifiée sur le <strong>corps brut</strong>, avant qu’il soit lu comme JSON ; au-delà de la tolérance, l’horodatage est
+            refusé, ce qui arrête le rejeu. Toute erreur répond <code>401 invalid signature</code>, sans dire pourquoi. Le secret est lu dans la variable
+            d’environnement : le service ne démarre pas sans elle.
+          </small>
+        </div>
       )
     }
 

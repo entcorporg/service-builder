@@ -527,6 +527,11 @@ pub struct Route {
     pub steps: Vec<Step>,
 }
 
+/// Clock tolerance of a signed webhook: Stripe's own default.
+fn default_tolerance_secs() -> u32 {
+    300
+}
+
 fn default_status() -> u16 {
     200
 }
@@ -698,6 +703,18 @@ pub enum Step {
         input: Expr,
         bind: String,
     },
+    /// Authenticates a webhook by its signature, before the body is read as JSON: an HMAC-SHA256 of
+    /// `"{timestamp}.{raw body}"`, sent in `header` as `t=<unix seconds>,v1=<hex>` (Stripe's scheme). A
+    /// wrong, missing or stale signature (past `tolerance_secs`, which stops a replay) is a 401. It has
+    /// to be the first step of a route, and the secret is read from the environment variable `secret_env`.
+    #[serde(rename_all = "camelCase")]
+    VerifyHmac {
+        id: String,
+        header: String,
+        secret_env: String,
+        #[serde(default = "default_tolerance_secs")]
+        tolerance_secs: u32,
+    },
     /// Ends an HTTP route early with an error status (400..=599) and `{ "error": message }`.
     /// The message is a fixed text: a 5xx answers a generic one and keeps this in the logs.
     #[serde(rename_all = "camelCase")]
@@ -812,6 +829,7 @@ impl Step {
             | Step::Sql { id, .. }
             | Step::Fail { id, .. }
             | Step::RateLimit { id, .. }
+            | Step::VerifyHmac { id, .. }
             | Step::HashPassword { id, .. }
             | Step::VerifyPassword { id, .. }
             | Step::RandomToken { id, .. }

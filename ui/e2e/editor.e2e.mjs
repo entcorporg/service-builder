@@ -556,6 +556,45 @@ describe('editor', () => {
     await page.close()
   })
 
+  it('verifies the signature of a webhook before anything else', async () => {
+    const { page } = await open()
+    // The button of the route's own list is the last one: the condition of the sample has a list of its own, where a signature makes no sense.
+    await page.locator('.tree button.sub', { hasText: '/orders' }).first().click()
+    await page.locator('.endpoint').waitFor()
+    await page.locator('.add-step-btn').last().click()
+    await page.getByRole('menuitem', { name: /Vérifier une signature/ }).click()
+
+    // It goes first, whatever the end of the list is.
+    const steps = page.getByRole('region', { name: 'Logique' }).locator('.card.step')
+    assert.match(await steps.first().innerText(), /Vérifier une signature/)
+    // Once only: the menu no longer offers it.
+    await page.locator('.add-step-btn').last().click()
+    assert.equal(await page.getByRole('menuitem', { name: /Vérifier une signature/ }).count(), 0)
+    await page.locator('.add-step-btn').last().click()
+
+    const card = steps.first()
+    await card.getByLabel('En-tête de la signature').fill('X-Hub-Signature')
+    await card.getByLabel('Variable d’environnement du secret').fill('hub-secret')
+    await settle(page)
+    assert.match(await page.locator('.status').innerText(), /erreur/)
+    assert.ok((await page.locator('.problems li').allInnerTexts()).some((t) => t.includes('E_HMAC_SECRET_ENV')))
+    await card.getByLabel('Variable d’environnement du secret').fill('HUB_SECRET')
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+
+    // The generated handler reads the bytes, checks them, and only then parses.
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/transport/http.rs"]').click()
+    const http = await page.locator('.code-main pre').innerText()
+    const handler = http.slice(http.indexOf('async fn handle_place_order'))
+    assert.match(handler, /headers: HeaderMap,\s*body: Bytes,/)
+    assert.ok(handler.indexOf('eda_runtime::webhook::check("HUB_SECRET"') < handler.indexOf('Json::<pb::PlaceOrderBody>::from_bytes'))
+    assert.match(handler, /headers\.get\("X-Hub-Signature"\)/)
+    await page.locator('[role="treeitem"][data-path="services/orders/src/app/config.rs"]').click()
+    assert.match(await page.locator('.code-main pre').innerText(), /eda_runtime::webhook::secret\("HUB_SECRET"\)\?;/)
+    await page.close()
+  })
+
   it('hides events, proto schemas and topics while an endpoint is open', async () => {
     const { page } = await open()
     const tree = page.locator('.tree')

@@ -642,3 +642,13 @@ describe('idempotent consumers', () => {
     expect(consumer.idempotentOn).toBe('event_id')
   })
 })
+
+describe('signed webhooks', () => {
+  it('start on Stripe\'s header, a secret of the environment and its five minutes', () => {
+    expect(makeStep('verifyHmac', project(), inputScope('Order'), { service: 'Orders', response: 'Placed' })).toMatchObject({
+      header: 'Stripe-Signature',
+      secretEnv: 'STRIPE_WEBHOOK_SECRET',
+      toleranceSecs: 300,
+    })
+  })
+})
