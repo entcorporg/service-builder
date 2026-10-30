@@ -156,6 +156,7 @@ mod tests {
                 "runtime/Cargo.toml",
                 "runtime/src/crypto.rs",
                 "runtime/src/db.rs",
+                "runtime/src/dedup.rs",
                 "runtime/src/jobs.rs",
                 "runtime/src/lib.rs",
                 "runtime/src/outbox.rs",
@@ -191,6 +192,7 @@ mod tests {
                 "services/payments/src/app/config.rs",
                 "services/payments/src/app/ctx.rs",
                 "services/payments/src/app/mod.rs",
+                "services/payments/src/app/schema.rs",
                 "services/payments/src/flows/consumers.rs",
                 "services/payments/src/flows/mod.rs",
                 "services/payments/src/main.rs",
@@ -389,11 +391,11 @@ mod tests {
             file(&files, "services/orders/src/app/bootstrap.rs")
                 .contains("crate::app::schema::apply(&db)")
         );
-        // Services without a table get nothing.
+        // Services without a table, and without an idempotent consumer, get nothing.
         assert!(
             !files
                 .iter()
-                .any(|f| f.path == "services/payments/src/app/schema.rs")
+                .any(|f| f.path == "services/notifications/src/app/schema.rs")
         );
     }
 
@@ -802,6 +804,38 @@ mod tests {
                 .any(|f| f.path.ends_with("scheduler.rs") || f.path.ends_with("flows/jobs.rs"))
         );
         assert!(!file(&plain, "services/orders/src/main.rs").contains("scheduler"));
+    }
+
+    #[test]
+    fn an_idempotent_consumer_records_its_events_in_its_transaction() {
+        let files = generate(&sample::orders()).unwrap();
+        let flow = file(&files, "services/payments/src/flows/consumers.rs");
+        // The record is written before anything else, in the transaction the handler commits at the end.
+        let begin = flow.find("let mut tx = ctx.db.begin().await?;").unwrap();
+        let check = flow
+            .find("eda_runtime::dedup::first_time(&mut tx, \"on_order_created\", &input.order_id.to_string())")
+            .unwrap();
+        assert!(begin < check, "{flow}");
+        assert!(flow.contains("duplicate event skipped"));
+        assert!(
+            check < flow.find("// let approved").unwrap(),
+            "before the steps"
+        );
+        // The table is created with the schema, and old rows are purged.
+        let schema = file(&files, "services/payments/src/app/schema.rs");
+        assert!(schema.contains("eda_runtime::dedup::CREATE_TABLE,"));
+        assert!(
+            file(&files, "services/payments/src/app/bootstrap.rs")
+                .contains("crate::app::schema::apply(&db)")
+        );
+        assert!(
+            file(&files, "services/payments/src/transport/kafka.rs")
+                .contains("eda_runtime::dedup::spawn_purge(ctx.db.clone());")
+        );
+        // A consumer that does not ask for it keeps its flow as it was.
+        let other = file(&files, "services/notifications/src/flows/consumers.rs");
+        assert!(!other.contains("dedup"));
+        assert!(!file(&files, "services/notifications/src/transport/kafka.rs").contains("dedup"));
     }
 
     #[test]

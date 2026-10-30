@@ -542,8 +542,20 @@ pub struct Consumer {
     /// Kafka consumer group. Defaults to `<service>-<consumer>`.
     #[serde(default)]
     pub group_id: Option<String>,
+    /// Kafka delivers at least once: the same event can arrive twice. With this field of the event, which
+    /// identifies it, an event already handled is skipped: the check and the effects of the first handling
+    /// are in the same transaction.
+    #[serde(default)]
+    pub idempotent_on: Option<String>,
     #[serde(default)]
     pub steps: Vec<Step>,
+}
+
+impl Service {
+    /// Whether a consumer skips the events it already handled, which needs the `processed_events` table.
+    pub fn has_idempotent_consumers(&self) -> bool {
+        self.consumers.iter().any(|c| c.idempotent_on.is_some())
+    }
 }
 
 /// One block of a handler, the equivalent of an Elementor widget.

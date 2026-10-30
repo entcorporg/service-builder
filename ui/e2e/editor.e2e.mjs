@@ -525,6 +525,37 @@ describe('editor', () => {
     await page.close()
   })
 
+  it('skips the events a consumer already handled, on the field that identifies them', async () => {
+    const { page } = await open()
+    await page.locator('.node.service', { hasText: 'Payments' }).click()
+    const field = page.getByLabel('Champ qui identifie l’événement')
+    // A service's only consumer starts open.
+    if (!(await field.isVisible())) await page.locator('.card-toggle', { hasText: 'on_order_created' }).click()
+    // The sample's consumer identifies its events by `order_id`. Only single text or integer fields are offered.
+    assert.equal(await field.inputValue(), 'order_id')
+    assert.deepEqual(await field.locator('option').allTextContents(), ['aucun : chaque livraison est traitée', 'order_id', 'amount'])
+
+    const code = async (path) => {
+      await page.getByRole('tab', { name: /Code généré/ }).click()
+      await page.locator(`[role="treeitem"][data-path="${path}"]`).click()
+      const text = await page.locator('.code-main pre').innerText()
+      await page.getByRole('tab', { name: /Architecture/ }).click()
+      return text
+    }
+    const flow = await code('services/payments/src/flows/consumers.rs')
+    assert.match(flow, /eda_runtime::dedup::first_time\(\s*&mut tx,\s*"on_order_created",\s*&input\.order_id\.to_string\(\)/)
+    assert.match(await code('services/payments/src/app/schema.rs'), /eda_runtime::dedup::CREATE_TABLE/)
+
+    // Without it, the consumer and its service lose the table and the check.
+    await page.locator('.node.service', { hasText: 'Payments' }).click()
+    if (!(await field.isVisible())) await page.locator('.card-toggle', { hasText: 'on_order_created' }).click()
+    await field.selectOption('')
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+    assert.doesNotMatch(await code('services/payments/src/flows/consumers.rs'), /dedup/)
+    await page.close()
+  })
+
   it('hides events, proto schemas and topics while an endpoint is open', async () => {
     const { page } = await open()
     const tree = page.locator('.tree')

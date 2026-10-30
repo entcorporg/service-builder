@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// A report is requested after this many tool calls.
-pub const REPORT_EVERY: u32 = 50;
+pub const REPORT_EVERY: u32 = 10;
 /// Reports waiting for the user; beyond that agents are told to stop.
 pub const MAX_PENDING: usize = 20;
 /// Where the issues go.

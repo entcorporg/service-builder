@@ -52,14 +52,14 @@ pub fn generate(project: &Project, service: &Service) -> Result<Vec<GeneratedFil
     ];
 
     let mut app = vec!["bootstrap", "config", "ctx"];
-    if !service.tables.is_empty() {
+    if has_schema(service) {
         app.push("schema");
     }
     files.push(file(
         "app/mod.rs",
         mod_rs("Configuration, shared context and start-up.", &app),
     ));
-    if !service.tables.is_empty() {
+    if has_schema(service) {
         files.push(file("app/schema.rs", schema_rs(service)));
     }
     files.push(file(
@@ -250,6 +250,12 @@ fn group_id(service: &Service, consumer: &sb_model::Consumer) -> String {
 // ---- main.rs ---------------------------------------------------------------------------
 
 /// The start-up sequence. What each step does lives in `app` and `transport`.
+/// Whether the service creates tables at start-up: those of its design, and the one of the events its
+/// idempotent consumers have handled.
+fn has_schema(service: &Service) -> bool {
+    !service.tables.is_empty() || service.has_idempotent_consumers()
+}
+
 fn main_rs(service: &Service, has_topics: bool, publishes: bool) -> String {
     let mut c = Code::new();
     c.line(HEADER);
@@ -404,7 +410,7 @@ fn bootstrap_rs(project: &Project, service: &Service, publishes: bool) -> String
         c.close();
     }
     c.blank();
-    c.line(match (publishes, service.tables.is_empty()) {
+    c.line(match (publishes, !has_schema(service)) {
         (true, false) => {
             "/// Connects to the service's own database, creates its tables and the outbox table."
         }
@@ -417,7 +423,7 @@ fn bootstrap_rs(project: &Project, service: &Service, publishes: bool) -> String
     if publishes {
         c.line("eda_runtime::outbox::migrate(&db).await?;");
     }
-    if !service.tables.is_empty() {
+    if has_schema(service) {
         c.line("crate::app::schema::apply(&db).await?;");
     }
     c.line("Ok(db)");
@@ -520,6 +526,9 @@ fn schema_rs(service: &Service) -> String {
     }
     for statement in statements {
         c.line(format!("{statement:?},"));
+    }
+    if service.has_idempotent_consumers() {
+        c.line("eda_runtime::dedup::CREATE_TABLE,");
     }
     c.dedent();
     c.line("];");
@@ -681,6 +690,10 @@ fn kafka_rs(project: &Project, service: &Service) -> String {
     c.blank();
     c.line("/// Runs one background task per consumer; a failing consumer is logged, not fatal.");
     c.open("pub fn spawn_consumers(config: &Config, ctx: &Ctx)");
+    if service.has_idempotent_consumers() {
+        c.line("// The events handled are remembered for a week, then forgotten.");
+        c.line("eda_runtime::dedup::spawn_purge(ctx.db.clone());");
+    }
     let mut first = true;
     for consumer in &service.consumers {
         let Some(topic) = project.topic(&consumer.topic) else {
@@ -1072,6 +1085,20 @@ fn consumer_flows_rs(project: &Project, service: &Service) -> Result<String, Cod
             cons.name, topic.message
         ));
         begin(&mut c);
+        if let Some(field) = &cons.idempotent_on {
+            // Recorded in this transaction: a handling that fails leaves no trace, and the retry does the work.
+            c.open(format!(
+                "if !eda_runtime::dedup::first_time(&mut tx, {:?}, &input.{field}.to_string()).await?",
+                cons.name
+            ));
+            c.line(format!(
+                "tracing::info!(consumer = {:?}, event = %input.{field}, \"duplicate event skipped\");",
+                cons.name
+            ));
+            c.line("tx.commit().await?;");
+            c.line("return Ok(());");
+            c.close();
+        }
         let mut scope = Scope::with_input(&topic.message);
         steps(
             &mut c,

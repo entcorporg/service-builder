@@ -394,6 +394,8 @@ pub fn orders() -> Project {
             name: "on_order_created".into(),
             topic: "orders.created".into(),
             group_id: None,
+            // Kafka delivers at least once: an order is approved once, however many times it arrives.
+            idempotent_on: Some("order_id".into()),
             steps: vec![
                 Step::Let {
                     id: "p1".into(),
@@ -445,6 +447,7 @@ pub fn orders() -> Project {
                 name: "on_payment_completed".into(),
                 topic: "payments.completed".into(),
                 group_id: None,
+                idempotent_on: None,
                 steps: vec![Step::Log {
                     id: "n1".into(),
                     level: LogLevel::Info,
@@ -455,6 +458,7 @@ pub fn orders() -> Project {
                 name: "on_payment_failed".into(),
                 topic: "payments.failed".into(),
                 group_id: None,
+                idempotent_on: None,
                 steps: vec![
                     Step::CallRpc {
                         id: "n2".into(),

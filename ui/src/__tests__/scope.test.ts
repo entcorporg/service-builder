@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { exampleJson, exampleQuery } from '../json'
-import { addColumn, addForeignKey, addJob, addIndex, addTable, addUnique, makeStep, retargetForeignKey, renameColumn, renameTable, selectionForPath, addMessage, addRoute, addRpc, defaultStatus, pathParams, addTopic, autoMap, canConsume, canProduce, connectConsumer, consumersOf, declareProducer, removeService, renameService, renameField, renameMessage, renameTopic, nestable } from '../model'
+import { addColumn, addForeignKey, addJob, eventKeys, addIndex, addTable, addUnique, makeStep, retargetForeignKey, renameColumn, renameTable, selectionForPath, addMessage, addRoute, addRpc, defaultStatus, pathParams, addTopic, autoMap, canConsume, canProduce, connectConsumer, consumersOf, declareProducer, removeService, renameService, renameField, renameMessage, renameTopic, nestable } from '../model'
 import { sqlPreview } from '../components/SqlStep'
 import { everyLabel } from '../components/Inspector'
 import { createTableSql } from '../components/TablesView'
@@ -46,7 +46,7 @@ const project = (): Project => ({
           ],
         },
       ],
-      consumers: [{ name: 'on_placed', topic: 'orders.placed', groupId: null, steps: [] }],
+      consumers: [{ name: 'on_placed', topic: 'orders.placed', groupId: null, idempotentOn: null, steps: [] }],
     },
   ],
 })
@@ -608,5 +608,37 @@ describe('jobs', () => {
     p.services[0]!.jobs.push({ name: 'j', everySecs: 60, steps: [{ type: 'publish', id: 'p', topic: 'orders.placed', payload: [{ field: 'id', value: { kind: 'path', path: 'x' } }] }] })
     renameField(p, 'Placed', 'id', 'ident')
     expect((p.services[0]!.jobs[0]!.steps[0] as Extract<import('../types').Step, { type: 'publish' }>).payload[0]!.field).toBe('ident')
+  })
+})
+
+describe('idempotent consumers', () => {
+  it('can be told apart by a single string, uuid or integer field of the event', () => {
+    const p = project()
+    p.messages.push({
+      name: 'Rich',
+      kind: 'event',
+      fields: [
+        { name: 'id', type: { kind: 'string' }, repeated: false, optional: false },
+        { name: 'ref', type: { kind: 'uuid' }, repeated: false, optional: false },
+        { name: 'n', type: { kind: 'int64' }, repeated: false, optional: false },
+        { name: 'maybe', type: { kind: 'string' }, repeated: false, optional: true },
+        { name: 'tags', type: { kind: 'string' }, repeated: true, optional: false },
+        { name: 'ratio', type: { kind: 'double' }, repeated: false, optional: false },
+        { name: 'customer', type: { kind: 'message', name: 'Customer' }, repeated: false, optional: false },
+      ],
+    })
+    expect(eventKeys(p, 'Rich')).toEqual(['id', 'ref', 'n'])
+    expect(eventKeys(p, 'Nope')).toEqual([])
+  })
+
+  it('follow a renamed field of the event', () => {
+    const p = project()
+    const consumer = p.services[0]!.consumers[0]!
+    consumer.idempotentOn = 'id'
+    renameField(p, 'Placed', 'id', 'event_id')
+    expect(consumer.idempotentOn).toBe('event_id')
+    // Another message with a field of the same name is not concerned.
+    renameField(p, 'Order', 'id', 'order_id')
+    expect(consumer.idempotentOn).toBe('event_id')
   })
 })

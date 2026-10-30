@@ -128,7 +128,11 @@ export function renameField(p: Project, message: string, from: string, to: strin
       })
     for (const r of s.rpcs) visit(r.steps, r.response)
     for (const r of s.routes) visit(r.steps, r.response)
-    for (const c of s.consumers) visit(c.steps, null)
+    for (const c of s.consumers) {
+      visit(c.steps, null)
+      // The field that identifies the events of a consumer is one of the message of its topic.
+      if (c.idempotentOn === from && p.topics.find((t) => t.name === c.topic)?.message === message) c.idempotentOn = to
+    }
     for (const j of s.jobs) visit(j.steps, null)
   }
 }
@@ -356,6 +360,12 @@ export function addForeignKey(service: Service, table: Table): ForeignKey | null
   return fk
 }
 
+/** The fields of a message that can tell its events apart: a single string, uuid, int32 or int64 (mirrors the validator). */
+export function eventKeys(p: Project, message: string): string[] {
+  const msg = p.messages.find((m) => m.name === message)
+  return (msg?.fields ?? []).filter((f) => !f.repeated && !f.optional && ['string', 'uuid', 'int32', 'int64'].includes(f.type.kind)).map((f) => f.name)
+}
+
 /** A job every hour, which the user then names and draws; it starts empty. */
 export function addJob(service: Service): Job {
   const job: Job = { name: uniqueName('job', service.jobs.map((j) => j.name)), everySecs: 3600, steps: [] }
@@ -369,6 +379,7 @@ export function addConsumer(p: Project, service: Service, topic = p.topics[0], b
     name: uniqueName(base, service.consumers.map((c) => c.name)),
     topic: topic.name,
     groupId: null as string | null,
+    idempotentOn: null as string | null,
     steps: [] as Step[],
   }
   service.consumers.push(consumer)
