@@ -41,6 +41,16 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
             Step::Publish { payload, .. } => assignments(payload, &format!("{path}/payload"), out),
             Step::CallRpc { request, .. } => assignments(request, &format!("{path}/request"), out),
             Step::Respond { fields, .. } => assignments(fields, &format!("{path}/fields"), out),
+            Step::HashPassword { input, .. } | Step::Sha256 { input, .. } => {
+                expr(input, &format!("{path}/input"), out)
+            }
+            Step::VerifyPassword {
+                password, stored, ..
+            } => {
+                expr(password, &format!("{path}/password"), out);
+                expr(stored, &format!("{path}/stored"), out);
+            }
+            Step::RandomToken { .. } => {}
             Step::Fail { retry_after, .. } => {
                 if let Some(wait) = retry_after {
                     expr(wait, &format!("{path}/retryAfter"), out);

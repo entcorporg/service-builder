@@ -59,6 +59,13 @@ describe('fits (mirrors ResolvedPath::adapt_to)', () => {
     expect(fits(optString, false, string)).toBe(false)
     expect(fits(string, false, scalar('int64'))).toBe(false)
   })
+  it('widens a scalar variable like a field: only a whole message variable is bare', () => {
+    // A top-level variable that is a plain string (`let`, a token) is `bare` for `candidates`, yet it fills an optional.
+    expect(fits(string, true, optString)).toBe(true)
+    expect(fits(string, true, scalar('int64'))).toBe(false)
+    const orders = { type: { kind: 'message' as const, name: 'Order' }, repeated: true, optional: false }
+    expect(fits(orders, true, orders)).toBe(true)
+  })
   it('lets a bare message fill a message field only', () => {
     const order = { type: { kind: 'message' as const, name: 'Order' }, repeated: false, optional: false }
     expect(fits(order, true, order)).toBe(true)
@@ -476,5 +483,42 @@ describe('uuid, optional and list variables', () => {
     const p = project()
     p.messages.push({ name: 'Ref', kind: 'api', fields: [{ name: 'id', type: { kind: 'uuid' }, repeated: false, optional: false }] })
     expect(exampleJson(p, 'Ref')).toContain('00000000-0000-0000-0000-000000000000')
+  })
+})
+
+describe('password and token steps', () => {
+  it('bind a string, and a bool for the verification, for the steps that follow', () => {
+    const p = project()
+    const scopes = scopesOf(p, inputScope('Order'), [
+      { type: 'randomToken', id: '1', bind: 'token' },
+      { type: 'sha256', id: '2', input: { kind: 'path', path: 'token' }, bind: 'digest' },
+      { type: 'hashPassword', id: '3', input: { kind: 'path', path: 'digest' }, bind: 'hash' },
+      { type: 'verifyPassword', id: '4', password: { kind: 'path', path: 'token' }, stored: { kind: 'path', path: 'hash' }, bind: 'ok' },
+      { type: 'log', id: '5', level: 'info', message: '' },
+    ])
+    expect(Object.keys(scopes[4]!)).toEqual(['input', 'token', 'digest', 'hash', 'ok'])
+    expect(scopes[4]!.token).toEqual(scalar('string'))
+    expect(scopes[4]!.ok).toEqual(scalar('bool'))
+  })
+
+  it('start from the password the request carries, and from no stored hash', () => {
+    const p = project()
+    p.messages.push({ name: 'Login', kind: 'api', fields: [{ name: 'email', type: { kind: 'string' }, repeated: false, optional: false }, { name: 'password', type: { kind: 'string' }, repeated: false, optional: false }] })
+    const ctx = { service: 'Orders', response: null }
+    expect(makeStep('hashPassword', p, inputScope('Login'), ctx)).toMatchObject({ input: { kind: 'path', path: 'input.password' }, bind: 'password_hash' })
+    expect(makeStep('verifyPassword', p, inputScope('Login'), ctx)).toMatchObject({
+      password: { kind: 'path', path: 'input.password' },
+      stored: { kind: 'literal', value: null },
+      bind: 'password_ok',
+    })
+    // A hash already in scope is what a verification checks against, and never what it checks.
+    const withHash = { ...inputScope('Login'), password_hash: scalar('string') }
+    expect(makeStep('verifyPassword', p, withHash, ctx)).toMatchObject({
+      password: { kind: 'path', path: 'input.password' },
+      stored: { kind: 'path', path: 'password_hash' },
+    })
+    // Names stay free of those already in scope.
+    const scope = { ...inputScope('Login'), token: scalar('string') }
+    expect(makeStep('randomToken', p, scope, ctx)).toMatchObject({ bind: 'token2' })
   })
 })

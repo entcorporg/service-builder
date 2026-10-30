@@ -49,7 +49,7 @@ const FAIL_STATUSES: [number, string][] = [
   [503, 'indisponible'],
 ]
 
-const STEP_ORDER: StepType[] = ['publish', 'sql', 'callRpc', 'branch', 'let', 'log', 'respond', 'fail', 'code']
+const STEP_ORDER: StepType[] = ['publish', 'sql', 'callRpc', 'branch', 'let', 'log', 'respond', 'fail', 'hashPassword', 'verifyPassword', 'randomToken', 'sha256', 'code']
 
 export function StepList({ steps, base, scope, ctx, locate }: ListProps) {
   const project = useStore((s) => s.project)
@@ -170,6 +170,12 @@ function summary(step: Step): string {
       return ''
     case 'fail':
       return `${step.status} ${step.message}`
+    case 'hashPassword':
+    case 'randomToken':
+    case 'sha256':
+      return `→ ${step.bind}`
+    case 'verifyPassword':
+      return `→ ${step.bind}`
     case 'sql':
       return `${OP_LABELS[step.op].toLowerCase()} ${step.table}${step.op === 'select' && step.bind ? ` → ${step.bind}` : ''}`
     case 'code':
@@ -510,6 +516,12 @@ function StepBody(props: {
       )
     }
 
+    case 'hashPassword':
+    case 'verifyPassword':
+    case 'randomToken':
+    case 'sha256':
+      return <SecretBody step={step} update={props.update} scope={scope} />
+
     case 'fail': {
       const u = as<'fail'>(props.update)
       return (
@@ -557,6 +569,52 @@ function StepBody(props: {
       )
     }
   }
+}
+
+const TEXT = scalar('string')
+/** A stored hash may be absent: an unknown account. */
+const MAYBE_TEXT = { ...scalar('string'), optional: true }
+
+const SECRET_HELP: Record<'hashPassword' | 'verifyPassword' | 'randomToken' | 'sha256', string> = {
+  hashPassword:
+    'argon2id, calculé hors du runtime async (il est lent exprès). Le résultat est le texte $argon2id$… à stocker ; plus de 1 024 octets est refusé (400).',
+  verifyPassword:
+    'Vrai si le mot de passe correspond. Sans hash enregistré (compte inconnu), la vérification tourne quand même contre un hash factice : elle prend le même temps et répond faux, donc le délai ne révèle pas quels comptes existent.',
+  randomToken: '256 bits aléatoires en 64 caractères hexadécimaux. Stockez seulement son empreinte (SHA-256), jamais le jeton.',
+  sha256: '64 caractères hexadécimaux. Un jeton est déjà très aléatoire : un hash rapide suffit, inutile d’employer argon2.',
+}
+
+/** The four steps that bind a variable from a secret: a password, a token or their hash. */
+function SecretBody(props: {
+  step: Extract<Step, { type: 'hashPassword' | 'verifyPassword' | 'randomToken' | 'sha256' }>
+  update: Update
+  scope: Scope
+}) {
+  const { step, scope } = props
+  const u = (fn: (s: typeof step) => void) => props.update((s) => fn(s as typeof step))
+  return (
+    <div className="stack">
+      {step.type === 'verifyPassword' ? (
+        <>
+          <ExprEditor label="Mot de passe" expr={step.password} target={TEXT} scope={scope} onChange={(v) => v && u((s) => s.type === 'verifyPassword' && (s.password = v))} />
+          <ExprEditor label="Hash enregistré" expr={step.stored} target={MAYBE_TEXT} scope={scope} onChange={(v) => v && u((s) => s.type === 'verifyPassword' && (s.stored = v))} />
+        </>
+      ) : step.type !== 'randomToken' ? (
+        <ExprEditor
+          label={step.type === 'hashPassword' ? 'Mot de passe' : 'Texte'}
+          expr={step.input}
+          target={TEXT}
+          scope={scope}
+          onChange={(v) => v && u((s) => 'input' in s && (s.input = v))}
+        />
+      ) : null}
+      <div className="form-row">
+        <input className="mono" aria-label="Nom de la variable" value={step.bind} spellCheck={false} onChange={(e) => u((s) => (s.bind = e.target.value))} />
+        <small className="muted">reçoit {step.type === 'verifyPassword' ? 'vrai ou faux' : 'le texte'}</small>
+      </div>
+      <small className="muted">{SECRET_HELP[step.type]}</small>
+    </div>
+  )
 }
 
 const OPS: { value: CmpOp; label: string }[] = [

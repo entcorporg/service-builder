@@ -11,6 +11,7 @@ use crate::writer::Code;
 const RUNTIME_LIB: &str = include_str!("../templates/runtime/lib.rs");
 const RUNTIME_OUTBOX: &str = include_str!("../templates/runtime/outbox.rs");
 const RUNTIME_DB: &str = include_str!("../templates/runtime/db.rs");
+const RUNTIME_CRYPTO: &str = include_str!("../templates/runtime/crypto.rs");
 const RUNTIME_CARGO: &str = include_str!("../templates/runtime/Cargo.toml");
 
 pub fn files(project: &Project) -> Vec<GeneratedFile> {
@@ -31,6 +32,7 @@ pub fn files(project: &Project) -> Vec<GeneratedFile> {
         GeneratedFile::new("runtime/src/lib.rs", RUNTIME_LIB),
         GeneratedFile::new("runtime/src/outbox.rs", RUNTIME_OUTBOX),
         GeneratedFile::new("runtime/src/db.rs", RUNTIME_DB),
+        GeneratedFile::new("runtime/src/crypto.rs", RUNTIME_CRYPTO),
     ]
 }
 
@@ -71,6 +73,10 @@ tonic-prost-build = "0.14"
 tracing = "0.1"
 tracing-subscriber = {{ version = "0.3", features = ["env-filter"] }}
 uuid = {{ version = "1", features = ["v4"] }}
+argon2 = "0.6"
+sha2 = "0.11"
+rand = "0.10"
+hex = "0.4"
 "#,
         members.join(", ")
     )

@@ -336,6 +336,50 @@ describe('editor', () => {
     await page.close()
   })
 
+  it('hashes and verifies passwords, makes and hashes tokens', async () => {
+    const { page } = await open()
+    await page.locator('.tree button.sub', { hasText: '/orders/{order_id}' }).click()
+    await page.locator('.endpoint').waitFor()
+    const add = async (name) => {
+      await page.locator('.add-step-btn').first().click()
+      await page.getByRole('menuitem', { name }).click()
+    }
+    const card = (label) => page.locator('.card.step', { hasText: label })
+
+    await add(/Jeton aléatoire/)
+    assert.equal(await card('Jeton aléatoire').getByLabel('Nom de la variable').inputValue(), 'token')
+
+    // The digest starts on the token just made.
+    await add(/Empreinte SHA-256/)
+    assert.equal(await card('Empreinte SHA-256').getByLabel('Texte : champ').inputValue(), 'token')
+
+    await add(/Hacher un mot de passe/)
+    await card('Hacher un mot de passe').getByLabel('Mot de passe : champ').selectOption('token')
+
+    // The hash to check against starts on the one just made, never on the password itself.
+    await add(/Vérifier un mot de passe/)
+    const verify = card('Vérifier un mot de passe')
+    assert.equal(await verify.getByLabel('Hash enregistré : champ').inputValue(), 'password_hash')
+    assert.notEqual(await verify.getByLabel('Mot de passe : champ').inputValue(), 'password_hash')
+    await verify.getByLabel('Mot de passe : champ').selectOption('token')
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+
+    // A number is not a password: the list only offers what fits.
+    const offered = await card('Hacher un mot de passe').getByLabel('Mot de passe : champ').locator('option').allTextContents()
+    assert.ok(offered.every((o) => !/int64|bool/.test(o)), `unexpected: ${offered}`)
+
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/flows/api.rs"]').click()
+    const code = await page.locator('.code-main pre').innerText()
+    assert.match(code, /let token: String = eda_runtime::crypto::random_token\(\);/)
+    assert.match(code, /let digest: String = eda_runtime::crypto::sha256_hex\(&token\.clone\(\)\);/)
+    assert.match(code, /let password_hash: String = eda_runtime::crypto::hash_password\(token\.clone\(\)\)\.await\?;/)
+    // rustfmt may wrap the long line after `=`.
+    assert.match(code, /let password_ok: bool =\s+eda_runtime::crypto::verify_password\(token\.clone\(\), Some\(password_hash\.clone\(\)\)\)\.await;/)
+    await page.close()
+  })
+
   it('hides events, proto schemas and topics while an endpoint is open', async () => {
     const { page } = await open()
     const tree = page.locator('.tree')

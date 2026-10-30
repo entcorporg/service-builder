@@ -1,7 +1,7 @@
 // Editing helpers on the project document: factories and rename cascades.
 // All mutate a draft (immer), never the live state.
-import { candidates, columnType, fits, type Scope, typeOfField } from './scope'
-import type { Assignment, Column, ForeignKey, HttpMethod, Index, Message, MessageKind, Project, Route, Service, Step, StepType, Table, UniqueConstraint } from './types'
+import { candidates, columnType, fits, type Scope, type TypeRef, typeOfField } from './scope'
+import type { Assignment, Column, Expr, ForeignKey, HttpMethod, Index, Message, MessageKind, Project, Route, Service, Step, StepType, Table, UniqueConstraint } from './types'
 
 export function newId(): string {
   return crypto.randomUUID().slice(0, 8)
@@ -403,9 +403,27 @@ export const STEP_LABELS: Record<StepType, { label: string; hint: string }> = {
   callRpc: { label: 'Appeler un RPC', hint: 'Appeler un autre service en gRPC' },
   branch: { label: 'Condition', hint: 'Si … alors … sinon …' },
   respond: { label: 'Répondre', hint: 'Renvoyer la réponse du RPC' },
+  hashPassword: { label: 'Hacher un mot de passe', hint: 'argon2id, hors du runtime async : le texte à stocker' },
+  verifyPassword: { label: 'Vérifier un mot de passe', hint: 'Vrai ou faux ; un compte inconnu coûte le même temps' },
+  randomToken: { label: 'Jeton aléatoire', hint: '256 bits en hexadécimal : session, e-mail, réinitialisation' },
+  sha256: { label: 'Empreinte SHA-256', hint: 'Ce qu’on stocke d’un jeton, en hexadécimal' },
   fail: { label: 'Refuser', hint: 'Arrêter la route avec un statut d’erreur HTTP (400, 401, 404, 429…)' },
   sql: { label: 'SQL', hint: 'Lire, insérer, modifier ou supprimer dans une table du service' },
   code: { label: 'Code Rust', hint: 'Insérer du Rust écrit à la main' },
+}
+
+/**
+ * The text in scope that a new step most likely reads: a field whose name holds one of `hints`, else the first text
+ * (or optional text, for a stored hash), else `fallback`. A name holding one of `avoid` is never picked by hint: the
+ * password to check is not the hash it is checked against.
+ */
+function firstText(p: Project, scope: Scope, hints: string[], fallback: Expr = { kind: 'literal', value: '' }, optional = false, avoid: string[] = []): Expr {
+  const target = { type: { kind: 'string' }, repeated: false, optional } as TypeRef
+  const options = candidates(p, scope).filter((c) => c.path !== 'input' && fits(c.type, c.bare, target))
+  const has = (c: { path: string }, words: string[]) => words.some((w) => c.path.toLowerCase().includes(w))
+  const named = options.find((c) => has(c, hints) && !has(c, avoid))
+  const pick = named ?? (optional ? undefined : options[0])
+  return pick ? { kind: 'path', path: pick.path } : fallback
 }
 
 /** A new step with sensible defaults for the place it is inserted at. */
@@ -458,6 +476,21 @@ export function makeStep(type: StepType, p: Project, scope: Scope, ctx: { servic
     }
     case 'respond':
       return { type, id, fields: ctx.response ? autoMap(p, scope, ctx.response) : [] }
+    case 'randomToken':
+      return { type, id, bind: uniqueName('token', Object.keys(scope)) }
+    case 'sha256':
+      return { type, id, input: firstText(p, scope, ['token'], undefined, false, ['hash', 'digest']), bind: uniqueName('digest', Object.keys(scope)) }
+    case 'hashPassword':
+      return { type, id, input: firstText(p, scope, ['password'], undefined, false, ['hash', 'digest']), bind: uniqueName('password_hash', Object.keys(scope)) }
+    case 'verifyPassword':
+      return {
+        type,
+        id,
+        password: firstText(p, scope, ['password'], undefined, false, ['hash', 'digest']),
+        // The hash of the account read before, when there is one; else nothing (an unknown account).
+        stored: firstText(p, scope, ['hash'], { kind: 'literal', value: null }, true),
+        bind: uniqueName('password_ok', Object.keys(scope)),
+      }
     case 'fail':
       return { type, id, status: 400, message: 'bad request', retryAfter: null }
     case 'sql': {

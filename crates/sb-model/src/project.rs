@@ -625,6 +625,34 @@ pub enum Step {
         #[serde(default)]
         limit: Option<u32>,
     },
+    /// Hashes a password with argon2id, off the async runtime (it is slow on purpose). The PHC string
+    /// (`$argon2id$...`) is what gets stored.
+    #[serde(rename_all = "camelCase")]
+    HashPassword {
+        id: String,
+        input: Expr,
+        bind: String,
+    },
+    /// Checks a password against a stored hash into a `bool`. `stored` may be absent (an unknown
+    /// account): the check then runs against a dummy hash, so that it takes as long as a real
+    /// refusal and the delay does not tell which accounts exist.
+    #[serde(rename_all = "camelCase")]
+    VerifyPassword {
+        id: String,
+        password: Expr,
+        stored: Expr,
+        bind: String,
+    },
+    /// 256 random bits as 64 hexadecimal characters: a session, e-mail or reset token.
+    #[serde(rename_all = "camelCase")]
+    RandomToken { id: String, bind: String },
+    /// SHA-256 of a text as 64 hexadecimal characters. A token is already random: only its hash is stored.
+    #[serde(rename_all = "camelCase")]
+    Sha256 {
+        id: String,
+        input: Expr,
+        bind: String,
+    },
     /// Ends an HTTP route early with an error status (400..=599) and `{ "error": message }`.
     /// The message is a fixed text: a 5xx answers a generic one and keeps this in the logs.
     #[serde(rename_all = "camelCase")]
@@ -682,6 +710,10 @@ impl Step {
             | Step::Respond { id, .. }
             | Step::Sql { id, .. }
             | Step::Fail { id, .. }
+            | Step::HashPassword { id, .. }
+            | Step::VerifyPassword { id, .. }
+            | Step::RandomToken { id, .. }
+            | Step::Sha256 { id, .. }
             | Step::Code { id, .. } => id,
         }
     }
