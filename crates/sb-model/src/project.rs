@@ -120,6 +120,10 @@ pub struct Field {
     /// editor assigns it once. Untagged fields are numbered by the generator.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<u32>,
+    /// What a request has to satisfy, checked by the HTTP routes before any step runs. Only on text fields of
+    /// API schemas; the first rule that fails is a 400.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<Rule>,
 }
 
 impl Field {
@@ -130,6 +134,31 @@ impl Field {
             repeated: false,
             optional: false,
             tag: None,
+            rules: vec![],
+        }
+    }
+}
+
+/// A rule on a text field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "rule", rename_all = "camelCase")]
+pub enum Rule {
+    /// Between `min` and `max` **characters** (not bytes), once trimmed. The upper bound is what stops a huge
+    /// password from reaching argon2.
+    Length { min: u32, max: u32 },
+    /// Looks like an e-mail address: `local@domain.tld`, 254 characters at most.
+    Email,
+    /// A French company number: 9 digits, with a valid Luhn check digit.
+    Siren,
+}
+
+impl Rule {
+    /// The same kind of rule, whatever its parameters: a field has each kind once.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Rule::Length { .. } => "length",
+            Rule::Email => "email",
+            Rule::Siren => "siren",
         }
     }
 }
@@ -1011,6 +1040,48 @@ impl Project {
             }
         }
         out
+    }
+
+    /// The API schemas a route receives, directly or inside another one: the only ones whose field rules are
+    /// ever checked. Sorted, so that what is generated from it is stable.
+    pub fn received_schemas(&self) -> std::collections::BTreeSet<&str> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut todo: Vec<&str> = self
+            .services
+            .iter()
+            .flat_map(|s| s.routes.iter().map(|r| r.request.as_str()))
+            .collect();
+        while let Some(name) = todo.pop() {
+            let Some(m) = self.message(name) else {
+                continue;
+            };
+            if m.kind != MessageKind::Api || !seen.insert(m.name.as_str()) {
+                continue;
+            }
+            todo.extend(m.fields.iter().filter_map(|f| match &f.ty {
+                FieldType::Message { name } => Some(name.as_str()),
+                _ => None,
+            }));
+        }
+        seen
+    }
+
+    /// Whether checking a `name` means running rules: its own, or those of a schema nested in it.
+    pub fn has_rules(&self, name: &str) -> bool {
+        fn walk<'a>(p: &'a Project, name: &'a str, seen: &mut Vec<&'a str>) -> bool {
+            if seen.contains(&name) {
+                return false;
+            }
+            seen.push(name);
+            let Some(m) = p.message(name) else {
+                return false;
+            };
+            m.fields.iter().any(|f| {
+                !f.rules.is_empty()
+                    || matches!(&f.ty, FieldType::Message { name } if walk(p, name, seen))
+            })
+        }
+        walk(self, name, &mut Vec::new())
     }
 
     /// Brings a project saved by an older version up to date.

@@ -161,6 +161,7 @@ mod tests {
                 "runtime/src/lib.rs",
                 "runtime/src/outbox.rs",
                 "runtime/src/rate_limit.rs",
+                "runtime/src/validation.rs",
                 "runtime/src/webhook.rs",
                 "services/notifications/Cargo.toml",
                 "services/notifications/src/app/bootstrap.rs",
@@ -918,6 +919,49 @@ mod tests {
                 "services/orders/src/app/config.rs"
             )
             .contains("crypto::key")
+        );
+    }
+
+    #[test]
+    fn the_rules_of_a_request_are_checked_before_any_step() {
+        let mut p = sample::orders();
+        sample::add_signup(&mut p);
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&p)),
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        let files = generate(&p).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        // One function per schema that has rules, the nested one included.
+        let body = &http[http.find("fn check_signup_body(").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(body.contains("eda_runtime::validation::email(\"email\", v)?;"));
+        assert!(body.contains("eda_runtime::validation::length(\"password\", v, 10, 128)?;"));
+        // An optional field is checked when present, a list element by element, a nested schema by its own function.
+        assert!(body.contains("if let Some(v) = &m.siren {"));
+        assert!(body.contains("for v in &m.contacts {"));
+        // The path of the field travels with the message: `company.name`.
+        assert!(
+            body.contains("check_signup_company(item).map_err(|e| format!(\"company.{e}\"))?;")
+        );
+        assert!(http.contains("fn check_signup_company(m: &pb::SignupCompany)"));
+        // The handler runs them after the request is read and before the flow.
+        let handler = &http[http.find("async fn handle_signup(").unwrap()..];
+        assert!(
+            handler
+                .find("check_signup_body(&input).map_err(invalid)?;")
+                .unwrap()
+                < handler.find("flows::api::signup").unwrap()
+        );
+        // A schema without rules costs nothing, and the other routes are left alone.
+        assert!(!http.contains("check_place_order_body"));
+        assert!(
+            !file(
+                &generate(&sample::orders()).unwrap(),
+                "services/orders/src/transport/http.rs"
+            )
+            .contains("fn invalid(")
         );
     }
 

@@ -631,6 +631,46 @@ describe('editor', () => {
     await page.close()
   })
 
+  it('checks the fields of a request against rules, before any step', async () => {
+    const { page } = await open()
+    await page.locator('.tree button.sub', { hasText: '/orders' }).first().click()
+    await page.locator('.endpoint').waitFor()
+    // Only text can have rules: the amount is a number.
+    assert.equal(await page.getByRole('group', { name: 'Règles de amount' }).count(), 0)
+    const items = page.getByRole('group', { name: 'Règles de items' })
+
+    await items.getByLabel('Ajouter une règle à items').selectOption('email')
+    await items.getByLabel('Ajouter une règle à items').selectOption('length')
+    // A length nobody can satisfy is reported, with the rule it comes from.
+    await items.getByLabel('Longueur maximale de items').fill('0')
+    await settle(page)
+    assert.ok((await page.locator('.problems li').allInnerTexts()).some((t) => t.includes('E_RULE_LENGTH')))
+    await items.getByLabel('Longueur maximale de items').fill('50')
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+    // Each kind once: the menu no longer offers what the field has.
+    assert.deepEqual(await items.getByLabel('Ajouter une règle à items').locator('option').allTextContents(), ['+ règle…', 'SIREN'])
+
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/transport/http.rs"]').click()
+    const http = await page.locator('.code-main pre').innerText()
+    assert.match(http, /fn check_place_order_body\(m: &pb::PlaceOrderBody\) -> Result<\(\), String>/)
+    assert.match(http, /for v in &m\.items \{[^}]*validation::email\("items", v\)\?;[^}]*validation::length\("items", v, 1, 50\)\?;/)
+    const handler = http.slice(http.indexOf('async fn handle_place_order'))
+    assert.ok(handler.indexOf('check_place_order_body(&input).map_err(invalid)?;') < handler.indexOf('flows::api::place_order'))
+
+    // Take the rules away: the check goes with them.
+    await page.getByRole('tab', { name: /Architecture/ }).click()
+    await page.locator('.tree button.sub', { hasText: '/orders' }).first().click()
+    await items.getByLabel('Retirer la règle email de items').click()
+    await items.getByLabel('Retirer la règle length de items').click()
+    await settle(page)
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/transport/http.rs"]').click()
+    assert.doesNotMatch(await page.locator('.code-main pre').innerText(), /check_place_order_body/)
+    await page.close()
+  })
+
   it('hides events, proto schemas and topics while an endpoint is open', async () => {
     const { page } = await open()
     const tree = page.locator('.tree')

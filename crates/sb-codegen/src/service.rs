@@ -17,8 +17,8 @@ use sb_model::names::route_params;
 use sb_model::names::{shouty, snake, topic_const};
 use sb_model::typing::{Scope, TypeRef};
 use sb_model::{
-    Column, ColumnType, DEFAULT_HTTP_PORT, Expr, FieldType, HttpMethod, Project, Service, SqlOp,
-    Step, sql_row_name,
+    Column, ColumnType, DEFAULT_HTTP_PORT, Expr, FieldType, HttpMethod, Project, Rule, Service,
+    SqlOp, Step, sql_row_name,
 };
 
 use crate::expr::{condition_code, log_code, lower, rust_let_type, struct_literal};
@@ -99,7 +99,7 @@ pub fn generate(project: &Project, service: &Service) -> Result<Vec<GeneratedFil
         files.push(file("transport/grpc.rs", grpc_rs(service)));
     }
     if has_routes {
-        files.push(file("transport/http.rs", http_rs(service)));
+        files.push(file("transport/http.rs", http_rs(project, service)));
     }
     if has_consumers {
         files.push(file("transport/kafka.rs", kafka_rs(project, service)));
@@ -774,7 +774,7 @@ fn outbox_rs() -> String {
 
 /// The HTTP API for the front: one handler per route, translating the request into the
 /// schema of the route and the answer (or the error) into JSON, then delegating to `flows::api`.
-fn http_rs(service: &Service) -> String {
+fn http_rs(project: &Project, service: &Service) -> String {
     // Routes sharing a path are served by one `MethodRouter`, in order of appearance.
     let mut paths: Vec<(&str, Vec<&sb_model::Route>)> = vec![];
     for r in &service.routes {
@@ -922,6 +922,13 @@ fn http_rs(service: &Service) -> String {
         for param in &params {
             c.line(format!("input.{param} = param(&path, {param:?})?;"));
         }
+        if project.has_rules(&r.request) {
+            // The rules of the schema, before any step: the first that fails is a 400.
+            c.line(format!(
+                "{}(&input).map_err(invalid)?;",
+                rules_fn(&r.request)
+            ));
+        }
         c.line(format!("flows::api::{}(&ctx, input)", r.name));
         c.line("    .await");
         if reply {
@@ -955,6 +962,8 @@ fn http_rs(service: &Service) -> String {
         c.line("    .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, format!(\"invalid path parameter `{name}`\")))");
         c.close();
     }
+
+    rules_rs(&mut c, project, service);
 
     c.blank();
     c.line("/// Errors are answered as `{ \"error\": \"...\" }`. A flow picks the status with `eda_runtime::http::HttpError`;");
@@ -1053,6 +1062,103 @@ fn rpc_flows_rs(project: &Project, service: &Service) -> Result<String, CodegenE
         c.close();
     }
     Ok(c.finish())
+}
+
+fn rules_fn(message: &str) -> String {
+    format!("check_{}", snake(message))
+}
+
+/// One function per schema the routes of the service receive and that has rules, its own or inside it.
+fn rules_rs(c: &mut Code, project: &Project, service: &Service) {
+    let received: BTreeSet<&str> = service
+        .routes
+        .iter()
+        .flat_map(|r| {
+            // The request, and the schemas nested in it.
+            let mut names = vec![r.request.as_str()];
+            let mut i = 0;
+            while i < names.len() {
+                if let Some(m) = project.message(names[i]) {
+                    for f in &m.fields {
+                        if let FieldType::Message { name } = &f.ty
+                            && !names.contains(&name.as_str())
+                        {
+                            names.push(name);
+                        }
+                    }
+                }
+                i += 1;
+            }
+            names
+        })
+        .filter(|n| project.has_rules(n))
+        .collect();
+    if received.is_empty() {
+        return;
+    }
+    c.blank();
+    c.open("fn invalid(message: String) -> ApiError");
+    c.line("ApiError::new(StatusCode::BAD_REQUEST, message)");
+    c.close();
+    for name in received {
+        let Some(m) = project.message(name) else {
+            continue;
+        };
+        c.blank();
+        c.line(format!(
+            "/// The rules of `{name}`: the first that fails is a 400."
+        ));
+        c.open(format!(
+            "fn {}(m: &pb::{name}) -> Result<(), String>",
+            rules_fn(name)
+        ));
+        for f in &m.fields {
+            let field = &f.name;
+            if let FieldType::Message { name: inner } = &f.ty {
+                if project.has_rules(inner) {
+                    let check = rules_fn(inner);
+                    // The path of the field travels with the message: `company.name`, `contacts[2].email`.
+                    if f.repeated {
+                        c.line(format!(
+                            "for (i, item) in m.{field}.iter().enumerate() {{ {check}(item).map_err(|e| format!(\"{field}[{{i}}].{{e}}\"))?; }}"
+                        ));
+                    } else {
+                        c.line(format!(
+                            "if let Some(item) = &m.{field} {{ {check}(item).map_err(|e| format!(\"{field}.{{e}}\"))?; }}"
+                        ));
+                    }
+                }
+                continue;
+            }
+            if f.rules.is_empty() {
+                continue;
+            }
+            let calls: Vec<String> = f
+                .rules
+                .iter()
+                .map(|rule| {
+                    let call = match rule {
+                        Rule::Length { min, max } => {
+                            format!("eda_runtime::validation::length({field:?}, v, {min}, {max})")
+                        }
+                        Rule::Email => format!("eda_runtime::validation::email({field:?}, v)"),
+                        Rule::Siren => format!("eda_runtime::validation::siren({field:?}, v)"),
+                    };
+                    format!("{call}?;")
+                })
+                .collect();
+            let body = calls.join(" ");
+            if f.repeated {
+                c.line(format!("for v in &m.{field} {{ {body} }}"));
+            } else if f.optional {
+                c.line(format!("if let Some(v) = &m.{field} {{ {body} }}"));
+            } else {
+                c.line(format!("{{ let v = &m.{field}; {body} }}"));
+            }
+        }
+        c.line("Ok(())");
+        c.close();
+    }
 }
 
 /// The signature check of a route, if it has one: the header, the environment variable of the secret, the tolerance.

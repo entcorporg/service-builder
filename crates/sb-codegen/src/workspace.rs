@@ -14,6 +14,7 @@ const RUNTIME_DB: &str = include_str!("../templates/runtime/db.rs");
 const RUNTIME_DEDUP: &str = include_str!("../templates/runtime/dedup.rs");
 const RUNTIME_JOBS: &str = include_str!("../templates/runtime/jobs.rs");
 const RUNTIME_CRYPTO: &str = include_str!("../templates/runtime/crypto.rs");
+const RUNTIME_VALIDATION: &str = include_str!("../templates/runtime/validation.rs");
 const RUNTIME_WEBHOOK: &str = include_str!("../templates/runtime/webhook.rs");
 const RUNTIME_RATE_LIMIT: &str = include_str!("../templates/runtime/rate_limit.rs");
 const RUNTIME_CARGO: &str = include_str!("../templates/runtime/Cargo.toml");
@@ -40,6 +41,7 @@ pub fn files(project: &Project) -> Vec<GeneratedFile> {
         GeneratedFile::new("runtime/src/dedup.rs", RUNTIME_DEDUP),
         GeneratedFile::new("runtime/src/jobs.rs", RUNTIME_JOBS),
         GeneratedFile::new("runtime/src/rate_limit.rs", RUNTIME_RATE_LIMIT),
+        GeneratedFile::new("runtime/src/validation.rs", RUNTIME_VALIDATION),
         GeneratedFile::new("runtime/src/webhook.rs", RUNTIME_WEBHOOK),
     ]
 }

@@ -47,6 +47,7 @@ pub fn validate(project: &Project) -> Vec<Diagnostic> {
     };
     c.project();
     c.messages();
+    c.unused_rules();
     c.topics();
     c.services();
     c.graph_warnings();
@@ -154,6 +155,24 @@ impl<'a> Checker<'a> {
 
     // ---- messages --------------------------------------------------------------------
 
+    /// Rules that no route would ever check give a false sense of safety: say so.
+    fn unused_rules(&mut self) {
+        let received = self.project.received_schemas();
+        for (i, m) in self.project.messages.iter().enumerate() {
+            let has_rules = m.fields.iter().any(|f| !f.rules.is_empty());
+            if has_rules && m.kind == MessageKind::Api && !received.contains(m.name.as_str()) {
+                self.warn(
+                    "W_RULE_UNUSED",
+                    format!("/messages/{i}"),
+                    format!(
+                        "the rules of `{}` are never checked: no route receives it, directly or inside another schema",
+                        m.name
+                    ),
+                );
+            }
+        }
+    }
+
     fn messages(&mut self) {
         let p = self.project;
         // Messages and services share the protobuf package namespace.
@@ -251,6 +270,7 @@ impl<'a> Checker<'a> {
                         ),
                     );
                 }
+                self.field_rules(m, f, &fp);
                 if f.repeated && f.optional {
                     self.error(
                         "E_REPEATED_OPTIONAL",
@@ -670,6 +690,55 @@ impl<'a> Checker<'a> {
                 };
                 let mut scope = Scope::default();
                 self.steps(&env, &format!("{jp}/steps"), &job.steps, &mut scope);
+            }
+        }
+    }
+
+    /// The rules of a field: only on the text fields of API schemas (the ones a route reads from a request), each
+    /// kind once, and a length that can be satisfied.
+    fn field_rules(&mut self, m: &Message, f: &Field, fp: &str) {
+        if f.rules.is_empty() {
+            return;
+        }
+        let rp = format!("{fp}/rules");
+        if m.kind != MessageKind::Api {
+            self.error(
+                "E_RULE_KIND",
+                &rp,
+                format!(
+                    "field `{}` has rules, but `{}` is {}: only API schemas are checked, when a route receives them",
+                    f.name,
+                    m.name,
+                    kind_label(m.kind)
+                ),
+            );
+        } else if !matches!(f.ty, FieldType::String | FieldType::Uuid) {
+            self.error(
+                "E_RULE_TYPE",
+                &rp,
+                format!(
+                    "field `{}` has rules, which only apply to text (string or uuid)",
+                    f.name
+                ),
+            );
+        }
+        let mut kinds = HashSet::new();
+        for (i, rule) in f.rules.iter().enumerate() {
+            if !kinds.insert(rule.kind()) {
+                self.error(
+                    "E_RULE_DUPLICATE",
+                    format!("{rp}/{i}"),
+                    format!("field `{}` has two `{}` rules", f.name, rule.kind()),
+                );
+            }
+            if let Rule::Length { min, max } = rule
+                && (*max == 0 || min > max)
+            {
+                self.error(
+                    "E_RULE_LENGTH",
+                    format!("{rp}/{i}"),
+                    format!("a length between {min} and {max} characters cannot be satisfied"),
+                );
             }
         }
     }
@@ -3629,6 +3698,89 @@ mod tests {
         }
         assert!(errors(&p).contains(&"E_RESERVED_NAME".to_string()));
         assert_eq!(steps(&mut with_seal()).len(), 3);
+    }
+
+    fn with_signup() -> Project {
+        let mut p = sample::orders();
+        sample::add_signup(&mut p);
+        p
+    }
+
+    fn field_of<'a>(p: &'a mut Project, message: &str, name: &str) -> &'a mut Field {
+        p.messages
+            .iter_mut()
+            .find(|m| m.name == message)
+            .unwrap()
+            .fields
+            .iter_mut()
+            .find(|f| f.name == name)
+            .unwrap()
+    }
+
+    #[test]
+    fn rules_are_checked() {
+        let p = with_signup();
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+
+        // Only the text of an API schema.
+        let mut p = with_signup();
+        field_of(&mut p, "SignupBody", "email").ty = FieldType::Int64;
+        assert!(
+            errors(&p).contains(&"E_RULE_TYPE".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+        let mut p = with_signup();
+        p.messages
+            .iter_mut()
+            .find(|m| m.name == "SignupBody")
+            .unwrap()
+            .kind = MessageKind::Proto;
+        assert!(
+            errors(&p).contains(&"E_RULE_KIND".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+        // Each kind once, and a length that someone can satisfy.
+        let mut p = with_signup();
+        field_of(&mut p, "SignupBody", "email").rules = vec![Rule::Email, Rule::Email];
+        assert!(errors(&p).contains(&"E_RULE_DUPLICATE".to_string()));
+        for (min, max) in [(5, 4), (0, 0), (10, 9)] {
+            let mut p = with_signup();
+            field_of(&mut p, "SignupBody", "password").rules = vec![Rule::Length { min, max }];
+            assert!(
+                errors(&p).contains(&"E_RULE_LENGTH".to_string()),
+                "{min}..{max}"
+            );
+        }
+        // 0..=n is fine: an empty text allowed, a long one not.
+        let mut p = with_signup();
+        field_of(&mut p, "SignupBody", "password").rules = vec![Rule::Length { min: 0, max: 5 }];
+        assert!(errors(&p).is_empty());
+    }
+
+    #[test]
+    fn rules_that_no_route_checks_are_a_warning() {
+        let mut p = with_signup();
+        assert!(!validate(&p).iter().any(|d| d.code == "W_RULE_UNUSED"));
+        // The nested schema is received through the request: its rules are checked.
+        let received = p.received_schemas();
+        assert!(
+            received.contains("SignupBody") && received.contains("SignupCompany"),
+            "{received:?}"
+        );
+        // Responses are not received: nothing checks them.
+        assert!(!received.contains("OrderView") && !received.contains("SignupAck"));
+        assert!(p.has_rules("SignupBody") && p.has_rules("SignupCompany"));
+        assert!(!p.has_rules("OrderView"));
+        // Take the route away: nobody receives them any more.
+        p.services[0].routes.pop();
+        let warned: Vec<_> = validate(&p)
+            .into_iter()
+            .filter(|d| d.code == "W_RULE_UNUSED")
+            .collect();
+        assert_eq!(warned.len(), 2, "{warned:?}");
+        assert!(warned[0].message.contains("never checked"));
     }
 
     #[test]
