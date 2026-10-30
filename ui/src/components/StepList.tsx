@@ -1,8 +1,8 @@
 import { useState } from 'react'
-import { declareProducer, makeStep, newId, STEP_LABELS } from '../model'
+import { declareProducer, ERROR_STATUSES, exprText, makeStep, newId, STEP_LABELS } from '../model'
 import { candidates, isSimpleScalar, SCALARS, type Scope, scopeAfter, scopesOf, scalar } from '../scope'
 import { useStore } from '../store'
-import type { CmpOp, Cookie, Condition, Diagnostic, Expr, FieldType, LogLevel, Project, SameSite, Step, StepType } from '../types'
+import type { CmpOp, Cookie, Condition, Diagnostic, FieldType, LogLevel, Project, SameSite, Step, StepType } from '../types'
 import { AssignmentsEditor } from './AssignmentsEditor'
 import { ExprEditor } from './ExprEditor'
 import { Icon } from './Icon'
@@ -37,17 +37,6 @@ function literalDefault(kind: string, repeated: boolean): string | number | bool
   return 0
 }
 
-const FAIL_STATUSES: [number, string][] = [
-  [400, 'requête invalide'],
-  [401, 'non authentifié'],
-  [403, 'interdit'],
-  [404, 'introuvable'],
-  [409, 'conflit'],
-  [422, 'non traitable'],
-  [429, 'trop de requêtes'],
-  [500, 'erreur interne'],
-  [503, 'indisponible'],
-]
 
 const STEP_ORDER: StepType[] = ['publish', 'sql', 'callRpc', 'branch', 'let', 'log', 'respond', 'fail', 'rateLimit', 'hashPassword', 'verifyPassword', 'randomToken', 'sha256', 'code']
 
@@ -148,9 +137,6 @@ function ownDiagnostics(all: Diagnostic[], path: string): Diagnostic[] {
 
 const OP_SYMBOL: Record<CmpOp, string> = { eq: '=', ne: '≠', gt: '>', ge: '≥', lt: '<', le: '≤' }
 
-function exprText(e: Expr): string {
-  return e.kind === 'path' ? e.path : e.kind === 'raw' ? e.code : JSON.stringify(e.value)
-}
 
 function summary(step: Step): string {
   switch (step.type) {
@@ -553,7 +539,7 @@ function StepBody(props: {
         <div className="stack">
           <div className="form-row">
             <select aria-label="Statut" value={step.status} onChange={(e) => u((s) => ((s.status = Number(e.target.value)), (s.retryAfter = [429, 503].includes(s.status) ? s.retryAfter : null)))}>
-              {(FAIL_STATUSES.some(([n]) => n === step.status) ? FAIL_STATUSES : [[step.status, ''] as [number, string], ...FAIL_STATUSES]).map(([n, label]) => (
+              {(ERROR_STATUSES.some(([n]) => n === step.status) ? ERROR_STATUSES : [[step.status, ''] as [number, string], ...ERROR_STATUSES]).map(([n, label]) => (
                 <option key={n} value={n}>{label ? `${n} · ${label}` : n}</option>
               ))}
             </select>
@@ -571,7 +557,7 @@ function StepBody(props: {
     }
 
     case 'sql':
-      return <SqlBody step={step} update={as<'sql'>(props.update)} scope={scope} service={props.ctx.service} />
+      return <SqlBody step={step} update={as<'sql'>(props.update)} scope={scope} service={props.ctx.service} http={props.ctx.http} />
 
     case 'code': {
       const u = as<'code'>(props.update)

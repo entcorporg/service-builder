@@ -438,6 +438,51 @@ describe('editor', () => {
     await page.close()
   })
 
+  it('consumes a row in one statement: UPDATE RETURNING, the database clock, and the answer to a missing row', async () => {
+    const { page } = await open()
+    await page.locator('.tree button.sub', { hasText: '/orders/{order_id}' }).click()
+    await page.locator('.endpoint').waitFor()
+    await page.locator('.add-step-btn').first().click()
+    await page.getByRole('menuitem', { name: /^SQL/ }).click()
+    const card = page.locator('.card.step', { hasText: 'SQL' }).last()
+
+    // A write gives nothing back until asked; the read columns of a select are not carried over to it.
+    await card.getByRole('button', { name: 'Modifier', exact: true }).click()
+    assert.equal(await card.getByLabel('Renvoyer la ligne').isChecked(), false)
+    assert.doesNotMatch(await card.getByLabel('Requête SQL').innerText(), /RETURNING/)
+    await card.getByLabel('Renvoyer la ligne').check()
+    await card.getByLabel('Nom de la variable').fill('updated')
+
+    // What it writes, and the condition on the database clock, which only a timestamp column offers.
+    await card.getByLabel('status : source').selectOption('literal')
+    await card.getByLabel('status : valeur').fill('USED')
+    await card.getByRole('button', { name: '+ Ajouter une condition' }).click()
+    await card.getByLabel('Colonne', { exact: true }).nth(1).selectOption('created_at')
+    await card.getByLabel('Opérateur').nth(1).selectOption('lt')
+    assert.equal(await card.getByLabel('valeur de order_id : source').locator('option', { hasText: 'Maintenant' }).count(), 0)
+    await card.getByLabel('valeur de created_at : source').selectOption('now')
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+    assert.match(await card.getByLabel('Requête SQL').innerText(), /UPDATE orders SET status = "USED" WHERE order_id = input\.order_id AND created_at < now\(\) RETURNING /)
+
+    // The row comes back typed, and what is read from it is checked like after a select.
+    assert.match(await card.getByLabel('Variable produite').innerText(), /updated\.status/)
+
+    // When no row matches, the author picks the answer.
+    await card.getByLabel('Répondre autrement qu’en 404').check()
+    await card.getByLabel('Statut si aucune ligne').selectOption('409')
+    await card.getByLabel('Message si aucune ligne').fill('already used')
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/flows/api.rs"]').click()
+    const code = await page.locator('.code-main pre').innerText()
+    assert.match(code, /UPDATE .{1,4}orders.{1,4} SET .{1,4}status.{1,4} = \$1 WHERE .{1,4}order_id.{1,4} = \$2 AND .{1,4}created_at.{1,4} < now\(\) RETURNING /)
+    assert.match(code, /HttpError::new\(\s*409,\s*"already used"/)
+    await page.close()
+  })
+
   it('hides events, proto schemas and topics while an endpoint is open', async () => {
     const { page } = await open()
     const tree = page.locator('.tree')

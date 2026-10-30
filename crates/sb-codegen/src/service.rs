@@ -17,8 +17,8 @@ use sb_model::names::route_params;
 use sb_model::names::{shouty, snake, topic_const};
 use sb_model::typing::{Scope, TypeRef};
 use sb_model::{
-    Column, ColumnType, DEFAULT_HTTP_PORT, FieldType, HttpMethod, Project, Service, SqlOp, Step,
-    sql_row_name,
+    Column, ColumnType, DEFAULT_HTTP_PORT, Expr, FieldType, HttpMethod, Project, Service, SqlOp,
+    Step, sql_row_name,
 };
 
 use crate::expr::{condition_code, log_code, lower, rust_let_type, struct_literal};
@@ -1378,6 +1378,7 @@ fn sql_step(
         order_by,
         descending,
         limit,
+        missing,
     } = step
     else {
         return Ok(());
@@ -1391,28 +1392,37 @@ fn sql_step(
         })
     };
 
-    // Parameters, in the order of the placeholders: the values written, then the WHERE.
+    // Parameters, in the order of the placeholders: the values written, then the WHERE. The database clock
+    // (`now()`) is part of the statement itself and takes no parameter.
     let mut binds: Vec<String> = Vec::new();
     let mut set_sql = Vec::new();
     for a in values {
         let column = col(&a.field)?;
+        if matches!(a.value, Expr::Now) {
+            set_sql.push((quoted(&column.name), "now()".to_string()));
+            continue;
+        }
         binds.push(lower(project, scope, &a.value, &column_type_ref(column))?);
         set_sql.push((quoted(&column.name), placeholder(binds.len(), column)));
     }
     let mut where_sql = Vec::new();
     for cond in conditions {
         let column = col(&cond.column)?;
-        binds.push(lower(
-            project,
-            scope,
-            &cond.value,
-            &column_type_ref(column),
-        )?);
-        where_sql.push(format!(
-            "{} {} {}",
-            quoted(&column.name),
-            cond.sql_op(),
+        let right = if matches!(cond.value, Expr::Now) {
+            "now()".to_string()
+        } else {
+            binds.push(lower(
+                project,
+                scope,
+                &cond.value,
+                &column_type_ref(column),
+            )?);
             placeholder(binds.len(), column)
+        };
+        where_sql.push(format!(
+            "{} {} {right}",
+            quoted(&column.name),
+            cond.sql_op()
         ));
     }
     let where_clause = if where_sql.is_empty() {
@@ -1429,53 +1439,44 @@ fn sql_step(
         q
     };
 
-    match op {
+    // The columns a select reads, or that an insert, update or delete gives back (`RETURNING`).
+    let selected: Vec<&Column> = columns.iter().map(|n| col(n)).collect::<Result<_, _>>()?;
+    let exprs: Vec<String> = selected
+        .iter()
+        .map(|cl| {
+            let name = quoted(&cl.name);
+            match cl.ty {
+                // ISO 8601 / RFC 3339, in UTC, whatever the session time zone.
+                ColumnType::Timestamp => format!(
+                    "to_char({name} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS {name}"
+                ),
+                ColumnType::Uuid | ColumnType::Jsonb => format!("{name}::text AS {name}"),
+                _ => name,
+            }
+        })
+        .collect();
+
+    let mut sql = match op {
         SqlOp::Insert => {
             let names: Vec<_> = set_sql.iter().map(|(n, _)| n.as_str()).collect();
             let params: Vec<_> = set_sql.iter().map(|(_, p)| p.as_str()).collect();
-            let sql = format!(
+            format!(
                 "INSERT INTO {} ({}) VALUES ({})",
                 quoted(table),
                 names.join(", "),
                 params.join(", ")
-            );
-            c.line(format!("{}.execute(&mut *tx).await?;", query(&sql)));
+            )
         }
         SqlOp::Update => {
             let sets: Vec<_> = set_sql.iter().map(|(n, p)| format!("{n} = {p}")).collect();
-            let sql = format!(
+            format!(
                 "UPDATE {} SET {}{where_clause}",
                 quoted(table),
                 sets.join(", ")
-            );
-            c.line(format!("{}.execute(&mut *tx).await?;", query(&sql)));
+            )
         }
-        SqlOp::Delete => {
-            let sql = format!("DELETE FROM {}{where_clause}", quoted(table));
-            c.line(format!("{}.execute(&mut *tx).await?;", query(&sql)));
-        }
+        SqlOp::Delete => format!("DELETE FROM {}{where_clause}", quoted(table)),
         SqlOp::Select => {
-            let var = bind
-                .as_deref()
-                .ok_or_else(|| CodegenError::Internal("a SQL select needs a variable".into()))?;
-            let selected: Vec<&Column> =
-                columns.iter().map(|n| col(n)).collect::<Result<_, _>>()?;
-            let exprs: Vec<String> = selected
-                .iter()
-                .map(|cl| {
-                    let name = quoted(&cl.name);
-                    match cl.ty {
-                        // ISO 8601 / RFC 3339, in UTC, whatever the session time zone.
-                        ColumnType::Timestamp => format!(
-                            "to_char({name} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS {name}"
-                        ),
-                        ColumnType::Uuid | ColumnType::Jsonb => {
-                            format!("{name}::text AS {name}")
-                        }
-                        _ => name,
-                    }
-                })
-                .collect();
             let mut sql = format!(
                 "SELECT {} FROM {}{where_clause}",
                 exprs.join(", "),
@@ -1493,89 +1494,106 @@ fn sql_step(
                 (false, _) => sql.push_str(" LIMIT 1"),
                 _ => {}
             }
-            let fill = |target: &str, fields: Vec<&str>| {
-                let mut lit = format!("{target} {{\n");
-                for f in fields {
-                    lit.push_str(&format!("    {f}: row.try_get({f:?})?,\n"));
-                }
-                lit
-            };
-            match (into, many) {
-                (Some(schema), true) => {
-                    let ty = format!("pb::{schema}");
+            sql
+        }
+    };
+
+    // Nothing to read back: run it.
+    if *op != SqlOp::Select && columns.is_empty() {
+        c.line(format!("{}.execute(&mut *tx).await?;", query(&sql)));
+        return Ok(());
+    }
+    if *op != SqlOp::Select {
+        sql.push_str(&format!(" RETURNING {}", exprs.join(", ")));
+    }
+    let var = bind.as_deref().ok_or_else(|| {
+        CodegenError::Internal("a SQL step that reads rows needs a variable".into())
+    })?;
+    // What the route answers when one row was expected and none came back.
+    let missing_error = match missing {
+        Some(m) => format!(
+            "eda_runtime::http::HttpError::new({}, {:?})",
+            m.status, m.message
+        ),
+        None => format!("eda_runtime::http::HttpError::not_found(\"{table}: no row matches\")"),
+    };
+    let fill = |target: &str, fields: Vec<&str>| {
+        let mut lit = format!("{target} {{\n");
+        for f in fields {
+            lit.push_str(&format!("    {f}: row.try_get({f:?})?,\n"));
+        }
+        lit
+    };
+    match (into, many) {
+        (Some(schema), true) => {
+            let ty = format!("pb::{schema}");
+            let msg = project
+                .message(schema)
+                .ok_or_else(|| CodegenError::Internal(format!("unknown message `{schema}`")))?;
+            let lit = fill(&ty, msg.fields.iter().map(|f| f.name.as_str()).collect());
+            c.line(format!("let {var}: Vec<{ty}> = {}", query(&sql)));
+            c.line("    .fetch_all(&mut *tx)");
+            c.line("    .await?");
+            c.line("    .iter()");
+            c.line(format!("    .map(|row| -> anyhow::Result<{ty}> {{"));
+            c.line(format!(
+                "        Ok({lit}        ..Default::default()\n    }})"
+            ));
+            c.line("    })");
+            c.line("    .collect::<anyhow::Result<Vec<_>>>()?;");
+            scope.bind(
+                var,
+                TypeRef {
+                    repeated: true,
+                    ..TypeRef::message(schema)
+                },
+            );
+        }
+        (_, true) => {
+            return Err(CodegenError::Internal(
+                "a list of rows needs a schema to convert them into".into(),
+            ));
+        }
+        (found, false) => {
+            let (ty, lit, bound) = match found {
+                Some(schema) => {
                     let msg = project.message(schema).ok_or_else(|| {
                         CodegenError::Internal(format!("unknown message `{schema}`"))
                     })?;
+                    let ty = format!("pb::{schema}");
                     let lit = fill(&ty, msg.fields.iter().map(|f| f.name.as_str()).collect());
-                    c.line(format!("let {var}: Vec<{ty}> = {}", query(&sql)));
-                    c.line("    .fetch_all(&mut *tx)");
-                    c.line("    .await?");
-                    c.line("    .iter()");
-                    c.line(format!("    .map(|row| -> anyhow::Result<{ty}> {{"));
-                    c.line(format!(
-                        "        Ok({lit}        ..Default::default()\n    }})"
-                    ));
-                    c.line("    })");
-                    c.line("    .collect::<anyhow::Result<Vec<_>>>()?;");
-                    scope.bind(
-                        var,
-                        TypeRef {
-                            repeated: true,
-                            ..TypeRef::message(schema)
-                        },
-                    );
+                    (
+                        ty,
+                        format!("{lit}    ..Default::default()\n}}"),
+                        TypeRef::message(schema),
+                    )
                 }
-                (_, true) => {
-                    return Err(CodegenError::Internal(
-                        "a list of rows needs a schema to convert them into".into(),
-                    ));
+                None => {
+                    let name = sql_row_name(table, id);
+                    let lit = fill(&name, selected.iter().map(|cl| cl.name.as_str()).collect());
+                    (
+                        name,
+                        format!("{lit}}}"),
+                        TypeRef::message(sql_row_name(table, id)),
+                    )
                 }
-                (found, false) => {
-                    let (ty, lit, bound) = match found {
-                        Some(schema) => {
-                            let msg = project.message(schema).ok_or_else(|| {
-                                CodegenError::Internal(format!("unknown message `{schema}`"))
-                            })?;
-                            let ty = format!("pb::{schema}");
-                            let lit =
-                                fill(&ty, msg.fields.iter().map(|f| f.name.as_str()).collect());
-                            (
-                                ty,
-                                format!("{lit}    ..Default::default()\n}}"),
-                                TypeRef::message(schema),
-                            )
-                        }
-                        None => {
-                            let name = sql_row_name(table, id);
-                            let lit =
-                                fill(&name, selected.iter().map(|cl| cl.name.as_str()).collect());
-                            (
-                                name,
-                                format!("{lit}}}"),
-                                TypeRef::message(sql_row_name(table, id)),
-                            )
-                        }
-                    };
-                    c.open(format!("let {var} = "));
-                    if into.is_none() {
-                        // The row is a struct of its own, local to the step.
-                        c.line(format!("struct {ty} {{"));
-                        for cl in &selected {
-                            c.line(format!("    {}: {},", cl.name, column_rust(cl)));
-                        }
-                        c.line("}");
-                    }
-                    c.line(format!("let row = {}", query(&sql)));
-                    c.line("    .fetch_optional(&mut *tx)");
-                    c.line("    .await?");
-                    c.line(format!(
-                        "    .ok_or_else(|| eda_runtime::http::HttpError::not_found(\"{table}: no row matches\"))?;"
-                    ));
-                    c.line(lit);
-                    c.close_with(";");
-                    scope.bind(var, bound);
+            };
+            c.open(format!("let {var} = "));
+            if into.is_none() {
+                // The row is a struct of its own, local to the step.
+                c.line(format!("struct {ty} {{"));
+                for cl in &selected {
+                    c.line(format!("    {}: {},", cl.name, column_rust(cl)));
                 }
+                c.line("}");
             }
+            c.line(format!("let row = {}", query(&sql)));
+            c.line("    .fetch_optional(&mut *tx)");
+            c.line("    .await?");
+            c.line(format!("    .ok_or_else(|| {missing_error})?;"));
+            c.line(lit);
+            c.close_with(";");
+            scope.bind(var, bound);
         }
     }
     Ok(())

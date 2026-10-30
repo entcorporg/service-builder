@@ -1,4 +1,4 @@
-import { uniqueName } from '../model'
+import { ERROR_STATUSES, exprText, uniqueName } from '../model'
 import { columnType, type Scope, tableOf, typeLabel } from '../scope'
 import { useStore } from '../store'
 import type { CmpOp, Column, SqlCondition, SqlOp, Step } from '../types'
@@ -14,19 +14,18 @@ const colLabel = (c: Column) => `${c.type}${c.nullable ? '?' : ''}`
 
 /** `SELECT order_id, status FROM orders WHERE order_id = input.order_id LIMIT 1`, to read the step at a glance. */
 export function sqlPreview(step: SqlStep): string {
-  const where = step.where.length
-    ? ` WHERE ${step.where.map((c) => `${c.column} ${SQL_OPS[c.op]} ${c.value.kind === 'path' ? c.value.path : c.value.kind === 'raw' ? c.value.code : JSON.stringify(c.value.value)}`).join(' AND ')}`
-    : ''
-  const val = (a: SqlStep['values'][number]) => `${a.field} = ${a.value.kind === 'path' ? a.value.path : a.value.kind === 'raw' ? a.value.code : JSON.stringify(a.value.value)}`
+  const where = step.where.length ? ` WHERE ${step.where.map((c) => `${c.column} ${SQL_OPS[c.op]} ${exprText(c.value)}`).join(' AND ')}` : ''
+  const val = (a: SqlStep['values'][number]) => `${a.field} = ${exprText(a.value)}`
+  const returning = step.columns.length > 0 ? ` RETURNING ${step.columns.join(', ')}` : ''
   switch (step.op) {
     case 'select':
       return `SELECT ${step.columns.join(', ') || '…'} FROM ${step.table}${where}${step.orderBy ? ` ORDER BY ${step.orderBy}${step.descending ? ' DESC' : ''}` : ''}${step.many ? (step.limit ? ` LIMIT ${step.limit}` : '') : ' LIMIT 1'}`
     case 'insert':
-      return `INSERT INTO ${step.table} (${step.values.map((v) => v.field).join(', ')}) VALUES (…)`
+      return `INSERT INTO ${step.table} (${step.values.map((v) => v.field).join(', ')}) VALUES (${step.values.map((v) => exprText(v.value)).join(', ') || '…'})${returning}`
     case 'update':
-      return `UPDATE ${step.table} SET ${step.values.map(val).join(', ') || '…'}${where}`
+      return `UPDATE ${step.table} SET ${step.values.map(val).join(', ') || '…'}${where}${returning}`
     case 'delete':
-      return `DELETE FROM ${step.table}${where}`
+      return `DELETE FROM ${step.table}${where}${returning}`
   }
 }
 
@@ -35,7 +34,7 @@ export function sqlPreview(step: SqlStep): string {
  * the next ones: ticking columns types the variable (`order.status`), and the values it takes are typed
  * by their column.
  */
-export function SqlBody(props: { step: SqlStep; update: (fn: (s: SqlStep) => void) => void; scope: Scope; service: string }) {
+export function SqlBody(props: { step: SqlStep; update: (fn: (s: SqlStep) => void) => void; scope: Scope; service: string; http?: boolean }) {
   const { step, update: u, scope } = props
   const project = useStore((s) => s.project)
   const setView = useStore((s) => s.setView)
@@ -54,20 +53,41 @@ export function SqlBody(props: { step: SqlStep; update: (fn: (s: SqlStep) => voi
     )
   }
 
+  // A select always reads rows; the other operations give them back only when asked (`RETURNING`).
+  const reads = step.op === 'select' || step.columns.length > 0
+  const dropResult = (s: SqlStep) => {
+    s.columns = []
+    s.bind = null
+    s.many = false
+    s.into = null
+    s.missing = null
+  }
   const setOp = (op: SqlOp) =>
     u((s) => {
+      const was = s.op
       s.op = op
       if (op === 'select') {
         s.bind ||= uniqueName('row', Object.keys(scope))
         if (s.columns.length === 0) s.columns = table?.columns.map((c) => c.name) ?? []
+      } else if (was === 'select') {
+        // What a select read is not asked back from a write: it starts without a result.
+        dropResult(s)
+        s.orderBy = null
+        s.limit = null
       }
       s.values = op === 'insert' || op === 'update' ? s.values : []
+    })
+  const setReturning = (on: boolean) =>
+    u((s) => {
+      if (!on) return dropResult(s)
+      s.bind ||= uniqueName('row', Object.keys(scope))
+      s.columns = table?.columns.map((c) => c.name) ?? []
     })
   const setTable = (name: string) =>
     u((s) => {
       s.table = name
       const t = tableOf(service, name)
-      s.columns = t?.columns.map((c) => c.name) ?? []
+      s.columns = s.op === 'select' || s.columns.length > 0 ? (t?.columns.map((c) => c.name) ?? []) : []
       s.where = []
       s.values = []
       s.orderBy = null
@@ -108,7 +128,13 @@ export function SqlBody(props: { step: SqlStep; update: (fn: (s: SqlStep) => voi
         </select>
       </label>
 
-      {table && step.op === 'select' && (
+      {table && step.op !== 'select' && (
+        <label className="check" title="Donne la ligne écrite en retour, dans la même instruction (RETURNING)">
+          <input type="checkbox" aria-label="Renvoyer la ligne" checked={step.columns.length > 0} onChange={(e) => setReturning(e.target.checked)} /> renvoyer la ligne (RETURNING)
+        </label>
+      )}
+
+      {table && reads && (
         <>
           <div className="form-row">
             <span>Résultat</span>
@@ -119,7 +145,7 @@ export function SqlBody(props: { step: SqlStep; update: (fn: (s: SqlStep) => voi
           </div>
 
           <fieldset className="columns">
-            <legend>Colonnes à lire</legend>
+            <legend>{step.op === 'select' ? 'Colonnes à lire' : 'Colonnes renvoyées'}</legend>
             {table.columns.map((c) => (
               <label key={c.name} className="check column">
                 <input type="checkbox" checked={step.columns.includes(c.name)} onChange={(e) => toggleColumn(c.name, e.target.checked)} />
@@ -181,6 +207,7 @@ export function SqlBody(props: { step: SqlStep; update: (fn: (s: SqlStep) => voi
                   target={columnType(c)}
                   scope={scope}
                   allowUnset
+                  allowNow={c.type === 'timestamp'}
                   onChange={(v) =>
                     u((s) => {
                       const i = s.values.findIndex((x) => x.field === c.name)
@@ -215,7 +242,7 @@ export function SqlBody(props: { step: SqlStep; update: (fn: (s: SqlStep) => voi
                     <option key={op} value={op}>{SQL_OPS[op]}</option>
                   ))}
                 </select>
-                <ExprEditor label={`valeur de ${c.column}`} expr={c.value} target={col ? columnType(col) : null} scope={scope} onChange={(v) => v && setCondition(i, (x) => (x.value = v))} />
+                <ExprEditor label={`valeur de ${c.column}`} expr={c.value} target={col ? columnType(col) : null} scope={scope} allowNow={col?.type === 'timestamp'} onChange={(v) => v && setCondition(i, (x) => (x.value = v))} />
                 <IconButton icon="trash" title="Retirer la condition" danger onClick={() => u((s) => void s.where.splice(i, 1))} />
               </div>
             )
@@ -235,6 +262,30 @@ export function SqlBody(props: { step: SqlStep; update: (fn: (s: SqlStep) => voi
           </select>
           <label className="check"><input type="checkbox" checked={step.descending} onChange={(e) => u((s) => (s.descending = e.target.checked))} /> décroissant</label>
           <input type="number" min={1} aria-label="Limite" placeholder="limite" value={step.limit ?? ''} onChange={(e) => u((s) => (s.limit = e.target.value === '' ? null : Number(e.target.value)))} />
+        </div>
+      )}
+
+      {table && reads && step.bind && !step.many && props.http && (
+        <div className="stack" role="group" aria-label="Si aucune ligne">
+          <label className="check" title="Un jeton inconnu, expiré ou déjà utilisé, un compte qui n’existe pas…">
+            <input
+              type="checkbox"
+              aria-label="Répondre autrement qu’en 404"
+              checked={step.missing !== null}
+              onChange={(e) => u((s) => (s.missing = e.target.checked ? { status: 400, message: 'invalid request' } : null))}
+            />{' '}
+            si aucune ligne ne correspond, répondre autre chose que 404
+          </label>
+          {step.missing && (
+            <div className="form-row">
+              <select aria-label="Statut si aucune ligne" value={step.missing.status} onChange={(e) => u((s) => s.missing && (s.missing.status = Number(e.target.value)))}>
+                {ERROR_STATUSES.map(([n, label]) => (
+                  <option key={n} value={n}>{n} · {label}</option>
+                ))}
+              </select>
+              <input aria-label="Message si aucune ligne" value={step.missing.message} placeholder="ce que le client reçoit" onChange={(e) => u((s) => s.missing && (s.missing.message = e.target.value))} />
+            </div>
+          )}
         </div>
       )}
 
