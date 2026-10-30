@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { exampleJson, exampleQuery } from '../json'
-import { addColumn, addForeignKey, addJob, eventKeys, addIndex, addTable, addUnique, makeStep, retargetForeignKey, renameColumn, renameTable, selectionForPath, addMessage, addRoute, addRpc, defaultStatus, pathParams, addTopic, autoMap, canConsume, canProduce, connectConsumer, consumersOf, declareProducer, removeService, renameService, renameField, renameMessage, renameTopic, nestable } from '../model'
+import { addColumn, addForeignKey, addJob, ensureJwksSchemas, eventKeys, addIndex, addTable, addUnique, makeStep, retargetForeignKey, renameColumn, renameTable, selectionForPath, addMessage, addRoute, addRpc, defaultStatus, pathParams, addTopic, autoMap, canConsume, canProduce, connectConsumer, consumersOf, declareProducer, removeService, renameService, renameField, renameMessage, renameTopic, nestable } from '../model'
 import { sqlPreview } from '../components/SqlStep'
 import { everyLabel } from '../components/Inspector'
 import { createTableSql } from '../components/TablesView'
@@ -663,5 +663,44 @@ describe('encryption steps', () => {
     const scope = scopeAfter(p, inputScope('Totp'), seal)
     expect(scope.sealed).toEqual(scalar('string'))
     expect(makeStep('decrypt', p, scope, ctx)).toMatchObject({ type: 'decrypt', input: { kind: 'path', path: 'sealed' }, bind: 'opened' })
+  })
+})
+
+describe('JWT steps', () => {
+  const ctx = { service: 'Orders', response: 'Placed', http: true }
+
+  it('start on a signing key of the environment, the service as issuer and a `sub` claim', () => {
+    const p = project()
+    p.messages.push({ name: 'Login', kind: 'api', fields: [{ name: 'email', type: { kind: 'string' }, repeated: false, optional: false }] })
+    expect(makeStep('signJwt', p, inputScope('Login'), ctx)).toMatchObject({
+      keyEnv: 'JWT_SIGNING_KEY',
+      issuer: 'orders',
+      ttlSecs: 300,
+      claims: [{ field: 'sub', value: { kind: 'path', path: 'input.email' } }],
+      bind: 'access_token',
+    })
+  })
+
+  it('read the claims as the API schema that looks like them, and bind it', () => {
+    const p = project()
+    p.messages.push({ name: 'Other', kind: 'api', fields: [] }, { name: 'AccessClaims', kind: 'api', fields: [{ name: 'sub', type: { kind: 'string' }, repeated: false, optional: false }] })
+    const step = makeStep('verifyJwt', p, inputScope('Order'), ctx)
+    expect(step).toMatchObject({ type: 'verifyJwt', schema: 'AccessClaims', source: { kind: 'keys', keyEnvs: ['JWT_SIGNING_KEY'] }, bind: 'claims' })
+    expect(scopeAfter(p, inputScope('Order'), step).claims).toEqual({ type: { kind: 'message', name: 'AccessClaims' }, repeated: false, optional: false })
+    // Renaming the schema is followed by the step.
+    p.services[0]!.routes = [{ name: 'r', method: 'post', path: '/r', request: 'Other', response: 'Other', status: 200, steps: [step] }]
+    renameMessage(p, 'AccessClaims', 'Claims')
+    expect((p.services[0]!.routes[0]!.steps[0] as { schema: string }).schema).toBe('Claims')
+  })
+
+  it('publish the keys in the schemas of a JWKS, which are created once', () => {
+    const p = project()
+    ensureJwksSchemas(p)
+    ensureJwksSchemas(p)
+    expect(p.messages.filter((m) => m.name === 'Jwks' || m.name === 'Jwk')).toHaveLength(2)
+    expect(p.messages.find((m) => m.name === 'Jwk')!.fields.map((f) => f.name)).toEqual(['kty', 'crv', 'alg', 'kid', 'x'])
+    expect(p.messages.find((m) => m.name === 'Jwks')!.fields[0]).toMatchObject({ name: 'keys', repeated: true, type: { kind: 'message', name: 'Jwk' } })
+    const step = makeStep('jwks', p, inputScope('Order'), ctx)
+    expect(scopeAfter(p, inputScope('Order'), step).published).toMatchObject({ type: { kind: 'message', name: 'Jwks' } })
   })
 })

@@ -59,6 +59,9 @@ export interface Assignment {
   value: Expr
 }
 
+/** Where the public keys that check a token come from: seeds of this service, or the JWKS of the one that signs. */
+export type JwksSource = { kind: 'keys'; keyEnvs: string[] } | { kind: 'url'; urlEnv: string }
+
 export type SameSite = 'lax' | 'strict' | 'none'
 
 /** A `Set-Cookie` of a route response: `HttpOnly`, `Secure`, `SameSite=Lax` unless relaxed. */
@@ -136,6 +139,12 @@ export type Step =
   | { type: 'callRpc'; id: string; service: string; method: string; request: Assignment[]; bind: string | null }
   | { type: 'branch'; id: string; condition: Condition; then: Step[]; otherwise: Step[] }
   | { type: 'respond'; id: string; fields: Assignment[]; status: number | null; cookies: Cookie[] }
+  /** An access token signed with Ed25519: the claims, plus `iss`, `iat` and `exp`. */
+  | { type: 'signJwt'; id: string; keyEnv: string; issuer: string; ttlSecs: number; claims: Assignment[]; bind: string }
+  /** Checks a token; the claims are read as the API schema `schema`. A refused token is a 401. */
+  | { type: 'verifyJwt'; id: string; token: Expr; bearer: boolean; source: JwksSource; issuer: string; schema: string; bind: string }
+  /** Publishes the public keys of the seeds as a JWKS, into a variable of the schema `Jwks`. */
+  | { type: 'jwks'; id: string; keyEnvs: string[]; bind: string }
   /** AES-256-GCM of `input`, with the key of the environment variable `keyEnv`: `hex(nonce || ciphertext)`. */
   | { type: 'encrypt'; id: string; keyEnv: string; input: Expr; bind: string }
   /** The text `encrypt` sealed; a wrong key or an altered value is an internal error. */
