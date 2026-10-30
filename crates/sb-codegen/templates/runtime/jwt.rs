@@ -17,8 +17,8 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::SigningKey;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, decode_header, encode};
-pub use serde_json::json;
-use serde_json::{Map, Value};
+pub use serde_json::{Map, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::http::HttpError;

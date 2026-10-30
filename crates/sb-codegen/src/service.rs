@@ -1646,7 +1646,7 @@ fn steps(
                 ..
             } => {
                 c.open(format!("let {bind}: String ="));
-                c.line("let mut claims = eda_runtime::jwt::json::Map::new();");
+                c.line("let mut claims = eda_runtime::jwt::Map::new();");
                 for claim in claims {
                     let value = claim_json(project, scope, &claim.value)?;
                     c.line(format!(
