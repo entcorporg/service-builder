@@ -154,6 +154,7 @@ mod tests {
                 "contracts/src/lib.rs",
                 "docker-compose.yml",
                 "runtime/Cargo.toml",
+                "runtime/src/crypto.rs",
                 "runtime/src/db.rs",
                 "runtime/src/lib.rs",
                 "runtime/src/outbox.rs",
@@ -620,6 +621,69 @@ mod tests {
         assert!(
             api.contains("let tags: Vec<String> = vec![\"a\".to_string(), \"b\".to_string()];")
         );
+    }
+
+    #[test]
+    fn password_and_token_steps_call_the_runtime() {
+        use sb_model::{Expr, Step};
+        let path = |p: &str| Expr::Path { path: p.into() };
+        let mut p = sample::orders();
+        p.services[0].routes[0].steps.splice(
+            0..0,
+            [
+                Step::RandomToken {
+                    id: "a".into(),
+                    bind: "token".into(),
+                },
+                Step::Sha256 {
+                    id: "b".into(),
+                    input: path("token"),
+                    bind: "digest".into(),
+                },
+                Step::HashPassword {
+                    id: "c".into(),
+                    input: path("digest"),
+                    bind: "hash".into(),
+                },
+                Step::VerifyPassword {
+                    id: "d".into(),
+                    password: path("token"),
+                    stored: path("hash"),
+                    bind: "ok".into(),
+                },
+                Step::VerifyPassword {
+                    id: "e".into(),
+                    password: path("token"),
+                    stored: Expr::Literal {
+                        value: serde_json::Value::Null,
+                    },
+                    bind: "ghost_ok".into(),
+                },
+            ],
+        );
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&p)),
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        assert!(api.contains("let token: String = eda_runtime::crypto::random_token();"));
+        assert!(
+            api.contains("let digest: String = eda_runtime::crypto::sha256_hex(&token.clone());")
+        );
+        assert!(api.contains(
+            "let hash: String = eda_runtime::crypto::hash_password(digest.clone()).await?;"
+        ));
+        // A plain string fills the optional `stored`; `null` is an unknown account.
+        assert!(api.contains(
+            "eda_runtime::crypto::verify_password(token.clone(), Some(hash.clone())).await;"
+        ));
+        assert!(api.contains("eda_runtime::crypto::verify_password(token.clone(), None).await;"));
+        // The runtime ships the module and what it needs.
+        assert!(file(&files, "runtime/src/crypto.rs").contains("spawn_blocking"));
+        assert!(file(&files, "runtime/Cargo.toml").contains("argon2.workspace = true"));
+        assert!(file(&files, "Cargo.toml").contains("argon2 = \"0.6\""));
     }
 
     #[test]

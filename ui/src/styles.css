@@ -251,6 +251,7 @@ textarea { resize: vertical; line-height: 1.5; }
 .step-icon.callRpc { background: rgba(120, 134, 255, 0.2); color: var(--service); }
 .step-icon.branch { background: rgba(255, 102, 160, 0.17); color: #ff8fb8; }
 .step-icon.respond { background: rgba(62, 207, 142, 0.17); color: var(--ok); }
+.step-icon.hashPassword, .step-icon.verifyPassword, .step-icon.randomToken, .step-icon.sha256 { background: rgba(255, 196, 77, 0.15); color: #ffc44d; }
 .step-icon.fail { background: rgba(255, 102, 120, 0.15); color: var(--err); }
 .step-icon.code { background: rgba(120, 220, 255, 0.15); color: #7fdcff; }
 
@@ -296,6 +297,7 @@ textarea { resize: vertical; line-height: 1.5; }
 .widget.branch svg { color: #ff8fb8; }
 .widget.respond svg { color: var(--ok); }
 .widget.fail svg { color: var(--err); }
+.widget.hashPassword svg, .widget.verifyPassword svg, .widget.randomToken svg, .widget.sha256 svg { color: #ffc44d; }
 
 .step-problems { list-style: none; margin: 8px 0 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
 .step-problems li { font-size: 12px; padding: 5px 8px; border-radius: 6px; }

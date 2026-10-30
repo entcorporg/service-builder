@@ -115,6 +115,14 @@ export type Step =
   | { type: 'callRpc'; id: string; service: string; method: string; request: Assignment[]; bind: string | null }
   | { type: 'branch'; id: string; condition: Condition; then: Step[]; otherwise: Step[] }
   | { type: 'respond'; id: string; fields: Assignment[] }
+  /** argon2id (off the async runtime) of `input`: the PHC string to store. */
+  | { type: 'hashPassword'; id: string; input: Expr; bind: string }
+  /** `bind` is a bool; `stored` may be absent (unknown account), the check then costs the same. */
+  | { type: 'verifyPassword'; id: string; password: Expr; stored: Expr; bind: string }
+  /** 256 random bits as 64 hexadecimal characters. */
+  | { type: 'randomToken'; id: string; bind: string }
+  /** SHA-256 of `input` as 64 hexadecimal characters. */
+  | { type: 'sha256'; id: string; input: Expr; bind: string }
   /** Ends an HTTP route with an error status; `retryAfter` (seconds) goes with 429 and 503. */
   | { type: 'fail'; id: string; status: number; message: string; retryAfter: Expr | null }
   | {

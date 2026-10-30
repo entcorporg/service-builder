@@ -1114,6 +1114,46 @@ fn steps(
                 c.line("return Ok(reply);");
             }
             Step::Sql { .. } => sql_step(c, project, service, scope, step)?,
+            Step::HashPassword { input, bind, .. } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let input = lower(project, scope, input, &text)?;
+                c.line(format!(
+                    "let {bind}: String = eda_runtime::crypto::hash_password({input}).await?;"
+                ));
+                scope.bind(bind.clone(), text);
+            }
+            Step::VerifyPassword {
+                password,
+                stored,
+                bind,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let maybe = TypeRef {
+                    optional: true,
+                    ..text.clone()
+                };
+                let password = lower(project, scope, password, &text)?;
+                let stored = lower(project, scope, stored, &maybe)?;
+                c.line(format!(
+                    "let {bind}: bool = eda_runtime::crypto::verify_password({password}, {stored}).await;"
+                ));
+                scope.bind(bind.clone(), TypeRef::scalar(FieldType::Bool));
+            }
+            Step::RandomToken { bind, .. } => {
+                c.line(format!(
+                    "let {bind}: String = eda_runtime::crypto::random_token();"
+                ));
+                scope.bind(bind.clone(), TypeRef::scalar(FieldType::String));
+            }
+            Step::Sha256 { input, bind, .. } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let input = lower(project, scope, input, &text)?;
+                c.line(format!(
+                    "let {bind}: String = eda_runtime::crypto::sha256_hex(&{input});"
+                ));
+                scope.bind(bind.clone(), text);
+            }
             Step::Fail {
                 status,
                 message,
@@ -1413,6 +1453,10 @@ fn describe(step: &Step) -> String {
         Step::Branch { .. } => "branch".into(),
         Step::Respond { .. } => "respond".into(),
         Step::Fail { status, .. } => format!("fail {status}"),
+        Step::HashPassword { bind, .. } => format!("hash password into {bind}"),
+        Step::VerifyPassword { bind, .. } => format!("verify password into {bind}"),
+        Step::RandomToken { bind, .. } => format!("random token into {bind}"),
+        Step::Sha256 { bind, .. } => format!("sha256 into {bind}"),
         Step::Sql { op, table, .. } => format!(
             "sql {} {table}",
             match op {

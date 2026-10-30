@@ -58,7 +58,8 @@ export function isSimpleScalar(t: TypeRef): boolean {
 
 /** Mirrors ResolvedPath::adapt_to. */
 export function fits(from: TypeRef, bare: boolean, to: TypeRef): boolean {
-  if (bare) return sameType(from, to)
+  // Only a whole message variable is bare: a scalar variable (`let`, a token) widens like any field.
+  if (bare && isMessage(from.type) && !from.repeated) return sameType(from, to)
   if (sameType(from, to)) return true
   return (
     !from.optional &&
@@ -161,10 +162,13 @@ export function inputScope(messageName: string): Scope {
   return { input: { type: { kind: 'message', name: messageName }, repeated: false, optional: false } }
 }
 
-/** Scope after `step` ran (variables bound by Let and CallRpc). */
+/** Scope after `step` ran (variables bound by Let, CallRpc, SQL selects and the password and token steps). */
 export function scopeAfter(project: Project, scope: Scope, step: Step): Scope {
   if (step.type === 'let' && step.name) {
     return { ...scope, [step.name]: { type: step.valueType, repeated: step.repeated, optional: step.optional && !step.repeated } }
+  }
+  if ((step.type === 'hashPassword' || step.type === 'randomToken' || step.type === 'sha256' || step.type === 'verifyPassword') && step.bind) {
+    return { ...scope, [step.bind]: scalar(step.type === 'verifyPassword' ? 'bool' : 'string') }
   }
   if (step.type === 'sql' && step.op === 'select' && step.bind) {
     const message = step.into ?? sqlRowName(step.table, step.id)

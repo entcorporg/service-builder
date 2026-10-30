@@ -1484,6 +1484,43 @@ impl<'a> Checker<'a> {
                 }
                 true
             }
+            Step::HashPassword { input, bind, .. } => {
+                self.check_var_name(bind, &format!("{path}/bind"));
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, input, Some(&text), &format!("{path}/input"));
+                scope.bind(bind.clone(), text);
+                false
+            }
+            Step::VerifyPassword {
+                password,
+                stored,
+                bind,
+                ..
+            } => {
+                self.check_var_name(bind, &format!("{path}/bind"));
+                let text = TypeRef::scalar(FieldType::String);
+                // The stored hash may be absent: an unknown account.
+                let maybe = TypeRef {
+                    optional: true,
+                    ..text.clone()
+                };
+                self.check_expr(scope, password, Some(&text), &format!("{path}/password"));
+                self.check_expr(scope, stored, Some(&maybe), &format!("{path}/stored"));
+                scope.bind(bind.clone(), TypeRef::scalar(FieldType::Bool));
+                false
+            }
+            Step::RandomToken { bind, .. } => {
+                self.check_var_name(bind, &format!("{path}/bind"));
+                scope.bind(bind.clone(), TypeRef::scalar(FieldType::String));
+                false
+            }
+            Step::Sha256 { input, bind, .. } => {
+                self.check_var_name(bind, &format!("{path}/bind"));
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, input, Some(&text), &format!("{path}/input"));
+                scope.bind(bind.clone(), text);
+                false
+            }
             Step::Fail {
                 status,
                 message,
@@ -2499,6 +2536,117 @@ mod tests {
         let mut p = sample::orders();
         p.services[1].consumers[0].steps.insert(0, fail(400, None));
         assert!(errors(&p).contains(&"E_FAIL_OUTSIDE_ROUTE".to_string()));
+    }
+
+    fn path(p: &str) -> Expr {
+        Expr::Path { path: p.into() }
+    }
+
+    #[test]
+    fn password_and_token_steps_bind_typed_variables() {
+        let mut p = sample::orders();
+        // Hash the token's hash, verify it, and read the results: a `string` and a `bool`.
+        route_of(&mut p).steps.splice(
+            0..0,
+            [
+                Step::RandomToken {
+                    id: "a".into(),
+                    bind: "token".into(),
+                },
+                Step::Sha256 {
+                    id: "b".into(),
+                    input: path("token"),
+                    bind: "digest".into(),
+                },
+                Step::HashPassword {
+                    id: "c".into(),
+                    input: path("digest"),
+                    bind: "hash".into(),
+                },
+                // The stored hash may be a plain string, an optional one, or absent.
+                Step::VerifyPassword {
+                    id: "d".into(),
+                    password: path("token"),
+                    stored: path("hash"),
+                    bind: "ok".into(),
+                },
+                Step::VerifyPassword {
+                    id: "e".into(),
+                    password: path("token"),
+                    stored: Expr::Literal {
+                        value: serde_json::Value::Null,
+                    },
+                    bind: "ghost_ok".into(),
+                },
+                Step::Branch {
+                    id: "f".into(),
+                    condition: Condition::Compare {
+                        left: path("ok"),
+                        op: CmpOp::Eq,
+                        right: Expr::Literal { value: true.into() },
+                    },
+                    then: vec![],
+                    otherwise: vec![],
+                },
+            ],
+        );
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+
+        // A number is not a password; `ok` is a bool, not a text.
+        route_of(&mut p).steps[2] = Step::HashPassword {
+            id: "c".into(),
+            input: path("input.amount"),
+            bind: "hash".into(),
+        };
+        assert!(
+            errors(&p).contains(&"E_TYPE_MISMATCH".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+        route_of(&mut p).steps[2] = Step::HashPassword {
+            id: "c".into(),
+            input: path("ok"),
+            bind: "hash".into(),
+        };
+        assert!(
+            errors(&p).contains(&"E_UNKNOWN_PATH".to_string()),
+            "`ok` is bound later: {:?}",
+            errors(&p)
+        );
+        // Names follow the variable rules.
+        route_of(&mut p).steps[0] = Step::RandomToken {
+            id: "a".into(),
+            bind: "Bad-Name".into(),
+        };
+        assert!(errors(&p).contains(&"E_VAR_NAME".to_string()));
+        route_of(&mut p).steps[0] = Step::RandomToken {
+            id: "a".into(),
+            bind: "tx".into(),
+        };
+        assert!(errors(&p).contains(&"E_RESERVED_NAME".to_string()));
+    }
+
+    #[test]
+    fn a_stored_hash_can_come_from_an_optional_column() {
+        let mut p = sample::orders();
+        // `get_order` reads `status`. Make it nullable, as the hash column of a table whose rows may lack one;
+        // the response then gives its own status.
+        p.services[0].tables[0].columns[2].nullable = true;
+        p.services[0].tables[0].columns[2].default = None;
+        let route = &mut p.services[0].routes[1];
+        if let Step::Respond { fields, .. } = &mut route.steps[1] {
+            fields[1].value = Expr::Literal { value: "x".into() };
+        }
+        route.steps.insert(
+            1,
+            Step::VerifyPassword {
+                id: "v".into(),
+                password: path("input.order_id"),
+                stored: path("order.status"),
+                bind: "ok".into(),
+            },
+        );
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
     }
 
     #[test]
