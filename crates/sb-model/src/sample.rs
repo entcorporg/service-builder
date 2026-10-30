@@ -748,3 +748,163 @@ pub fn add_signup(p: &mut Project) {
         ],
     });
 }
+
+/// Adds to the first service the tables of an order's lines and shipments: a composite primary key, a composite
+/// foreign key with a `CASCADE`, a `UNIQUE` constraint, an index and a `jsonb` column.
+pub fn add_shipments(p: &mut Project) {
+    let key = |name: &str, ty| {
+        let mut c = Column::new(name, ty);
+        c.primary_key = true;
+        c
+    };
+    let lines = Table::new(
+        "order_lines",
+        vec![
+            key("order_id", ColumnType::String),
+            key("line_no", ColumnType::Int32),
+            Column::new("sku", ColumnType::String),
+        ],
+    );
+    let mut id = key("id", ColumnType::Uuid);
+    id.default = Some("gen_random_uuid()".into());
+    let mut payload = Column::new("payload", ColumnType::Jsonb);
+    payload.default = Some("'{}'::jsonb".into());
+    let mut shipments = Table::new(
+        "shipments",
+        vec![
+            id,
+            Column::new("order_id", ColumnType::String),
+            Column::new("line_no", ColumnType::Int32),
+            payload,
+        ],
+    );
+    shipments.foreign_keys.push(ForeignKey {
+        name: "shipments_line_fk".into(),
+        columns: vec!["order_id".into(), "line_no".into()],
+        ref_table: "order_lines".into(),
+        ref_columns: vec!["order_id".into(), "line_no".into()],
+        on_delete: ReferentialAction::Cascade,
+        on_update: ReferentialAction::NoAction,
+    });
+    shipments.uniques.push(UniqueConstraint {
+        name: "shipments_line_uq".into(),
+        columns: vec!["order_id".into(), "line_no".into()],
+    });
+    shipments.indexes.push(Index {
+        name: "shipments_order_idx".into(),
+        columns: vec!["order_id".into()],
+        unique: false,
+    });
+    p.services[0].tables.extend([lines, shipments]);
+}
+
+/// The sample with every feature added by the helpers above, to copy the JSON of each from: signed webhook,
+/// single-use token, scheduled job, encryption, request rules and composite keys. Valid, with no warning.
+pub fn showcase() -> Project {
+    let mut p = orders();
+    add_single_use_token(&mut p);
+    add_cleaner_job(&mut p);
+    add_stripe_webhook(&mut p);
+    add_sealed_text(&mut p);
+    add_signup(&mut p);
+    add_login(&mut p);
+    add_shipments(&mut p);
+    p
+}
+
+/// Adds to the first service a login: a rate limit per e-mail, the stored hash read with a query of its own (absent
+/// for an unknown account, which is checked all the same against a dummy hash), the same `401` whichever of the
+/// e-mail or the password is wrong, then a random token and its hash, and the session cookie.
+pub fn add_login(p: &mut Project) {
+    let string = || FieldType::String;
+    let mut email = field("email", string());
+    email.rules = vec![Rule::Email];
+    p.messages.push(api(
+        "LoginBody",
+        vec![email, {
+            let mut f = field("password", string());
+            f.rules = vec![Rule::Length { min: 1, max: 128 }];
+            f
+        }],
+    ));
+    p.messages
+        .push(api("LoginAck", vec![field("email", string())]));
+    let mut password_hash = Column::new("password_hash", ColumnType::String);
+    password_hash.nullable = false;
+    let mut email_column = Column::new("email", ColumnType::String);
+    email_column.primary_key = true;
+    p.services[0]
+        .tables
+        .push(Table::new("accounts", vec![email_column, password_hash]));
+    let mut session = Cookie::new("session", path("session_token"));
+    session.max_age_secs = Some(900);
+    p.services[0].routes.push(Route {
+        name: "login".into(),
+        method: HttpMethod::Post,
+        path: "/login".into(),
+        request: "LoginBody".into(),
+        response: "LoginAck".into(),
+        status: 200,
+        steps: vec![
+            Step::RateLimit {
+                id: "g1".into(),
+                key: path("input.email"),
+                max: 5,
+                window_secs: 900,
+            },
+            // None for an unknown account: the check below then runs against a dummy hash.
+            Step::Let {
+                id: "g2".into(),
+                name: "stored".into(),
+                value_type: FieldType::String,
+                optional: true,
+                repeated: false,
+                value: raw(
+                    "sqlx::query_scalar::<_, String>(\"SELECT password_hash FROM accounts WHERE email = $1\").bind(input.email.clone()).fetch_optional(&mut *tx).await?",
+                ),
+            },
+            Step::VerifyPassword {
+                id: "g3".into(),
+                password: path("input.password"),
+                stored: path("stored"),
+                bind: "password_ok".into(),
+            },
+            // The same answer whether the e-mail or the password was wrong.
+            Step::Branch {
+                id: "g4".into(),
+                condition: Condition::Compare {
+                    left: path("password_ok"),
+                    op: CmpOp::Eq,
+                    right: lit(false),
+                },
+                then: vec![Step::Fail {
+                    id: "g5".into(),
+                    status: 401,
+                    message: "invalid credentials".into(),
+                    retry_after: None,
+                }],
+                otherwise: vec![],
+            },
+            Step::RandomToken {
+                id: "g6".into(),
+                bind: "session_token".into(),
+            },
+            // What a session table would store: the hash of the token, never the token.
+            Step::Sha256 {
+                id: "g7".into(),
+                input: path("session_token"),
+                bind: "session_hash".into(),
+            },
+            Step::Code {
+                id: "g8".into(),
+                code: "tracing::info!(session = %session_hash, \"login\");".into(),
+            },
+            Step::Respond {
+                id: "g9".into(),
+                fields: vec![set("email", path("input.email"))],
+                status: None,
+                cookies: vec![session],
+            },
+        ],
+    });
+}

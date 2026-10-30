@@ -44,7 +44,7 @@ fn no_properties() -> Value {
 const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "describe_project",
-        description: "Outline of the project: messages, topics, and for each service its RPCs, routes, tables and consumers. Start here, then read details with get_project.",
+        description: "Outline of the project: messages, topics, and for each service its RPCs, routes, tables (with their unique constraints, indexes and foreign keys), consumers and scheduled jobs, with the id and type of each step. Start here, then read details with get_project.",
         properties: no_properties,
         required: &[],
     },
@@ -62,7 +62,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "get_example_project",
-        description: "A complete example project (Orders, Payments, Notifications) to copy the JSON structure from. Does not touch the project file.",
+        description: "A complete, valid example project (Orders, Payments, Notifications) to copy the JSON structure from. It shows every kind of step and the features around them: HTTP routes with a rate limit, a status and cookies, a signed webhook (verifyHmac), a single-use token consumed by UPDATE ... RETURNING, password hashing, encryption, field rules, an idempotent consumer, a scheduled job and composite foreign keys. Does not touch the project file.",
         properties: no_properties,
         required: &[],
     },
@@ -252,7 +252,7 @@ fn call_tool(project: &Path, name: &str, args: &Value) -> Result<String, String>
         "describe_project" => Ok(pretty(&outline(&load_project(project)?))),
         "get_project" => Ok(pretty(&load_project(project)?)),
         "get_schema" => schema_tool(args.get("definition").and_then(Value::as_str)),
-        "get_example_project" => Ok(pretty(&sb_model::sample::orders())),
+        "get_example_project" => Ok(pretty(&sb_model::sample::showcase())),
         "patch_project" => {
             let operations = args
                 .get("operations")
@@ -509,10 +509,51 @@ fn outline(project: &Project) -> Value {
             "name": s.name,
             "rpcs": names(s.rpcs.iter().map(|r| format!("{}({}) -> {} [{}]", r.name, r.request, r.response, step_ids(&r.steps))).collect()),
             "routes": names(s.routes.iter().map(|r| format!("{} {} -> {} [{}]", serde_json::to_value(r.method).ok().and_then(|m| m.as_str().map(str::to_uppercase)).unwrap_or_default(), r.path, r.name, step_ids(&r.steps))).collect()),
-            "tables": names(s.tables.iter().map(|t| format!("{}({})", t.name, t.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", "))).collect()),
-            "consumers": names(s.consumers.iter().map(|c| format!("{} <- {} [{}]", c.name, c.topic, step_ids(&c.steps))).collect()),
+            "tables": names(s.tables.iter().map(table_outline).collect()),
+            "consumers": names(s.consumers.iter().map(|c| format!("{} <- {}{} [{}]", c.name, c.topic, c.idempotent_on.as_ref().map(|f| format!(" (idempotent on {f})")).unwrap_or_default(), step_ids(&c.steps))).collect()),
+            "jobs": names(s.jobs.iter().map(|j| format!("{} every {} s [{}]", j.name, j.every_secs, step_ids(&j.steps))).collect()),
         })).collect::<Vec<_>>(),
     })
+}
+
+/// `shipments(id, order_id) unique(order_id, line_no) index(order_id) fk(order_id, line_no -> order_lines)`: the columns and
+/// what constrains them, which an editing client has to know before it writes a query or another constraint.
+fn table_outline(t: &sb_model::Table) -> String {
+    let list = |columns: &[String]| columns.join(", ");
+    let mut out = format!(
+        "{}({})",
+        t.name,
+        t.columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let key = t.primary_key();
+    if !key.is_empty() {
+        out.push_str(&format!(" key({})", key.join(", ")));
+    }
+    for u in &t.uniques {
+        out.push_str(&format!(" unique {}({})", u.name, list(&u.columns)));
+    }
+    for i in &t.indexes {
+        out.push_str(&format!(
+            " {}index {}({})",
+            if i.unique { "unique " } else { "" },
+            i.name,
+            list(&i.columns)
+        ));
+    }
+    for f in &t.foreign_keys {
+        out.push_str(&format!(
+            " fk {}({} -> {}({}))",
+            f.name,
+            list(&f.columns),
+            f.ref_table,
+            list(&f.ref_columns)
+        ));
+    }
+    out
 }
 
 /// `h1 let, h2 publish`: the ids to put in a `steps/id=…` selector, with what each step is.
@@ -931,6 +972,98 @@ mod tests {
         let (report, err) = f.call("validate", json!({}));
         assert!(!err);
         assert!(report.starts_with("0 error(s)"), "{report}");
+    }
+
+    #[test]
+    fn the_outline_shows_jobs_constraints_and_idempotent_consumers() {
+        let f = Fixture::new("outline-showcase");
+        save_project(&f.file, &sb_model::sample::showcase()).unwrap();
+        let (outline, err) = f.call("describe_project", json!({}));
+        assert!(!err, "{outline}");
+        let outline: Value = serde_json::from_str(&outline).unwrap();
+        let orders = &outline["services"][0];
+        // Jobs, with their period and the ids to select their steps by.
+        let jobs: Vec<&str> = orders["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|j| j.as_str().unwrap())
+            .collect();
+        assert!(
+            jobs.contains(&"cleaner every 420 s [c1 log, c2 sql]"),
+            "{jobs:?}"
+        );
+        assert!(
+            jobs.contains(&"heartbeat every 3600 s [j1 log]"),
+            "{jobs:?}"
+        );
+        let tables = orders["tables"].as_array().unwrap();
+        let shipments = tables
+            .iter()
+            .find(|t| t.as_str().unwrap().starts_with("shipments("))
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert!(shipments.contains("key(id)"), "{shipments}");
+        assert!(
+            shipments.contains("unique shipments_line_uq(order_id, line_no)"),
+            "{shipments}"
+        );
+        assert!(
+            shipments.contains("index shipments_order_idx(order_id)"),
+            "{shipments}"
+        );
+        assert!(
+            shipments.contains(
+                "fk shipments_line_fk(order_id, line_no -> order_lines(order_id, line_no))"
+            ),
+            "{shipments}"
+        );
+        let order_lines = tables
+            .iter()
+            .find(|t| t.as_str().unwrap().starts_with("order_lines("))
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert!(
+            order_lines.contains("key(order_id, line_no)"),
+            "{order_lines}"
+        );
+        // A consumer says what it deduplicates on.
+        let payments = &outline["services"][1]["consumers"][0];
+        assert!(
+            payments
+                .as_str()
+                .unwrap()
+                .contains("(idempotent on order_id)"),
+            "{payments}"
+        );
+    }
+
+    #[test]
+    fn the_example_project_shows_every_feature_and_is_valid() {
+        let f = Fixture::new("example");
+        let (text, err) = f.call("get_example_project", json!({}));
+        assert!(!err);
+        let example: sb_model::Project = serde_json::from_str(&text).unwrap();
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&example)),
+            "{:?}",
+            sb_model::validate(&example)
+        );
+        // An agent can copy a step of each kind from it...
+        for kind in ["verifyHmac", "rateLimit", "encrypt", "hashPassword", "fail"] {
+            assert!(text.contains(&format!("\"type\": \"{kind}\"")), "{kind}");
+        }
+        // ...and the features around them.
+        assert!(
+            text.contains("\"jobs\"")
+                && text.contains("\"idempotentOn\"")
+                && text.contains("\"foreignKeys\"")
+                && text.contains("\"rules\"")
+        );
+        // It does not touch the project file.
+        assert_eq!(load_project(&f.file).unwrap(), sb_model::sample::orders());
     }
 
     #[test]

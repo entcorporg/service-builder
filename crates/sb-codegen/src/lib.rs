@@ -966,6 +966,26 @@ mod tests {
     }
 
     #[test]
+    fn the_showcase_generates_a_workspace_of_every_feature() {
+        let files = generate(&sample::showcase()).unwrap();
+        for path in [
+            "services/orders/src/flows/jobs.rs",
+            "services/orders/src/transport/scheduler.rs",
+            "services/orders/src/app/schema.rs",
+            "runtime/src/webhook.rs",
+            "runtime/src/crypto.rs",
+        ] {
+            assert!(files.iter().any(|f| f.path == path), "{path}");
+        }
+        let schema = file(&files, "services/orders/src/app/schema.rs");
+        assert!(
+            schema.contains("FOREIGN KEY")
+                && schema.contains("JSONB")
+                && schema.contains("CREATE INDEX")
+        );
+    }
+
+    #[test]
     fn routes_sharing_a_path_are_served_by_one_method_router() {
         let mut p = sample::orders();
         let mut delete = p.services[0].routes[1].clone();

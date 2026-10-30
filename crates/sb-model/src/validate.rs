@@ -2241,6 +2241,40 @@ mod tests {
     }
 
     #[test]
+    fn the_showcase_is_valid_without_warnings_and_shows_every_step_type() {
+        let p = sample::showcase();
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+        let mut kinds = std::collections::BTreeSet::new();
+        for s in &p.services {
+            for step in s.handler_steps() {
+                step.walk(&mut |x| {
+                    kinds.insert(
+                        serde_json::to_value(x).unwrap()["type"]
+                            .as_str()
+                            .unwrap()
+                            .to_string(),
+                    );
+                });
+            }
+        }
+        // A new step type has to be added to the showcase, or an agent never sees it used.
+        let schema = json_schema();
+        let all: Vec<String> = schema["$defs"]["Step"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| {
+                v["properties"]["type"]["const"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        let missing: Vec<_> = all.iter().filter(|t| !kinds.contains(*t)).collect();
+        assert!(missing.is_empty(), "the showcase never uses {missing:?}");
+    }
+
+    #[test]
     fn sample_is_valid_without_warnings() {
         let d = validate(&sample::orders());
         assert_eq!(d, vec![], "sample project must be clean");

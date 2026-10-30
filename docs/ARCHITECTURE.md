@@ -425,7 +425,7 @@ mêmes si code et message le sont : le chemin bouge quand on insère un élémen
 tout. Les opérations d'un même appel sont validées une seule fois : c'est le mode « lot ». Les chemins acceptent des
 sélecteurs `clé=valeur` dans les tableaux (`/services/name=Orders/rpcs/name=CreateOrder/steps/id=h2`), plus stables que
 des index qui glissent à chaque insertion ; `insert_before` et `insert_after` posent une valeur à côté d'un élément
-repéré ainsi, et `describe_project` liste les ids d'étapes. Un sélecteur sans résultat dit ce qui existe, un sélecteur
+repéré ainsi, et `describe_project` liste, pour chaque service, les ids et types d'étapes de ses RPC, routes, consumers (avec leur champ de dédoublonnage) et tâches planifiées, ainsi que ses tables avec leur clé primaire, leurs contraintes `UNIQUE`, index et clés étrangères. `get_example_project` renvoie un projet **valide** qui montre chaque type d'étape et les fonctions qui les entourent (`sample::showcase`) : un test échoue si un type d'étape n'y figure pas, pour qu'un agent le voie toujours utilisé. Un sélecteur sans résultat dit ce qui existe, un sélecteur
 ambigu est refusé. `get_schema` sert le JSON Schema du projet, **dérivé des types** (`schemars`, les commentaires de doc
 deviennent des descriptions) : il ne peut pas diverger du modèle, et un test valide le projet d'exemple contre ce
 schéma. Sans argument il liste les définitions ; avec `definition=Step` il renvoie celle-ci et ce qu'elle référence,
