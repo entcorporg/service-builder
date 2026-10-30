@@ -114,6 +114,8 @@ export type Step =
   | { type: 'callRpc'; id: string; service: string; method: string; request: Assignment[]; bind: string | null }
   | { type: 'branch'; id: string; condition: Condition; then: Step[]; otherwise: Step[] }
   | { type: 'respond'; id: string; fields: Assignment[] }
+  /** Ends an HTTP route with an error status; `retryAfter` (seconds) goes with 429 and 503. */
+  | { type: 'fail'; id: string; status: number; message: string; retryAfter: Expr | null }
   | {
       type: 'sql'
       id: string

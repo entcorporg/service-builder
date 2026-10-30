@@ -393,7 +393,7 @@ mod tests {
             op: SqlOp::Insert,
             values,
             ..
-        } = &mut p.services[0].routes[0].steps[1]
+        } = &mut p.services[0].routes[0].steps[2]
         {
             values.push(sb_model::Assignment {
                 field: "ext_id".into(),
@@ -430,7 +430,7 @@ mod tests {
             op: SqlOp::Insert,
             values,
             ..
-        } = &mut p.services[0].routes[0].steps[1]
+        } = &mut p.services[0].routes[0].steps[2]
         {
             values.push(sb_model::Assignment {
                 field: "meta".into(),
@@ -523,6 +523,41 @@ mod tests {
         // Both tables exist before the foreign key that links them.
         assert!(at("CREATE TABLE IF NOT EXISTS \\\"order_lines\\\"") < at("shipments_line_fk"));
         assert!(at("CREATE INDEX IF NOT EXISTS") < at("FOREIGN KEY"));
+    }
+
+    #[test]
+    fn fail_returns_an_http_error_and_5xx_hide_their_message() {
+        let files = generate(&sample::orders()).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        // The sample's `place_order` refuses a non-positive amount; the transaction is dropped by the return.
+        assert!(api.contains(
+            "let error = eda_runtime::http::HttpError::new(400, \"the amount must be positive\");"
+        ));
+        assert!(api.contains("return Err(error.into());"));
+        // Retry-After and the generic 5xx text live in the answer of the HTTP module.
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        assert!(http.contains("retry_after: e.retry_after"));
+        assert!(http.contains("status.is_server_error()"));
+        assert!(http.contains("axum::http::header::RETRY_AFTER"));
+    }
+
+    #[test]
+    fn fail_can_wait_before_a_retry() {
+        use sb_model::{Expr, Step};
+        let mut p = sample::orders();
+        p.services[0].routes[1].steps.insert(
+            0,
+            Step::Fail {
+                id: "f9".into(),
+                status: 429,
+                message: "slow down".into(),
+                retry_after: Some(Expr::Literal { value: 30.into() }),
+            },
+        );
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        assert!(api.contains("HttpError::new(429, \"slow down\")"));
+        assert!(api.contains("error.with_retry_after(u64::try_from(30).unwrap_or(0))"));
     }
 
     #[test]

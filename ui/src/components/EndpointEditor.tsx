@@ -58,7 +58,7 @@ function Endpoint(props: {
   const service = project.services[si]!
   const rt = (p: Project) => p.services[si]!.routes[ri]!
   const base = `/services/${si}/routes/${ri}`
-  const ctx: HandlerCtx = { service: service.name, response: route.response }
+  const ctx: HandlerCtx = { service: service.name, response: route.response, http: true }
 
   const params = pathParams(route.path)
   const origin = (f: Field) => (params.includes(f.name) ? 'chemin' : route.method === 'get' || route.method === 'delete' ? 'query' : 'corps')

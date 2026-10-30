@@ -403,6 +403,7 @@ export const STEP_LABELS: Record<StepType, { label: string; hint: string }> = {
   callRpc: { label: 'Appeler un RPC', hint: 'Appeler un autre service en gRPC' },
   branch: { label: 'Condition', hint: 'Si … alors … sinon …' },
   respond: { label: 'Répondre', hint: 'Renvoyer la réponse du RPC' },
+  fail: { label: 'Refuser', hint: 'Arrêter la route avec un statut d’erreur HTTP (400, 401, 404, 429…)' },
   sql: { label: 'SQL', hint: 'Lire, insérer, modifier ou supprimer dans une table du service' },
   code: { label: 'Code Rust', hint: 'Insérer du Rust écrit à la main' },
 }
@@ -455,6 +456,8 @@ export function makeStep(type: StepType, p: Project, scope: Scope, ctx: { servic
     }
     case 'respond':
       return { type, id, fields: ctx.response ? autoMap(p, scope, ctx.response) : [] }
+    case 'fail':
+      return { type, id, status: 400, message: 'bad request', retryAfter: null }
     case 'sql': {
       const table = p.services.find((x) => x.name === ctx.service)?.tables[0]
       // Reads the row whose key is already in scope (`input.order_id` for a table keyed by `order_id`).

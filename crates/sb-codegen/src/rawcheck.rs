@@ -41,6 +41,11 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
             Step::Publish { payload, .. } => assignments(payload, &format!("{path}/payload"), out),
             Step::CallRpc { request, .. } => assignments(request, &format!("{path}/request"), out),
             Step::Respond { fields, .. } => assignments(fields, &format!("{path}/fields"), out),
+            Step::Fail { retry_after, .. } => {
+                if let Some(wait) = retry_after {
+                    expr(wait, &format!("{path}/retryAfter"), out);
+                }
+            }
             Step::Sql {
                 conditions, values, ..
             } => {

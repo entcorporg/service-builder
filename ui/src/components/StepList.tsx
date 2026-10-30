@@ -11,8 +11,10 @@ import { Badge, Collapsible, Empty, IconButton } from './ui'
 
 export interface HandlerCtx {
   service: string
-  /** Response message when the handler is an RPC, null for consumers. */
+  /** Response message when the handler is an RPC or an HTTP route, null for consumers. */
   response: string | null
+  /** An HTTP route, which can end early with a `fail` status. */
+  http?: boolean
 }
 
 interface ListProps {
@@ -26,7 +28,19 @@ interface ListProps {
   locate: (p: Project) => Step[]
 }
 
-const STEP_ORDER: StepType[] = ['publish', 'sql', 'callRpc', 'branch', 'let', 'log', 'respond', 'code']
+const FAIL_STATUSES: [number, string][] = [
+  [400, 'requête invalide'],
+  [401, 'non authentifié'],
+  [403, 'interdit'],
+  [404, 'introuvable'],
+  [409, 'conflit'],
+  [422, 'non traitable'],
+  [429, 'trop de requêtes'],
+  [500, 'erreur interne'],
+  [503, 'indisponible'],
+]
+
+const STEP_ORDER: StepType[] = ['publish', 'sql', 'callRpc', 'branch', 'let', 'log', 'respond', 'fail', 'code']
 
 export function StepList({ steps, base, scope, ctx, locate }: ListProps) {
   const project = useStore((s) => s.project)
@@ -55,6 +69,7 @@ export function StepList({ steps, base, scope, ctx, locate }: ListProps) {
       ))}
       <AddStep
         allowRespond={ctx.response !== null}
+        allowFail={ctx.http === true}
         onAdd={(type) =>
           edit((p) => {
             const step = makeStep(type, p, endScope, ctx)
@@ -68,7 +83,7 @@ export function StepList({ steps, base, scope, ctx, locate }: ListProps) {
   )
 }
 
-function AddStep(props: { allowRespond: boolean; onAdd: (t: StepType) => void }) {
+function AddStep(props: { allowRespond: boolean; allowFail: boolean; onAdd: (t: StepType) => void }) {
   const [open, setOpen] = useState(false)
   return (
     <div className="add-step">
@@ -77,7 +92,7 @@ function AddStep(props: { allowRespond: boolean; onAdd: (t: StepType) => void })
       </button>
       {open && (
         <div className="widget-grid" role="menu">
-          {STEP_ORDER.filter((t) => t !== 'respond' || props.allowRespond).map((t) => (
+          {STEP_ORDER.filter((t) => (t !== 'respond' || props.allowRespond) && (t !== 'fail' || props.allowFail)).map((t) => (
             <button
               key={t}
               type="button"
@@ -144,6 +159,8 @@ function summary(step: Step): string {
         : `si ${step.condition.code}`
     case 'respond':
       return ''
+    case 'fail':
+      return `${step.status} ${step.message}`
     case 'sql':
       return `${OP_LABELS[step.op].toLowerCase()} ${step.table}${step.op === 'select' && step.bind ? ` → ${step.bind}` : ''}`
     case 'code':
@@ -453,6 +470,29 @@ function StepBody(props: {
         <AssignmentsEditor message={props.ctx.response} assignments={step.fields} scope={scope} update={(fn) => u((s) => fn(s.fields))} />
       ) : (
         <Empty>« Répondre » n’a de sens que dans un RPC.</Empty>
+      )
+    }
+
+    case 'fail': {
+      const u = as<'fail'>(props.update)
+      return (
+        <div className="stack">
+          <div className="form-row">
+            <select aria-label="Statut" value={step.status} onChange={(e) => u((s) => ((s.status = Number(e.target.value)), (s.retryAfter = [429, 503].includes(s.status) ? s.retryAfter : null)))}>
+              {(FAIL_STATUSES.some(([n]) => n === step.status) ? FAIL_STATUSES : [[step.status, ''] as [number, string], ...FAIL_STATUSES]).map(([n, label]) => (
+                <option key={n} value={n}>{label ? `${n} · ${label}` : n}</option>
+              ))}
+            </select>
+            <input aria-label="Message" value={step.message} placeholder="ce que le client reçoit" onChange={(e) => u((s) => (s.message = e.target.value))} />
+          </div>
+          {[429, 503].includes(step.status) && (
+            <ExprEditor label="Réessayer après (secondes)" expr={step.retryAfter} target={scalar('int64')} scope={scope} allowUnset onChange={(v) => u((s) => (s.retryAfter = v))} />
+          )}
+          <small className="muted">
+            Le client reçoit <code>{'{ "error": message }'}</code>. Pour un statut 5xx, le message reste dans les logs et le client reçoit un texte
+            générique. Ce que la route a écrit en base et publié est annulé.
+          </small>
+        </div>
       )
     }
 
