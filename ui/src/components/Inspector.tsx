@@ -1,4 +1,4 @@
-import { addConsumer, addJob, addRoute, addRpc, consumersOf, declareProducer, KIND_LABELS, KINDS, removeService, renameMessage, renameRpc, renameService, renameTopic, addMessage } from '../model'
+import { addConsumer, addJob, addRoute, eventKeys, addRpc, consumersOf, declareProducer, KIND_LABELS, KINDS, removeService, renameMessage, renameRpc, renameService, renameTopic, addMessage } from '../model'
 import { inputScope, typeOfField } from '../scope'
 import { useStore } from '../store'
 import type { MessageKind, Project } from '../types'
@@ -173,6 +173,19 @@ function ServiceInspector({ name }: { name: string }) {
                   spellCheck={false}
                   onChange={(e) => edit((p) => (svc(p).consumers[ci]!.groupId = e.target.value === '' ? null : e.target.value))}
                 />
+              </Row>
+              <Row label="Dédoublonner sur" hint="Kafka livre au moins une fois : un événement déjà traité est ignoré, la vérification étant dans la transaction du handler. Mémorisé 7 jours.">
+                <select
+                  aria-label="Champ qui identifie l’événement"
+                  value={c.idempotentOn ?? ''}
+                  onChange={(e) => edit((p) => (svc(p).consumers[ci]!.idempotentOn = e.target.value === '' ? null : e.target.value))}
+                >
+                  <option value="">aucun : chaque livraison est traitée</option>
+                  {c.idempotentOn && !(topic && eventKeys(project, topic.message).includes(c.idempotentOn)) && <option value={c.idempotentOn}>{c.idempotentOn} (inutilisable)</option>}
+                  {topic && eventKeys(project, topic.message).map((f) => (
+                    <option key={f} value={f}>{f}</option>
+                  ))}
+                </select>
               </Row>
               <h4 className="steps-title">Logique</h4>
               {topic ? (

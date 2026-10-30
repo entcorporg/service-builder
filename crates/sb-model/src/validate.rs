@@ -616,6 +616,9 @@ impl<'a> Checker<'a> {
                 if p.message(&topic.message).is_none() {
                     continue; // already reported on the topic
                 }
+                if let Some(field) = &c.idempotent_on {
+                    self.idempotent_field(&format!("{cp}/idempotentOn"), &topic.message, field);
+                }
                 let env = Env {
                     service: s,
                     handler: Handler::Consumer,
@@ -660,6 +663,40 @@ impl<'a> Checker<'a> {
                 let mut scope = Scope::default();
                 self.steps(&env, &format!("{jp}/steps"), &job.steps, &mut scope);
             }
+        }
+    }
+
+    /// The field that identifies an event: a single text or integer, since it becomes the key of a table.
+    fn idempotent_field(&mut self, path: &str, message: &str, field: &str) {
+        let Some(msg) = self.project.message(message) else {
+            return;
+        };
+        let ok = match msg.field(field) {
+            None => {
+                self.error(
+                    "E_IDEMPOTENT_FIELD",
+                    path,
+                    format!("`{message}` has no field `{field}` to tell its events apart"),
+                );
+                return;
+            }
+            Some(f) => {
+                !f.repeated
+                    && !f.optional
+                    && matches!(
+                        f.ty,
+                        FieldType::String | FieldType::Uuid | FieldType::Int32 | FieldType::Int64
+                    )
+            }
+        };
+        if !ok {
+            self.error(
+                "E_IDEMPOTENT_FIELD",
+                path,
+                format!(
+                    "`{message}.{field}` cannot identify an event: it has to be a single string, uuid, int32 or int64"
+                ),
+            );
         }
     }
 
@@ -3274,6 +3311,59 @@ mod tests {
         svc.routes.clear();
         svc.consumers.clear();
         assert!(!validate(&p).iter().any(|d| d.code == "W_EMPTY_SERVICE"));
+    }
+
+    #[test]
+    fn an_idempotent_consumer_names_the_field_that_identifies_its_event() {
+        let set = |p: &mut Project, field: Option<&str>| {
+            p.services[1].consumers[0].idempotent_on = field.map(Into::into);
+        };
+        let mut p = sample::orders();
+        set(&mut p, Some("order_id"));
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+        // A field the event does not have, and one that cannot be a key (a list, an optional, a number of no
+        // integer type, a schema).
+        set(&mut p, Some("nope"));
+        assert!(
+            errors(&p).contains(&"E_IDEMPOTENT_FIELD".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+        for (name, change) in [
+            (
+                "items",
+                &(|f: &mut Field| f.repeated = true) as &dyn Fn(&mut Field),
+            ),
+            ("order_id", &|f| f.optional = true),
+            ("order_id", &|f| f.ty = FieldType::Double),
+            ("order_id", &|f| {
+                f.ty = FieldType::Message {
+                    name: "Customer".into(),
+                }
+            }),
+        ] {
+            let mut p = sample::orders();
+            set(&mut p, Some(name));
+            let topic = p.services[1].consumers[0].topic.clone();
+            let message = p
+                .topics
+                .iter()
+                .find(|t| t.name == topic)
+                .unwrap()
+                .message
+                .clone();
+            let msg = p.messages.iter_mut().find(|m| m.name == message).unwrap();
+            if let Some(f) = msg.fields.iter_mut().find(|f| f.name == name) {
+                change(f);
+            }
+            assert!(
+                errors(&p).contains(&"E_IDEMPOTENT_FIELD".to_string()),
+                "{name}: {:?}",
+                errors(&p)
+            );
+        }
+        set(&mut p, None);
+        assert!(errors(&p).is_empty());
     }
 
     #[test]

@@ -288,6 +288,25 @@ Le module `eda_runtime::jobs` (`spawn_periodic`) est livré dans le workspace g�
 période, arrêt, erreur sans conséquence, pas de rafale de rattrapage. Une tâche se règle dans le panneau du service, section
 « Tâches planifiées ».
 
+### Consumers idempotents
+
+Kafka livre **au moins une fois** : après un rééquilibrage ou un échec avant la validation de l'offset, un événement arrive
+deux fois ; le relais de l'outbox peut aussi le publier deux fois. Un consumer peut donc désigner le **champ de
+l'événement qui l'identifie** (`idempotentOn` : une chaîne, un `uuid`, un `int32` ou un `int64`, ni optionnel ni liste,
+`E_IDEMPOTENT_FIELD`). Au début du flow, dans la transaction du handler, l'événement est enregistré dans
+`processed_events (consumer, event_id)` avec `ON CONFLICT DO NOTHING` ; si la ligne existait déjà, le flow valide et
+s'arrête : l'événement est ignoré.
+
+- Le contrôle et les effets du premier traitement sont **dans la même transaction** : si le handler échoue, l'enregistrement
+  est annulé avec le reste et la nouvelle livraison traite l'événement pour de bon. Deux livraisons simultanées ne peuvent pas
+  gagner toutes les deux : la seconde attend la première, perd si elle valide, gagne si elle annule (testé sur PostgreSQL).
+- Le champ est choisi par l'auteur, faute d'identifiant d'événement dans le pipeline. Il doit identifier l'**événement**, pas
+  seulement l'entité : si deux événements différents portent le même `order_id`, le second serait ignoré.
+- La table est créée avec le schéma du service (même s'il n'a aucune table dans la vue Tables), et les événements traités
+  sont **oubliés au bout de 7 jours** (purge toutes les heures) : la table ne grossit pas sans fin.
+- Les tests d'intégration du module `eda_runtime::dedup` sont livrés dans le workspace généré ; ils demandent une base :
+  `EDA_TEST_DATABASE_URL=postgres://… cargo test -p eda-runtime -- --ignored`.
+
 ### Persistance et outbox
 
 Chaque service possède **sa propre base PostgreSQL** (`<SERVICE>_DATABASE_URL`, créée au démarrage si elle

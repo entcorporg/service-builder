@@ -193,6 +193,8 @@ export interface Consumer {
   name: string
   topic: string
   groupId: string | null
+  /** The field of the event that identifies it: an event already handled is skipped. */
+  idempotentOn: string | null
   steps: Step[]
 }
 
