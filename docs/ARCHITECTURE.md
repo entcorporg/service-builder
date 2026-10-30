@@ -155,18 +155,46 @@ entre tables dans le bloc SQL (une requête plus riche s'écrit en Rust avec `tx
 ### Tables et bloc SQL
 
 Chaque service a sa base ; la vue **Tables** (onglet de la barre du haut) sert à concevoir ses tables : colonnes,
-type (`string`, `bool`, `int32`, `int64`, `float`, `double`, `timestamp`, `uuid`), nullable, clé primaire, valeur par
-défaut SQL. Le SQL de la table est affiché à côté. Au démarrage, le service applique le schéma de façon **additive** :
-`CREATE TABLE IF NOT EXISTS` puis `ADD COLUMN IF NOT EXISTS` pour chaque colonne, donc une colonne ajoutée dans la
-conception arrive dans une base existante (elle est nulle par défaut, pour ne pas échouer sur des lignes déjà là).
-Renommer ou supprimer une colonne ne modifie pas les tables déjà créées.
+type (`string`, `bool`, `int32`, `int64`, `float`, `double`, `timestamp`, `uuid`, `jsonb`), nullable, clé primaire,
+valeur par défaut SQL. Le SQL de la table est affiché à côté. Au démarrage, le service applique le schéma de façon
+**additive** : `CREATE TABLE IF NOT EXISTS` puis `ADD COLUMN IF NOT EXISTS` pour chaque colonne, donc une colonne
+ajoutée dans la conception arrive dans une base existante (elle est nulle par défaut, pour ne pas échouer sur des lignes
+déjà là). Renommer ou supprimer une colonne ne modifie pas les tables déjà créées.
+
+Une table porte aussi trois listes de contraintes, appliquées **après** toutes les tables et toutes les colonnes (une
+clé étrangère peut donc viser une table définie plus loin) :
+
+- **`UNIQUE`** (`uniques`) : une contrainte nommée sur une ou plusieurs colonnes ;
+- **index** (`indexes`) : un index nommé sur une ou plusieurs colonnes, éventuellement `unique` ; l'ordre des colonnes
+  est celui de l'index ;
+- **clés étrangères** (`foreignKeys`) : `columns[i]` référence `refColumns[i]` de `refTable`, dans la base du même
+  service. Elles peuvent être **composites**, avec `onDelete` / `onUpdate` (`noAction`, `restrict`, `cascade`,
+  `setNull`, `setDefault`).
+
+Postgres n'a pas de `ADD CONSTRAINT IF NOT EXISTS` : les contraintes `UNIQUE` et les clés étrangères sont ajoutées dans
+un bloc `DO $$ … $$` qui teste d'abord `pg_constraint`, les index avec `CREATE [UNIQUE] INDEX IF NOT EXISTS`. Le
+démarrage reste donc rejouable. Comme pour les colonnes, c'est additif : retirer une contrainte du projet ne la supprime
+pas d'une base existante, et une contrainte déjà créée n'est pas modifiée si on change ses colonnes sans changer son nom.
+
+Règles vérifiées (`validate.rs`) : un nom de contrainte ou d'index est en snake_case, 63 caractères au plus, et partage
+l'espace de noms du service avec les tables (`E_DUPLICATE_CONSTRAINT`, `E_CONSTRAINT_NAME`) ; les colonnes existent, sans
+doublon (`E_CONSTRAINT_UNKNOWN_COLUMN`, `E_CONSTRAINT_DUPLICATE_COLUMN`, `E_CONSTRAINT_NO_COLUMNS`) ; une clé étrangère
+vise une table du service (`E_FK_UNKNOWN_TABLE`), associe autant de colonnes que de colonnes visées (`E_FK_ARITY`), de
+même type deux à deux (`E_FK_TYPE`), et ces colonnes visées forment la clé primaire, une contrainte `UNIQUE` ou un
+index unique de la table cible, dans n'importe quel ordre (`E_FK_NOT_UNIQUE`) ; `setNull` exige des colonnes nullables
+(`E_FK_SET_NULL`) et `setDefault` des colonnes avec défaut (`E_FK_SET_DEFAULT`). Dans la vue Tables, ces diagnostics
+s'affichent sous la contrainte concernée, et renommer une table ou une colonne suit les contraintes qui la citent.
+
+Une colonne **`jsonb`** est un document JSON que les flux voient comme du texte, comme `timestamp` et `uuid` : lue avec
+`col::text`, écrite avec `$n::jsonb` (un texte qui n'est pas du JSON fait échouer la requête à l'exécution, Postgres le
+refuse). Postgres normalise le document (l'ordre des clés n'est pas conservé).
 
 Le bloc **SQL** est le huitième bloc de logique. Il lit une table du service dans la transaction du handler :
 
 - **Lire** : on coche les colonnes. Le bloc est **prédictif** : la variable (`order`) est typée d'après les colonnes
   cochées, donc `order.status` est proposé dans les étapes suivantes (et refusé si la colonne n'est plus cochée,
-  `E_UNKNOWN_PATH`). Une colonne nullable donne un champ optionnel ; `timestamp` et `uuid` se lisent en texte
-  (ISO 8601 pour les dates). Une seule ligne (`404` si aucune ne correspond) ou **plusieurs** (liste, à convertir vers
+  `E_UNKNOWN_PATH`). Une colonne nullable donne un champ optionnel ; `timestamp`, `uuid` et `jsonb` se lisent en
+  texte (ISO 8601 pour les dates). Une seule ligne (`404` si aucune ne correspond) ou **plusieurs** (liste, à convertir vers
   un schéma avec « Vers un schéma » : les colonnes de même nom remplissent ses champs, `E_SQL_INTO_FIELD` sinon),
   avec tri et limite. À la création du bloc, la condition est déjà posée : la clé primaire est rapprochée de la
   valeur de même nom dans la requête (`order_id = input.order_id`).

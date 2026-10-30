@@ -81,15 +81,15 @@ fn orders_table() -> Table {
     status.default = Some("'PENDING'".into());
     let mut created_at = Column::new("created_at", ColumnType::Timestamp);
     created_at.default = Some("now()".into());
-    Table {
-        name: "orders".into(),
-        columns: vec![
+    Table::new(
+        "orders",
+        vec![
             order_id,
             Column::new("amount", ColumnType::Int64),
             status,
             created_at,
         ],
-    }
+    )
 }
 
 pub fn orders() -> Project {

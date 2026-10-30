@@ -417,9 +417,10 @@ fn bootstrap_rs(project: &Project, service: &Service, publishes: bool) -> String
     c.finish()
 }
 
-/// The tables designed in the editor, as idempotent statements: the table with all its columns, then
-/// every column again with `ADD COLUMN IF NOT EXISTS`, so that a column added to the design reaches an
-/// existing database.
+/// The tables designed in the editor, as idempotent statements, in the order they can apply: every
+/// table with its columns, then every column again with `ADD COLUMN IF NOT EXISTS` (so that a column
+/// added to the design reaches an existing database), then the unique constraints, the indexes and the
+/// foreign keys. Those come last because a foreign key may point at a table that comes after its own.
 fn schema_rs(service: &Service) -> String {
     let mut c = Code::new();
     c.line(HEADER);
@@ -437,35 +438,62 @@ fn schema_rs(service: &Service) -> String {
         }
         d
     };
+    let mut statements: Vec<String> = Vec::new();
     for t in &service.tables {
         let mut parts: Vec<String> = t.columns.iter().map(&definition).collect();
-        let pk: Vec<String> = t
-            .columns
-            .iter()
-            .filter(|col| col.primary_key)
-            .map(|col| quoted(&col.name))
-            .collect();
-        if !pk.is_empty() {
-            parts.push(format!("PRIMARY KEY ({})", pk.join(", ")));
+        let pk = column_list(&t.primary_key());
+        if !t.primary_key().is_empty() {
+            parts.push(format!("PRIMARY KEY ({pk})"));
         }
-        c.line(format!(
-            "{:?},",
-            format!(
-                "CREATE TABLE IF NOT EXISTS {} ({})",
-                quoted(&t.name),
-                parts.join(", ")
-            )
+        statements.push(format!(
+            "CREATE TABLE IF NOT EXISTS {} ({})",
+            quoted(&t.name),
+            parts.join(", ")
         ));
         for col in t.columns.iter().filter(|col| !col.primary_key) {
-            c.line(format!(
-                "{:?},",
-                format!(
-                    "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {}",
-                    quoted(&t.name),
-                    definition(col)
-                )
+            statements.push(format!(
+                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {}",
+                quoted(&t.name),
+                definition(col)
             ));
         }
+    }
+    for t in &service.tables {
+        for u in &t.uniques {
+            statements.push(add_constraint(
+                &t.name,
+                &u.name,
+                &format!("UNIQUE ({})", column_list(&u.columns)),
+            ));
+        }
+        for i in &t.indexes {
+            statements.push(format!(
+                "CREATE {}INDEX IF NOT EXISTS {} ON {} ({})",
+                if i.unique { "UNIQUE " } else { "" },
+                quoted(&i.name),
+                quoted(&t.name),
+                column_list(&i.columns)
+            ));
+        }
+    }
+    for t in &service.tables {
+        for fk in &t.foreign_keys {
+            statements.push(add_constraint(
+                &t.name,
+                &fk.name,
+                &format!(
+                    "FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE {} ON UPDATE {}",
+                    column_list(&fk.columns),
+                    quoted(&fk.ref_table),
+                    column_list(&fk.ref_columns),
+                    fk.on_delete.sql(),
+                    fk.on_update.sql()
+                ),
+            ));
+        }
+    }
+    for statement in statements {
+        c.line(format!("{statement:?},"));
     }
     c.dedent();
     c.line("];");
@@ -474,6 +502,26 @@ fn schema_rs(service: &Service) -> String {
     c.line("eda_runtime::db::apply_schema(db, STATEMENTS).await");
     c.close();
     c.finish()
+}
+
+fn column_list(columns: &[impl AsRef<str>]) -> String {
+    columns
+        .iter()
+        .map(|c| quoted(c.as_ref()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Postgres has no `ADD CONSTRAINT IF NOT EXISTS`: the constraint is added unless the table already has
+/// one of that name.
+fn add_constraint(table: &str, name: &str, definition: &str) -> String {
+    format!(
+        "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '{name}' AND conrelid = '{}'::regclass) \
+         THEN ALTER TABLE {} ADD CONSTRAINT {} {definition}; END IF; END $$",
+        quoted(table),
+        quoted(table),
+        quoted(name)
+    )
 }
 
 fn ctx_rs(project: &Project, service: &Service) -> String {
@@ -1203,7 +1251,9 @@ fn sql_step(
                         ColumnType::Timestamp => format!(
                             "to_char({name} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS {name}"
                         ),
-                        ColumnType::Uuid => format!("{name}::text AS {name}"),
+                        ColumnType::Uuid | ColumnType::Jsonb => {
+                            format!("{name}::text AS {name}")
+                        }
                         _ => name,
                     }
                 })

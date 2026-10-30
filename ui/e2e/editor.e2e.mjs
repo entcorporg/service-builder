@@ -304,6 +304,84 @@ describe('editor', () => {
     await page.close()
   })
 
+  it('designs jsonb columns, UNIQUE constraints, indexes and composite foreign keys', async () => {
+    const { page } = await open()
+    await page.getByRole('tab', { name: /Tables/ }).click()
+    await page.getByTestId('tables-view').waitFor()
+    const sql = () => page.getByLabel('SQL de la table').innerText()
+
+    // A jsonb column.
+    await page.getByRole('button', { name: '+ Ajouter une colonne' }).click()
+    await page.getByLabel('Nom de la colonne').nth(4).fill('meta')
+    await page.getByLabel('Nom de la colonne').nth(4).press('Enter')
+    await page.getByLabel('Type de la colonne').nth(4).selectOption('jsonb')
+    assert.match(await sql(), /meta JSONB/)
+
+    // A column that no step reads, so that renaming it later keeps the project valid.
+    await page.getByRole('button', { name: '+ Ajouter une colonne' }).click()
+    await page.getByLabel('Nom de la colonne').nth(5).fill('region')
+    await page.getByLabel('Nom de la colonne').nth(5).press('Enter')
+
+    // A UNIQUE constraint on two columns: it starts on the first one, the order is the order of ticking.
+    await page.getByRole('button', { name: '+ Ajouter une contrainte' }).click()
+    await page.getByLabel('Colonnes uniques : region').check()
+    assert.match(await sql(), /ADD CONSTRAINT orders_order_id_uq UNIQUE \(order_id, region\)/)
+
+    // An index, unique this time.
+    await page.getByRole('button', { name: '+ Ajouter un index' }).click()
+    await page.getByLabel('Colonnes de l’index : created_at').check()
+    await page.getByLabel('Colonnes de l’index : order_id').uncheck()
+    await page.getByLabel('est unique').check()
+    assert.match(await sql(), /CREATE UNIQUE INDEX IF NOT EXISTS orders_order_id_idx ON orders \(created_at\)/)
+
+    // A second table, with a foreign key on (order_id, region): allowed by the UNIQUE constraint above.
+    await page.getByRole('region', { name: 'Tables de Orders' }).getByRole('button', { name: /Ajouter une table/ }).click()
+    await page.getByRole('button', { name: '+ Ajouter une colonne' }).click()
+    await page.getByLabel('Nom de la colonne').nth(1).fill('order_id')
+    await page.getByLabel('Nom de la colonne').nth(1).press('Enter')
+    await page.getByRole('button', { name: '+ Ajouter une colonne' }).click()
+    await page.getByLabel('Nom de la colonne').nth(2).fill('region')
+    await page.getByLabel('Nom de la colonne').nth(2).press('Enter')
+    await page.getByRole('button', { name: '+ Ajouter une clé étrangère' }).click()
+    assert.equal(await page.getByLabel('Table référencée').inputValue(), 'orders')
+    // The column of the same name is picked; a second pair is added by hand.
+    assert.equal(await page.getByLabel('Colonne 1', { exact: true }).inputValue(), 'order_id')
+    await page.getByRole('button', { name: '+ Ajouter une paire de colonnes' }).click()
+    await page.getByLabel('Colonne 2', { exact: true }).selectOption('region')
+    await page.getByLabel('Colonne référencée 2').selectOption('region')
+    await page.getByLabel('À la suppression').selectOption('cascade')
+    await settle(page)
+    assert.match(await sql(), /FOREIGN KEY \(order_id, region\) REFERENCES orders \(order_id, region\) ON DELETE CASCADE ON UPDATE NO ACTION/)
+    assert.equal(await page.getByLabel('Problèmes de la contrainte').count(), 0)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+
+    // Pairing a text column with a number is caught, under the foreign key.
+    await page.getByLabel('Colonne référencée 2').selectOption('amount')
+    await settle(page)
+    assert.match(await page.getByLabel('Problèmes de la contrainte').innerText(), /same type|même type/)
+    await page.getByLabel('Colonne référencée 2').selectOption('region')
+    await settle(page)
+    assert.equal(await page.getByLabel('Problèmes de la contrainte').count(), 0)
+
+    // Renaming a column follows it in the constraints of the other table, and the table is renamed too.
+    await page.getByRole('region', { name: 'Tables de Orders' }).getByRole('button', { name: 'orders', exact: true }).click()
+    await page.getByLabel('Nom de la colonne').nth(5).fill('zone')
+    await page.getByLabel('Nom de la colonne').nth(5).press('Enter')
+    await page.getByRole('region', { name: 'Tables de Orders' }).getByRole('button', { name: 'new_table', exact: true }).click()
+    assert.match(await sql(), /REFERENCES orders \(order_id, zone\)/)
+    await settle(page)
+
+    // All of it reaches the generated schema, after the tables.
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/app/schema.rs"]').click()
+    const code = await page.locator('.code-main pre').innerText()
+    assert.match(code, /JSONB/)
+    assert.match(code, /CREATE UNIQUE INDEX IF NOT EXISTS .{1,4}orders_order_id_idx/)
+    // The referencing column keeps its name: only the referenced side follows the rename.
+    assert.match(code, /FOREIGN KEY \(.{1,4}order_id.{1,4}, .{1,4}region.{1,4}\) REFERENCES .{1,4}orders.{1,4} \(.{1,4}order_id.{1,4}, .{1,4}zone.{1,4}\)/)
+    await page.close()
+  })
+
   it('types the result of a SQL block after the ticked columns', async () => {
     const { page } = await open()
     await page.locator('.tree button.sub', { hasText: '/orders/{order_id}' }).click()

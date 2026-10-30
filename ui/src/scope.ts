@@ -84,9 +84,9 @@ export function sqlRowName(table: string, stepId: string): string {
   return `${pascal(table)}Row${pascal(stepId)}`
 }
 
-/** What a flow sees of a column: timestamps and uuids are text. */
+/** What a flow sees of a column: timestamps, uuids and JSON documents are text. */
 export function columnFieldType(t: ColumnType): FieldType {
-  return { kind: t === 'timestamp' || t === 'uuid' ? 'string' : t } as FieldType
+  return { kind: t === 'timestamp' || t === 'uuid' || t === 'jsonb' ? 'string' : t } as FieldType
 }
 
 export function columnType(c: Column): TypeRef {

@@ -3,9 +3,10 @@ import { addColumn, addTable, renameColumn, renameTable } from '../model'
 import { useStore } from '../store'
 import type { ColumnType, Project, Table } from '../types'
 import { Icon } from './Icon'
+import { TableConstraints } from './TableConstraints'
 import { CommitInput, IconButton } from './ui'
 
-const TYPES: ColumnType[] = ['string', 'bool', 'int32', 'int64', 'float', 'double', 'timestamp', 'uuid']
+const TYPES: ColumnType[] = ['string', 'bool', 'int32', 'int64', 'float', 'double', 'timestamp', 'uuid', 'jsonb']
 const SQL_TYPE: Record<ColumnType, string> = {
   string: 'TEXT',
   bool: 'BOOLEAN',
@@ -15,14 +16,25 @@ const SQL_TYPE: Record<ColumnType, string> = {
   double: 'DOUBLE PRECISION',
   timestamp: 'TIMESTAMPTZ',
   uuid: 'UUID',
+  jsonb: 'JSONB',
 }
 
-/** The `CREATE TABLE` the service applies at start-up, to read the design as SQL. */
+const ACTION_SQL = { noAction: 'NO ACTION', restrict: 'RESTRICT', cascade: 'CASCADE', setNull: 'SET NULL', setDefault: 'SET DEFAULT' }
+
+/** The SQL the service applies at start-up for the table, to read the design as SQL: the table, then what is added to it. */
 export function createTableSql(t: Table): string {
   const cols = t.columns.map((c) => `  ${c.name} ${SQL_TYPE[c.type]}${c.nullable ? '' : ' NOT NULL'}${c.default?.trim() ? ` DEFAULT ${c.default.trim()}` : ''}`)
   const pk = t.columns.filter((c) => c.primaryKey).map((c) => c.name)
   if (pk.length) cols.push(`  PRIMARY KEY (${pk.join(', ')})`)
-  return `CREATE TABLE IF NOT EXISTS ${t.name} (\n${cols.join(',\n')}\n);`
+  const alter = (name: string, def: string) => `ALTER TABLE ${t.name} ADD CONSTRAINT ${name} ${def};`
+  return [
+    `CREATE TABLE IF NOT EXISTS ${t.name} (\n${cols.join(',\n')}\n);`,
+    ...t.uniques.map((u) => alter(u.name, `UNIQUE (${u.columns.join(', ')})`)),
+    ...t.indexes.map((i) => `CREATE ${i.unique ? 'UNIQUE ' : ''}INDEX IF NOT EXISTS ${i.name} ON ${t.name} (${i.columns.join(', ')});`),
+    ...t.foreignKeys.map((f) =>
+      alter(f.name, `FOREIGN KEY (${f.columns.join(', ')}) REFERENCES ${f.refTable} (${f.refColumns.join(', ')}) ON DELETE ${ACTION_SQL[f.onDelete]} ON UPDATE ${ACTION_SQL[f.onUpdate]}`),
+    ),
+  ].join('\n')
 }
 
 /** SQL steps that read or write the table, to know what a change touches. */
@@ -101,7 +113,7 @@ export function TablesView() {
       </nav>
 
       {service && table ? (
-        <main className="grid min-w-0 content-start gap-[14px] overflow-y-auto px-[22px] pt-[18px] pb-10" aria-label={`Table ${table.name}`}>
+        <main className="grid min-w-0 auto-rows-max content-start gap-[14px] overflow-y-auto px-[22px] pt-[18px] pb-10" aria-label={`Table ${table.name}`}>
           <header className="flex items-center gap-3">
             <Icon name="table" size={18} />
             <span className="text-muted">{service.name} ·</span>
@@ -174,6 +186,8 @@ export function TablesView() {
             Les tables sont créées au démarrage du service. Ajouter une colonne met à jour une base existante ; renommer ou supprimer une colonne
             ne change pas les tables déjà créées. Une colonne ajoutée est nulle par défaut, pour ne pas échouer sur des lignes existantes.
           </small>
+
+          <TableConstraints key={`${service.name}/${table.name}`} si={si} ti={ti} />
 
           <pre className="sql-preview mono" aria-label="SQL de la table">{createTableSql(table)}</pre>
         </main>
