@@ -60,7 +60,13 @@ struct Checker<'a> {
 
 #[derive(Clone, Copy)]
 enum Handler<'a> {
-    Rpc { response: &'a str },
+    Rpc {
+        response: &'a str,
+    },
+    /// An HTTP route: answers like an RPC and can also end with a `Fail`.
+    Route {
+        response: &'a str,
+    },
     Consumer,
 }
 
@@ -724,7 +730,7 @@ impl<'a> Checker<'a> {
 
             let env = Env {
                 service: s,
-                handler: Handler::Rpc {
+                handler: Handler::Route {
                     response: &r.response,
                 },
             };
@@ -1450,12 +1456,53 @@ impl<'a> Checker<'a> {
                         path,
                         "Respond only makes sense in an RPC handler, consumers have nobody to answer",
                     ),
-                    Handler::Rpc { response } => {
+                    Handler::Rpc { response } | Handler::Route { response } => {
                         if let Some(msg) = p.message(response) {
                             self.assignments(msg, fields, scope, &format!("{path}/fields"));
                         }
                     }
                 }
+                true
+            }
+            Step::Fail {
+                status,
+                message,
+                retry_after,
+                ..
+            } => {
+                if !matches!(env.handler, Handler::Route { .. }) {
+                    self.error(
+                        "E_FAIL_OUTSIDE_ROUTE",
+                        path,
+                        "Fail answers an HTTP status: it only makes sense in an HTTP route",
+                    );
+                }
+                if !(400..=599).contains(status) {
+                    self.error(
+                        "E_FAIL_STATUS",
+                        format!("{path}/status"),
+                        format!("`{status}` is not an error status (400 to 599)"),
+                    );
+                }
+                if message.trim().is_empty() {
+                    self.error(
+                        "E_FAIL_MESSAGE",
+                        format!("{path}/message"),
+                        "say what the client is told (a 5xx answers a generic text and logs this one)",
+                    );
+                }
+                if let Some(wait) = retry_after {
+                    if !matches!(status, 429 | 503) {
+                        self.error(
+                            "E_FAIL_RETRY_AFTER",
+                            format!("{path}/retryAfter"),
+                            "`Retry-After` goes with 429 and 503 only",
+                        );
+                    }
+                    let seconds = TypeRef::scalar(FieldType::Int64);
+                    self.check_expr(scope, wait, Some(&seconds), &format!("{path}/retryAfter"));
+                }
+                // Nothing runs after it, like a Respond.
                 true
             }
             Step::Code { code, .. } => {
@@ -2266,6 +2313,60 @@ mod tests {
         assert!(errors(&p).contains(&"E_CONSTRAINT_NAME".to_string()));
     }
 
+    fn fail(status: u16, retry_after: Option<Expr>) -> Step {
+        Step::Fail {
+            id: "f1".into(),
+            status,
+            message: "too many attempts".into(),
+            retry_after,
+        }
+    }
+
+    #[test]
+    fn fail_ends_a_route_and_is_checked() {
+        let mut p = sample::orders();
+        let seconds = |path: &str| Expr::Path { path: path.into() };
+        // A route that always ends with a Fail does not warn about a missing Respond.
+        route_of(&mut p).steps = vec![fail(429, Some(Expr::Literal { value: 30.into() }))];
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+
+        // Only error statuses, a message, and `Retry-After` on 429 / 503.
+        for (step, code) in [
+            (fail(200, None), "E_FAIL_STATUS"),
+            (fail(600, None), "E_FAIL_STATUS"),
+            (
+                fail(409, Some(seconds("input.amount"))),
+                "E_FAIL_RETRY_AFTER",
+            ),
+            (fail(429, Some(seconds("input.nothing"))), "E_UNKNOWN_PATH"),
+            (fail(429, Some(seconds("input.items"))), "E_TYPE_MISMATCH"),
+        ] {
+            route_of(&mut p).steps = vec![step];
+            assert!(
+                errors(&p).contains(&code.to_string()),
+                "{code}: {:?}",
+                errors(&p)
+            );
+        }
+        let mut blank = fail(400, None);
+        if let Step::Fail { message, .. } = &mut blank {
+            message.clear();
+        }
+        route_of(&mut p).steps = vec![blank];
+        assert!(errors(&p).contains(&"E_FAIL_MESSAGE".to_string()));
+    }
+
+    #[test]
+    fn fail_only_makes_sense_in_a_route() {
+        let mut p = sample::orders();
+        // An RPC and a consumer answer with a gRPC status or a retry, not an HTTP one.
+        p.services[0].rpcs[0].steps.insert(0, fail(400, None));
+        assert!(errors(&p).contains(&"E_FAIL_OUTSIDE_ROUTE".to_string()));
+        let mut p = sample::orders();
+        p.services[1].consumers[0].steps.insert(0, fail(400, None));
+        assert!(errors(&p).contains(&"E_FAIL_OUTSIDE_ROUTE".to_string()));
+    }
+
     #[test]
     fn a_table_without_a_primary_key_warns() {
         let mut p = sample::orders();
@@ -2322,7 +2423,7 @@ mod tests {
     #[test]
     fn an_insert_gives_every_column_that_has_no_default() {
         let mut p = sample::orders();
-        if let Step::Sql { values, .. } = sql_step(&mut p, 0, 1) {
+        if let Step::Sql { values, .. } = sql_step(&mut p, 0, 2) {
             values.retain(|a| a.field != "amount");
         }
         assert!(errors(&p).contains(&"E_SQL_MISSING_VALUE".into()));
@@ -2337,7 +2438,7 @@ mod tests {
                 conditions,
                 values,
                 ..
-            } = sql_step(&mut p, 0, 1)
+            } = sql_step(&mut p, 0, 2)
             {
                 *o = op;
                 conditions.clear();

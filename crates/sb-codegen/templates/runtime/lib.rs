@@ -12,12 +12,14 @@ pub use outbox::connect as connect_database;
 pub mod http {
     //! What a flow returns to pick the status of an HTTP answer:
     //! `return Err(eda_runtime::http::HttpError::not_found("no such order").into());`
-    //! Any other error is an internal error (500) whose details are only logged.
+    //! Any other error is an internal error (500) whose details are only logged, and so is the message of a 5xx.
 
     #[derive(Debug)]
     pub struct HttpError {
         pub status: u16,
         pub message: String,
+        /// Seconds for the `Retry-After` header (429 and 503).
+        pub retry_after: Option<u64>,
     }
 
     impl HttpError {
@@ -25,7 +27,13 @@ pub mod http {
             Self {
                 status,
                 message: message.into(),
+                retry_after: None,
             }
+        }
+
+        pub fn with_retry_after(mut self, seconds: u64) -> Self {
+            self.retry_after = Some(seconds);
+            self
         }
 
         pub fn bad_request(message: impl Into<String>) -> Self {

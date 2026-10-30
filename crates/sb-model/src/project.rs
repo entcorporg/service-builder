@@ -606,6 +606,17 @@ pub enum Step {
         #[serde(default)]
         limit: Option<u32>,
     },
+    /// Ends an HTTP route early with an error status (400..=599) and `{ "error": message }`.
+    /// The message is a fixed text: a 5xx answers a generic one and keeps this in the logs.
+    #[serde(rename_all = "camelCase")]
+    Fail {
+        id: String,
+        status: u16,
+        message: String,
+        /// 429 and 503: seconds written in the `Retry-After` header.
+        #[serde(default)]
+        retry_after: Option<Expr>,
+    },
     /// Escape hatch: raw Rust statements inserted verbatim.
     #[serde(rename_all = "camelCase")]
     Code { id: String, code: String },
@@ -651,6 +662,7 @@ impl Step {
             | Step::Branch { id, .. }
             | Step::Respond { id, .. }
             | Step::Sql { id, .. }
+            | Step::Fail { id, .. }
             | Step::Code { id, .. } => id,
         }
     }

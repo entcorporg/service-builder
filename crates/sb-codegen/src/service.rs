@@ -858,22 +858,33 @@ fn http_rs(service: &Service) -> String {
 
     c.blank();
     c.line("/// Errors are answered as `{ \"error\": \"...\" }`. A flow picks the status with `eda_runtime::http::HttpError`;");
-    c.line("/// anything else is an internal error whose details stay in the logs.");
+    c.line("/// a 5xx, like anything that is not an `HttpError`, answers a generic text and keeps the details in the logs.");
     c.open("struct ApiError");
     c.line("status: StatusCode,");
     c.line("message: String,");
+    c.line("retry_after: Option<u64>,");
     c.close();
     c.blank();
     c.open("impl ApiError");
     c.open("fn new(status: StatusCode, message: impl Into<String>) -> Self");
-    c.line("Self { status, message: message.into() }");
+    c.line("Self { status, message: message.into(), retry_after: None }");
     c.close();
     c.close();
     c.blank();
     c.open("impl From<anyhow::Error> for ApiError");
     c.open("fn from(error: anyhow::Error) -> Self");
     c.open("match error.downcast_ref::<eda_runtime::http::HttpError>()");
-    c.line("Some(e) => Self::new(StatusCode::from_u16(e.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), e.message.clone()),");
+    c.open("Some(e) =>");
+    c.line(
+        "let status = StatusCode::from_u16(e.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);",
+    );
+    c.open("if status.is_server_error()");
+    c.line("tracing::error!(status = e.status, \"HTTP flow failed: {}\", e.message);");
+    c.line("let message = if status == StatusCode::INTERNAL_SERVER_ERROR { \"internal error\".to_string() } else { status.canonical_reason().unwrap_or(\"server error\").to_lowercase() };");
+    c.line("return Self { status, message, retry_after: e.retry_after };");
+    c.close();
+    c.line("Self { status, message: e.message.clone(), retry_after: e.retry_after }");
+    c.close();
     c.open("None =>");
     c.line("tracing::error!(\"HTTP handler failed: {error:#}\");");
     c.line("Self::new(StatusCode::INTERNAL_SERVER_ERROR, \"internal error\")");
@@ -884,7 +895,11 @@ fn http_rs(service: &Service) -> String {
     c.blank();
     c.open("impl IntoResponse for ApiError");
     c.open("fn into_response(self) -> Response");
-    c.line("(self.status, Json(HashMap::from([(\"error\", self.message)]))).into_response()");
+    c.line("let mut response = (self.status, Json(HashMap::from([(\"error\", self.message)]))).into_response();");
+    c.open("if let Some(seconds) = self.retry_after");
+    c.line("response.headers_mut().insert(axum::http::header::RETRY_AFTER, axum::http::HeaderValue::from(seconds));");
+    c.close();
+    c.line("response");
     c.close();
     c.close();
     c.finish()
@@ -1093,6 +1108,24 @@ fn steps(
                 c.line("return Ok(reply);");
             }
             Step::Sql { .. } => sql_step(c, project, service, scope, step)?,
+            Step::Fail {
+                status,
+                message,
+                retry_after,
+                ..
+            } => {
+                // The transaction is dropped with the early return: nothing the flow wrote is kept.
+                c.line(format!(
+                    "let error = eda_runtime::http::HttpError::new({status}, {message:?});"
+                ));
+                if let Some(wait) = retry_after {
+                    let seconds = lower(project, scope, wait, &TypeRef::scalar(FieldType::Int64))?;
+                    c.line(format!(
+                        "let error = error.with_retry_after(u64::try_from({seconds}).unwrap_or(0));"
+                    ));
+                }
+                c.line("return Err(error.into());");
+            }
             Step::Code { code, .. } => {
                 c.line(code.trim_end());
             }
@@ -1373,6 +1406,7 @@ fn describe(step: &Step) -> String {
         } => format!("call {service}.{method}"),
         Step::Branch { .. } => "branch".into(),
         Step::Respond { .. } => "respond".into(),
+        Step::Fail { status, .. } => format!("fail {status}"),
         Step::Sql { op, table, .. } => format!(
             "sql {} {table}",
             match op {

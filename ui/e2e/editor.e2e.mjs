@@ -251,6 +251,42 @@ describe('editor', () => {
     await page.close()
   })
 
+  it('refuses a request with a status: only HTTP routes offer it', async () => {
+    const { page } = await open()
+    // A gRPC handler answers with a response, not an HTTP status.
+    await page.locator('.node.service', { hasText: 'Orders' }).click()
+    await page.locator('.card.rpc .card-toggle', { hasText: 'CreateOrder' }).click()
+    await page.locator('.add-step-btn').first().click()
+    assert.equal(await page.getByRole('menuitem', { name: /Refuser/ }).count(), 0)
+    await page.locator('.add-step-btn').first().click()
+
+    // The sample's `place_order` already refuses a non-positive amount.
+    await page.locator('.tree button.sub', { hasText: '/orders/{order_id}' }).click()
+    await page.locator('.endpoint').waitFor()
+    await page.locator('.add-step-btn').first().click()
+    await page.getByRole('menuitem', { name: /Refuser/ }).click()
+    const step = page.locator('.card.step', { hasText: 'Refuser' })
+    assert.match(await step.innerText(), /400 bad request/)
+    assert.equal(await step.getByLabel('Réessayer après (secondes)').count(), 0)
+
+    // 429 asks how long to wait; any other status takes it away again.
+    await step.getByLabel('Statut').selectOption('429')
+    await step.getByLabel('Message').fill('slow down')
+    await step.getByLabel('Réessayer après (secondes)').waitFor()
+    await step.getByLabel('Statut').selectOption('404')
+    assert.equal(await step.getByLabel('Réessayer après (secondes)').count(), 0)
+    await step.getByLabel('Statut').selectOption('429')
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/flows/api.rs"]').click()
+    const code = await page.locator('.code-main pre').innerText()
+    assert.match(code, /HttpError::new\(429, "slow down"\)/)
+    assert.match(code, /HttpError::new\(400, "the amount must be positive"\)/)
+    await page.close()
+  })
+
   it('hides events, proto schemas and topics while an endpoint is open', async () => {
     const { page } = await open()
     const tree = page.locator('.tree')

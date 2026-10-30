@@ -249,6 +249,23 @@ pub fn orders() -> Project {
                 response: "OrderView".into(),
                 status: 201,
                 steps: vec![
+                    Step::Branch {
+                        id: "h0".into(),
+                        condition: Condition::Compare {
+                            left: Expr::Path {
+                                path: "input.amount".into(),
+                            },
+                            op: CmpOp::Le,
+                            right: lit(0),
+                        },
+                        then: vec![Step::Fail {
+                            id: "h7".into(),
+                            status: 400,
+                            message: "the amount must be positive".into(),
+                            retry_after: None,
+                        }],
+                        otherwise: vec![],
+                    },
                     Step::Let {
                         id: "h1".into(),
                         name: "order_id".into(),
