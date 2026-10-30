@@ -417,6 +417,115 @@ mod tests {
     }
 
     #[test]
+    fn jsonb_columns_are_read_as_text_and_written_through_a_cast() {
+        use sb_model::{Column, ColumnType, SqlOp, Step};
+        let mut p = sample::orders();
+        p.services[0].tables[0]
+            .columns
+            .push(Column::new("meta", ColumnType::Jsonb));
+        if let Step::Sql { columns, .. } = &mut p.services[0].routes[1].steps[0] {
+            columns.push("meta".into());
+        }
+        if let Step::Sql {
+            op: SqlOp::Insert,
+            values,
+            ..
+        } = &mut p.services[0].routes[0].steps[1]
+        {
+            values.push(sb_model::Assignment {
+                field: "meta".into(),
+                value: sb_model::Expr::Literal {
+                    value: r#"{"vip":true}"#.into(),
+                },
+            });
+        }
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        assert!(api.contains("\\\"meta\\\"::text AS \\\"meta\\\""));
+        assert!(api.contains("$3::jsonb"));
+        let schema = file(&files, "services/orders/src/app/schema.rs");
+        assert!(schema.contains("ADD COLUMN IF NOT EXISTS \\\"meta\\\" JSONB"));
+    }
+
+    #[test]
+    fn composite_keys_uniques_and_indexes_are_applied_after_the_tables() {
+        use sb_model::{
+            Column, ColumnType, ForeignKey, Index, ReferentialAction, Table, UniqueConstraint,
+        };
+        let mut p = sample::orders();
+        let key = |name: &str, ty| {
+            let mut c = Column::new(name, ty);
+            c.primary_key = true;
+            c
+        };
+        // The referencing table comes first: its foreign key must wait for the other table.
+        let mut shipments = Table::new(
+            "shipments",
+            vec![
+                key("id", ColumnType::Uuid),
+                Column::new("order_id", ColumnType::String),
+                Column::new("line_no", ColumnType::Int32),
+            ],
+        );
+        shipments.foreign_keys.push(ForeignKey {
+            name: "shipments_line_fk".into(),
+            columns: vec!["order_id".into(), "line_no".into()],
+            ref_table: "order_lines".into(),
+            ref_columns: vec!["order_id".into(), "line_no".into()],
+            on_delete: ReferentialAction::Cascade,
+            on_update: ReferentialAction::Restrict,
+        });
+        shipments.uniques.push(UniqueConstraint {
+            name: "shipments_line_uq".into(),
+            columns: vec!["order_id".into(), "line_no".into()],
+        });
+        shipments.indexes.push(Index {
+            name: "shipments_order_idx".into(),
+            columns: vec!["order_id".into()],
+            unique: false,
+        });
+        shipments.indexes.push(Index {
+            name: "shipments_id_order_idx".into(),
+            columns: vec!["id".into(), "order_id".into()],
+            unique: true,
+        });
+        let lines = Table::new(
+            "order_lines",
+            vec![
+                key("order_id", ColumnType::String),
+                key("line_no", ColumnType::Int32),
+            ],
+        );
+        p.services[0].tables.extend([shipments, lines]);
+        assert!(!sb_model::has_errors(&sb_model::validate(&p)));
+        let files = generate(&p).unwrap();
+        let schema = file(&files, "services/orders/src/app/schema.rs");
+        let at = |needle: &str| {
+            schema
+                .find(needle)
+                .unwrap_or_else(|| panic!("`{needle}` is missing from\n{schema}"))
+        };
+        assert!(schema.contains("PRIMARY KEY (\\\"order_id\\\", \\\"line_no\\\")"));
+        assert!(schema.contains(
+            "ADD CONSTRAINT \\\"shipments_line_uq\\\" UNIQUE (\\\"order_id\\\", \\\"line_no\\\")"
+        ));
+        assert!(schema.contains(
+            "CREATE INDEX IF NOT EXISTS \\\"shipments_order_idx\\\" ON \\\"shipments\\\" (\\\"order_id\\\")"
+        ));
+        assert!(schema.contains(
+            "CREATE UNIQUE INDEX IF NOT EXISTS \\\"shipments_id_order_idx\\\" ON \\\"shipments\\\" (\\\"id\\\", \\\"order_id\\\")"
+        ));
+        assert!(schema.contains(
+            "FOREIGN KEY (\\\"order_id\\\", \\\"line_no\\\") REFERENCES \\\"order_lines\\\" (\\\"order_id\\\", \\\"line_no\\\") ON DELETE CASCADE ON UPDATE RESTRICT"
+        ));
+        // Guarded, so that a restart does not fail on a constraint that exists.
+        assert!(schema.contains("conname = 'shipments_line_fk'"));
+        // Both tables exist before the foreign key that links them.
+        assert!(at("CREATE TABLE IF NOT EXISTS \\\"order_lines\\\"") < at("shipments_line_fk"));
+        assert!(at("CREATE INDEX IF NOT EXISTS") < at("FOREIGN KEY"));
+    }
+
+    #[test]
     fn routes_sharing_a_path_are_served_by_one_method_router() {
         let mut p = sample::orders();
         let mut delete = p.services[0].routes[1].clone();

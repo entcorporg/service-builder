@@ -510,6 +510,7 @@ impl<'a> Checker<'a> {
             }
             self.routes(s, &base);
             self.tables(s, &base);
+            self.table_constraints(s, &base);
 
             let mut rpc_names = HashSet::new();
             for (j, r) in s.rpcs.iter().enumerate() {
@@ -824,6 +825,195 @@ impl<'a> Checker<'a> {
                         "a default is one SQL expression (no `;`, no comment, no line break)",
                     );
                 }
+            }
+        }
+    }
+
+    /// Unique constraints, indexes and foreign keys. A unique constraint and an index are both
+    /// relations of the schema in Postgres: their names are shared with the tables of the service.
+    fn table_constraints(&mut self, s: &Service, base: &str) {
+        let mut relations: HashSet<String> = s.tables.iter().map(|t| t.name.clone()).collect();
+        relations.insert("outbox".into());
+        relations.insert("outbox_pending_idx".into());
+        relations.extend(s.tables.iter().map(|t| format!("{}_pkey", t.name)));
+
+        for (i, t) in s.tables.iter().enumerate() {
+            let tp = format!("{base}/tables/{i}");
+            let named =
+                t.uniques
+                    .iter()
+                    .enumerate()
+                    .map(|(j, u)| {
+                        (
+                            format!("{tp}/uniques/{j}"),
+                            "unique constraint",
+                            &u.name,
+                            &u.columns,
+                        )
+                    })
+                    .chain(
+                        t.indexes.iter().enumerate().map(|(j, x)| {
+                            (format!("{tp}/indexes/{j}"), "index", &x.name, &x.columns)
+                        }),
+                    );
+            for (path, what, name, columns) in named {
+                self.constraint_name(&path, what, name);
+                if !relations.insert(name.clone()) {
+                    self.error(
+                        "E_DUPLICATE_CONSTRAINT",
+                        format!("{path}/name"),
+                        format!(
+                            "`{name}` is already the name of a table, an index or a constraint of `{}`",
+                            s.name
+                        ),
+                    );
+                }
+                self.constraint_columns(&path, t, columns);
+            }
+
+            let mut fk_names = HashSet::new();
+            for (j, fk) in t.foreign_keys.iter().enumerate() {
+                let fp = format!("{tp}/foreignKeys/{j}");
+                self.constraint_name(&fp, "foreign key", &fk.name);
+                if !fk_names.insert(fk.name.as_str()) {
+                    self.error(
+                        "E_DUPLICATE_CONSTRAINT",
+                        format!("{fp}/name"),
+                        format!("foreign key `{}` is defined twice in `{}`", fk.name, t.name),
+                    );
+                }
+                self.foreign_key(s, t, &fp, fk);
+            }
+        }
+    }
+
+    /// Names end up quoted in DDL and are cut by Postgres beyond 63 bytes.
+    fn constraint_name(&mut self, path: &str, what: &str, name: &str) {
+        if !is_snake_ident(name) || name.len() > 63 {
+            self.error(
+                "E_CONSTRAINT_NAME",
+                format!("{path}/name"),
+                format!("{what} name `{name}` must be snake_case, 63 characters at most"),
+            );
+        }
+    }
+
+    /// At least one column, each of the table and named once.
+    fn constraint_columns(&mut self, path: &str, t: &Table, columns: &[String]) {
+        if columns.is_empty() {
+            self.error(
+                "E_CONSTRAINT_NO_COLUMNS",
+                format!("{path}/columns"),
+                "pick at least one column",
+            );
+        }
+        let mut seen = HashSet::new();
+        for (k, name) in columns.iter().enumerate() {
+            if t.column(name).is_none() {
+                self.error(
+                    "E_CONSTRAINT_UNKNOWN_COLUMN",
+                    format!("{path}/columns/{k}"),
+                    format!("table `{}` has no column `{name}`", t.name),
+                );
+            } else if !seen.insert(name.as_str()) {
+                self.error(
+                    "E_CONSTRAINT_DUPLICATE_COLUMN",
+                    format!("{path}/columns/{k}"),
+                    format!("column `{name}` is listed twice"),
+                );
+            }
+        }
+    }
+
+    fn foreign_key(&mut self, s: &Service, t: &Table, path: &str, fk: &ForeignKey) {
+        self.constraint_columns(path, t, &fk.columns);
+        let Some(target) = s.table(&fk.ref_table) else {
+            self.error(
+                "E_FK_UNKNOWN_TABLE",
+                format!("{path}/refTable"),
+                format!(
+                    "`{}` has no table `{}`: a foreign key stays within the database of its service",
+                    s.name, fk.ref_table
+                ),
+            );
+            return;
+        };
+        if fk.columns.len() != fk.ref_columns.len() {
+            self.error(
+                "E_FK_ARITY",
+                format!("{path}/refColumns"),
+                format!(
+                    "{} column(s) cannot reference {} column(s): pair them one to one",
+                    fk.columns.len(),
+                    fk.ref_columns.len()
+                ),
+            );
+            return;
+        }
+        let mut referenced_ok = true;
+        for (k, name) in fk.ref_columns.iter().enumerate() {
+            if target.column(name).is_none() {
+                referenced_ok = false;
+                self.error(
+                    "E_CONSTRAINT_UNKNOWN_COLUMN",
+                    format!("{path}/refColumns/{k}"),
+                    format!("table `{}` has no column `{name}`", target.name),
+                );
+            }
+        }
+        for (k, (from, to)) in fk.columns.iter().zip(&fk.ref_columns).enumerate() {
+            if let (Some(a), Some(b)) = (t.column(from), target.column(to))
+                && a.ty != b.ty
+            {
+                self.error(
+                    "E_FK_TYPE",
+                    format!("{path}/columns/{k}"),
+                    format!(
+                        "`{}.{from}` is {} but `{}.{to}` is {}: a foreign key pairs columns of the same type",
+                        t.name,
+                        a.ty.sql(),
+                        target.name,
+                        b.ty.sql()
+                    ),
+                );
+            }
+        }
+        if referenced_ok && !target.is_unique_key(&fk.ref_columns) {
+            self.error(
+                "E_FK_NOT_UNIQUE",
+                format!("{path}/refColumns"),
+                format!(
+                    "({}) is neither the primary key nor unique in `{}`: add a UNIQUE constraint on it first",
+                    fk.ref_columns.join(", "),
+                    target.name
+                ),
+            );
+        }
+        for (field, action) in [("onDelete", fk.on_delete), ("onUpdate", fk.on_update)] {
+            let columns = fk.columns.iter().filter_map(|c| t.column(c));
+            match action {
+                ReferentialAction::SetNull => {
+                    if let Some(c) = columns.clone().find(|c| !c.nullable) {
+                        self.error(
+                            "E_FK_SET_NULL",
+                            format!("{path}/{field}"),
+                            format!("SET NULL would null `{}`, which is not nullable", c.name),
+                        );
+                    }
+                }
+                ReferentialAction::SetDefault => {
+                    if let Some(c) = columns
+                        .clone()
+                        .find(|c| c.default.as_deref().is_none_or(|d| d.trim().is_empty()))
+                    {
+                        self.error(
+                            "E_FK_SET_DEFAULT",
+                            format!("{path}/{field}"),
+                            format!("SET DEFAULT needs a default on `{}`", c.name),
+                        );
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -1902,6 +2092,178 @@ mod tests {
         t.columns.clear();
         p.services[0].tables = vec![t];
         assert!(errors(&p).contains(&"E_TABLE_EMPTY".into()));
+    }
+
+    /// `order_lines` (keyed by `order_id, line_no`) and `shipments`, which points at one line.
+    fn with_composite_key() -> Project {
+        let mut p = sample::orders();
+        let key = |name: &str, ty| {
+            let mut c = Column::new(name, ty);
+            c.primary_key = true;
+            c
+        };
+        let mut payload = Column::new("payload", ColumnType::Jsonb);
+        payload.default = Some("'{}'::jsonb".into());
+        let lines = Table::new(
+            "order_lines",
+            vec![
+                key("order_id", ColumnType::String),
+                key("line_no", ColumnType::Int32),
+                payload,
+            ],
+        );
+        let mut shipments = Table::new(
+            "shipments",
+            vec![
+                key("id", ColumnType::Uuid),
+                Column::new("order_id", ColumnType::String),
+                Column::new("line_no", ColumnType::Int32),
+            ],
+        );
+        shipments.foreign_keys.push(ForeignKey {
+            name: "shipments_line_fk".into(),
+            columns: vec!["order_id".into(), "line_no".into()],
+            ref_table: "order_lines".into(),
+            ref_columns: vec!["order_id".into(), "line_no".into()],
+            on_delete: ReferentialAction::Cascade,
+            on_update: ReferentialAction::NoAction,
+        });
+        shipments.indexes.push(Index {
+            name: "shipments_order_idx".into(),
+            columns: vec!["order_id".into()],
+            unique: false,
+        });
+        shipments.uniques.push(UniqueConstraint {
+            name: "shipments_line_uq".into(),
+            columns: vec!["order_id".into(), "line_no".into()],
+        });
+        p.services[0].tables.extend([lines, shipments]);
+        p
+    }
+
+    #[test]
+    fn composite_foreign_keys_indexes_and_uniques_are_valid() {
+        let p = with_composite_key();
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+    }
+
+    #[test]
+    fn foreign_keys_are_checked() {
+        fn fk(p: &mut Project) -> &mut ForeignKey {
+            &mut p.services[0].tables[2].foreign_keys[0]
+        }
+        // (expected code, how to break the key, what it breaks)
+        type Case = (&'static str, fn(&mut ForeignKey), &'static str);
+        let cases: Vec<Case> = vec![
+            (
+                "E_FK_UNKNOWN_TABLE",
+                |f| f.ref_table = "nowhere".into(),
+                "table",
+            ),
+            (
+                "E_FK_ARITY",
+                |f| {
+                    f.ref_columns.pop();
+                },
+                "arity",
+            ),
+            (
+                "E_CONSTRAINT_UNKNOWN_COLUMN",
+                |f| f.columns[0] = "ghost".into(),
+                "column",
+            ),
+            (
+                "E_CONSTRAINT_UNKNOWN_COLUMN",
+                |f| f.ref_columns[0] = "ghost".into(),
+                "ref column",
+            ),
+            (
+                "E_CONSTRAINT_DUPLICATE_COLUMN",
+                |f| {
+                    f.columns[1] = "order_id".into();
+                    f.ref_columns[1] = "order_id".into();
+                },
+                "twice",
+            ),
+            // Half of the key does not identify a line.
+            (
+                "E_FK_NOT_UNIQUE",
+                |f| {
+                    f.columns.pop();
+                    f.ref_columns.pop();
+                },
+                "partial key",
+            ),
+            // `line_no` is an integer, `order_id` text.
+            (
+                "E_FK_TYPE",
+                |f| {
+                    f.ref_columns.swap(0, 1);
+                },
+                "type",
+            ),
+            (
+                "E_FK_SET_NULL",
+                |f| f.on_delete = ReferentialAction::SetNull,
+                "set null",
+            ),
+            (
+                "E_FK_SET_DEFAULT",
+                |f| f.on_update = ReferentialAction::SetDefault,
+                "set default",
+            ),
+            ("E_CONSTRAINT_NAME", |f| f.name = "Bad-Name".into(), "name"),
+        ];
+        for (code, change, what) in cases {
+            let mut p = with_composite_key();
+            change(fk(&mut p));
+            assert!(
+                errors(&p).contains(&code.to_string()),
+                "{what}: {:?}",
+                errors(&p)
+            );
+        }
+    }
+
+    #[test]
+    fn a_foreign_key_may_reference_a_unique_set_in_any_order() {
+        let mut p = with_composite_key();
+        // Not the primary key of the target, but a UNIQUE constraint on the same columns.
+        for c in &mut p.services[0].tables[1].columns[..2] {
+            c.primary_key = false;
+        }
+        assert!(errors(&p).contains(&"E_FK_NOT_UNIQUE".to_string()));
+        p.services[0].tables[1].uniques.push(UniqueConstraint {
+            name: "order_lines_uq".into(),
+            columns: vec!["line_no".into(), "order_id".into()],
+        });
+        assert!(
+            !errors(&p).contains(&"E_FK_NOT_UNIQUE".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+    }
+
+    #[test]
+    fn indexes_and_uniques_are_checked() {
+        let mut p = with_composite_key();
+        let t = &mut p.services[0].tables[2];
+        t.indexes[0].columns = vec![];
+        assert!(errors(&p).contains(&"E_CONSTRAINT_NO_COLUMNS".to_string()));
+        let t = &mut p.services[0].tables[2];
+        t.indexes[0].columns = vec!["ghost".into()];
+        assert!(errors(&p).contains(&"E_CONSTRAINT_UNKNOWN_COLUMN".to_string()));
+        // Constraints and indexes share one namespace with the tables.
+        let t = &mut p.services[0].tables[2];
+        t.indexes[0].columns = vec!["order_id".into()];
+        t.indexes[0].name = "shipments_line_uq".into();
+        assert!(errors(&p).contains(&"E_DUPLICATE_CONSTRAINT".to_string()));
+        let t = &mut p.services[0].tables[2];
+        t.indexes[0].name = "orders".into();
+        assert!(errors(&p).contains(&"E_DUPLICATE_CONSTRAINT".to_string()));
+        let t = &mut p.services[0].tables[2];
+        t.indexes[0].name = "x".repeat(64);
+        assert!(errors(&p).contains(&"E_CONSTRAINT_NAME".to_string()));
     }
 
     #[test]

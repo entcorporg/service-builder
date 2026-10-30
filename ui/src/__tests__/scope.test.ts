@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { exampleJson, exampleQuery } from '../json'
-import { addColumn, addTable, makeStep, renameColumn, renameTable, selectionForPath, addMessage, addRoute, addRpc, defaultStatus, pathParams, addTopic, autoMap, canConsume, canProduce, connectConsumer, consumersOf, declareProducer, removeService, renameService, renameField, renameMessage, renameTopic, nestable } from '../model'
-import { candidates, fits, inputScope, scalar, scopeAfter, scopesOf, sqlRowName, typeOfField } from '../scope'
+import { addColumn, addForeignKey, addIndex, addTable, addUnique, makeStep, retargetForeignKey, renameColumn, renameTable, selectionForPath, addMessage, addRoute, addRpc, defaultStatus, pathParams, addTopic, autoMap, canConsume, canProduce, connectConsumer, consumersOf, declareProducer, removeService, renameService, renameField, renameMessage, renameTopic, nestable } from '../model'
+import { createTableSql } from '../components/TablesView'
+import { candidates, columnType, fits, inputScope, scalar, scopeAfter, scopesOf, sqlRowName, typeOfField } from '../scope'
 import type { Project } from '../types'
 
 const project = (): Project => ({
@@ -353,5 +354,92 @@ describe('tables and the SQL block', () => {
     expect(step.where[0]!.column).toBe('id')
     expect(step.orderBy).toBe('total')
     expect(step.values[0]!.field).toBe('total')
+  })
+
+  const withLines = () => {
+    const { p, svc } = withOrders()
+    const lines = addTable(svc)
+    lines.name = 'order_lines'
+    lines.columns = [
+      { name: 'order_id', type: 'string', nullable: false, primaryKey: true, default: null },
+      { name: 'line_no', type: 'int32', nullable: false, primaryKey: true, default: null },
+    ]
+    const shipments = addTable(svc)
+    shipments.name = 'shipments'
+    shipments.columns = [
+      { name: 'id', type: 'uuid', nullable: false, primaryKey: true, default: 'gen_random_uuid()' },
+      { name: 'order_ref', type: 'string', nullable: true, primaryKey: false, default: null },
+      { name: 'line_no', type: 'int32', nullable: true, primaryKey: false, default: null },
+    ]
+    return { p, svc, lines, shipments }
+  }
+
+  it('starts a composite foreign key on the primary key of a table, with an unambiguous name', () => {
+    const { svc, shipments } = withLines()
+    const fk = addForeignKey(svc, shipments)!
+    // The first table that has a primary key is `orders` (one column): the rest is edited by hand.
+    expect(fk).toMatchObject({ refTable: 'orders', refColumns: ['order_id'], onDelete: 'noAction', onUpdate: 'noAction' })
+    retargetForeignKey(svc, shipments, fk, 'order_lines')
+    // Both key columns are paired, keeping the column already chosen for the first one.
+    expect(fk.refColumns).toEqual(['order_id', 'line_no'])
+    expect(fk.columns).toHaveLength(2)
+    expect(addForeignKey(svc, shipments)!.name).not.toBe(fk.name)
+  })
+
+  it('pairs a foreign key with the column of the same name and type, and never with its own key', () => {
+    const { svc, shipments } = withLines()
+    shipments.columns.push({ name: 'order_id', type: 'string', nullable: true, primaryKey: false, default: null })
+    expect(addForeignKey(svc, shipments)).toMatchObject({ columns: ['order_id'], refColumns: ['order_id'] })
+    // A table pointing at itself: `order_id` is the referenced side, so the first other string column is the referencing one.
+    const orders = svc.tables[0]!
+    expect(addForeignKey(svc, orders)).toMatchObject({ columns: ['note'], refColumns: ['order_id'] })
+  })
+
+  it('refuses to start a foreign key when no table has a primary key', () => {
+    const { svc, shipments } = withLines()
+    for (const t of svc.tables) for (const c of t.columns) c.primaryKey = false
+    expect(addForeignKey(svc, shipments)).toBeNull()
+  })
+
+  it('names the new constraints after the table and keeps the names apart', () => {
+    const { shipments } = withLines()
+    expect(addUnique(shipments)).toMatchObject({ name: 'shipments_id_uq', columns: ['id'] })
+    expect(addIndex(shipments)).toMatchObject({ name: 'shipments_id_idx', columns: ['id'], unique: false })
+    expect(addIndex(shipments).name).toBe('shipments_id_idx2')
+  })
+
+  it('follows a renamed table and a renamed column in the constraints, including those of other tables', () => {
+    const { p, svc, lines, shipments } = withLines()
+    shipments.uniques.push({ name: 'u', columns: ['order_ref', 'line_no'] })
+    shipments.indexes.push({ name: 'i', columns: ['line_no'], unique: false })
+    shipments.foreignKeys.push({ name: 'f', columns: ['order_ref', 'line_no'], refTable: 'order_lines', refColumns: ['order_id', 'line_no'], onDelete: 'cascade', onUpdate: 'noAction' })
+    renameColumn(p, 'Orders', 'shipments', 'line_no', 'line')
+    expect(shipments.uniques[0]!.columns).toEqual(['order_ref', 'line'])
+    expect(shipments.indexes[0]!.columns).toEqual(['line'])
+    expect(shipments.foreignKeys[0]!.columns).toEqual(['order_ref', 'line'])
+    // The referenced side is untouched: it is another table's `line_no`.
+    expect(shipments.foreignKeys[0]!.refColumns).toEqual(['order_id', 'line_no'])
+    renameColumn(p, 'Orders', 'order_lines', 'line_no', 'position')
+    expect(lines.columns.map((c) => c.name)).toEqual(['order_id', 'position'])
+    expect(shipments.foreignKeys[0]!.refColumns).toEqual(['order_id', 'position'])
+    renameTable(p, 'Orders', 'order_lines', 'lines')
+    expect(shipments.foreignKeys[0]!.refTable).toBe('lines')
+    expect(svc.tables.find((t) => t.name === 'lines')).toBe(lines)
+  })
+
+  it('types a jsonb column as text for the flows, like timestamps and uuids', () => {
+    expect(columnType({ name: 'meta', type: 'jsonb', nullable: true, primaryKey: false, default: null })).toEqual({ type: { kind: 'string' }, repeated: false, optional: true })
+  })
+
+  it('shows the constraints in the SQL of the table', () => {
+    const { shipments } = withLines()
+    shipments.uniques.push({ name: 'shipments_uq', columns: ['order_ref', 'line_no'] })
+    shipments.indexes.push({ name: 'shipments_idx', columns: ['order_ref'], unique: true })
+    shipments.foreignKeys.push({ name: 'shipments_fk', columns: ['order_ref', 'line_no'], refTable: 'order_lines', refColumns: ['order_id', 'line_no'], onDelete: 'cascade', onUpdate: 'setNull' })
+    expect(createTableSql(shipments).split('\n').slice(-3)).toEqual([
+      'ALTER TABLE shipments ADD CONSTRAINT shipments_uq UNIQUE (order_ref, line_no);',
+      'CREATE UNIQUE INDEX IF NOT EXISTS shipments_idx ON shipments (order_ref);',
+      'ALTER TABLE shipments ADD CONSTRAINT shipments_fk FOREIGN KEY (order_ref, line_no) REFERENCES order_lines (order_id, line_no) ON DELETE CASCADE ON UPDATE SET NULL;',
+    ])
   })
 })

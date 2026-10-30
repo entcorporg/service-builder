@@ -233,10 +233,11 @@ pub enum ColumnType {
     Double,
     Timestamp,
     Uuid,
+    Jsonb,
 }
 
 impl ColumnType {
-    pub const ALL: [ColumnType; 8] = [
+    pub const ALL: [ColumnType; 9] = [
         ColumnType::String,
         ColumnType::Bool,
         ColumnType::Int32,
@@ -245,6 +246,7 @@ impl ColumnType {
         ColumnType::Double,
         ColumnType::Timestamp,
         ColumnType::Uuid,
+        ColumnType::Jsonb,
     ];
 
     /// The PostgreSQL type.
@@ -258,13 +260,16 @@ impl ColumnType {
             ColumnType::Double => "DOUBLE PRECISION",
             ColumnType::Timestamp => "TIMESTAMPTZ",
             ColumnType::Uuid => "UUID",
+            ColumnType::Jsonb => "JSONB",
         }
     }
 
     /// The type a flow sees.
     pub fn field_type(self) -> FieldType {
         match self {
-            ColumnType::String | ColumnType::Timestamp | ColumnType::Uuid => FieldType::String,
+            ColumnType::String | ColumnType::Timestamp | ColumnType::Uuid | ColumnType::Jsonb => {
+                FieldType::String
+            }
             ColumnType::Bool => FieldType::Bool,
             ColumnType::Int32 => FieldType::Int32,
             ColumnType::Int64 => FieldType::Int64,
@@ -274,8 +279,12 @@ impl ColumnType {
     }
 
     /// Whether the database type differs from the text a flow reads and writes (it needs a cast).
+    /// A `jsonb` column is the JSON document as text.
     pub fn is_text_cast(self) -> bool {
-        matches!(self, ColumnType::Timestamp | ColumnType::Uuid)
+        matches!(
+            self,
+            ColumnType::Timestamp | ColumnType::Uuid | ColumnType::Jsonb
+        )
     }
 }
 
@@ -318,11 +327,120 @@ pub struct Table {
     pub name: String,
     #[serde(default)]
     pub columns: Vec<Column>,
+    /// `UNIQUE (a, b)`: the columns together identify at most one row.
+    #[serde(default)]
+    pub uniques: Vec<UniqueConstraint>,
+    #[serde(default)]
+    pub indexes: Vec<Index>,
+    /// Foreign keys, composite when they name several columns.
+    #[serde(default)]
+    pub foreign_keys: Vec<ForeignKey>,
 }
 
 impl Table {
+    pub fn new(name: impl Into<String>, columns: Vec<Column>) -> Self {
+        Self {
+            name: name.into(),
+            columns,
+            uniques: vec![],
+            indexes: vec![],
+            foreign_keys: vec![],
+        }
+    }
+
     pub fn column(&self, name: &str) -> Option<&Column> {
         self.columns.iter().find(|c| c.name == name)
+    }
+
+    /// The primary key, in the order of the columns.
+    pub fn primary_key(&self) -> Vec<&str> {
+        self.columns
+            .iter()
+            .filter(|c| c.primary_key)
+            .map(|c| c.name.as_str())
+            .collect()
+    }
+
+    /// Whether `columns` (in any order) are guaranteed unique: the primary key, a `UNIQUE`
+    /// constraint or a unique index made of exactly these columns. A foreign key may only
+    /// reference such a set.
+    pub fn is_unique_key(&self, columns: &[String]) -> bool {
+        let same = |other: &[&str]| {
+            other.len() == columns.len() && columns.iter().all(|c| other.contains(&c.as_str()))
+        };
+        same(&self.primary_key())
+            || self
+                .uniques
+                .iter()
+                .map(|u| &u.columns)
+                .chain(self.indexes.iter().filter(|i| i.unique).map(|i| &i.columns))
+                .any(|cols| same(&cols.iter().map(String::as_str).collect::<Vec<_>>()))
+    }
+}
+
+/// A named `UNIQUE` constraint. Postgres backs it with an index of the same name, so the name
+/// is shared with the indexes of the service.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UniqueConstraint {
+    pub name: String,
+    pub columns: Vec<String>,
+}
+
+/// A secondary index, optionally unique, on one or several columns (the order matters).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Index {
+    pub name: String,
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub unique: bool,
+}
+
+/// `FOREIGN KEY (columns) REFERENCES ref_table (ref_columns)`, within the database of the
+/// service. `columns[i]` points at `ref_columns[i]`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignKey {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub ref_table: String,
+    pub ref_columns: Vec<String>,
+    #[serde(default)]
+    pub on_delete: ReferentialAction,
+    #[serde(default)]
+    pub on_update: ReferentialAction,
+}
+
+/// What happens to the rows holding a foreign key when the row they point at is deleted or updated.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ReferentialAction {
+    #[default]
+    NoAction,
+    Restrict,
+    Cascade,
+    SetNull,
+    SetDefault,
+}
+
+impl ReferentialAction {
+    pub const ALL: [ReferentialAction; 5] = [
+        ReferentialAction::NoAction,
+        ReferentialAction::Restrict,
+        ReferentialAction::Cascade,
+        ReferentialAction::SetNull,
+        ReferentialAction::SetDefault,
+    ];
+
+    pub fn sql(self) -> &'static str {
+        match self {
+            ReferentialAction::NoAction => "NO ACTION",
+            ReferentialAction::Restrict => "RESTRICT",
+            ReferentialAction::Cascade => "CASCADE",
+            ReferentialAction::SetNull => "SET NULL",
+            ReferentialAction::SetDefault => "SET DEFAULT",
+        }
     }
 }
 

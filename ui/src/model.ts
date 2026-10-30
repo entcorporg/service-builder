@@ -1,7 +1,7 @@
 // Editing helpers on the project document: factories and rename cascades.
 // All mutate a draft (immer), never the live state.
 import { candidates, columnType, fits, type Scope, typeOfField } from './scope'
-import type { Assignment, Column, HttpMethod, Message, MessageKind, Project, Route, Service, Step, StepType, Table } from './types'
+import type { Assignment, Column, ForeignKey, HttpMethod, Index, Message, MessageKind, Project, Route, Service, Step, StepType, Table, UniqueConstraint } from './types'
 
 export function newId(): string {
   return crypto.randomUUID().slice(0, 8)
@@ -238,7 +238,7 @@ export function addRoute(p: Project, service: Service): Route {
 
 export function addTable(service: Service): Table {
   const id: Column = { name: 'id', type: 'uuid', nullable: false, primaryKey: true, default: 'gen_random_uuid()' }
-  const table: Table = { name: uniqueName('new_table', service.tables.map((t) => t.name)), columns: [id] }
+  const table: Table = { name: uniqueName('new_table', service.tables.map((t) => t.name)), columns: [id], uniques: [], indexes: [], foreignKeys: [] }
   service.tables.push(table)
   return table
 }
@@ -258,19 +258,29 @@ function serviceSteps(svc: Service): Step[][] {
 export function renameTable(p: Project, service: string, from: string, to: string) {
   const svc = p.services.find((s) => s.name === service)
   if (!svc) return
-  for (const t of svc.tables) if (t.name === from) t.name = to
+  for (const t of svc.tables) {
+    if (t.name === from) t.name = to
+    for (const fk of t.foreignKeys) if (fk.refTable === from) fk.refTable = to
+  }
   for (const steps of serviceSteps(svc))
     walkSteps(steps, (st) => {
       if (st.type === 'sql' && st.table === from) st.table = to
     })
 }
 
-/** Renames a column and the SQL steps that name it. Paths reading `row.from` are left to the validator. */
+/** Renames a column, the constraints that name it and the SQL steps. Paths reading `row.from` are left to the validator. */
 export function renameColumn(p: Project, service: string, table: string, from: string, to: string) {
   const svc = p.services.find((s) => s.name === service)
   if (!svc) return
-  for (const c of svc.tables.find((t) => t.name === table)?.columns ?? []) if (c.name === from) c.name = to
   const swap = (x: string) => (x === from ? to : x)
+  for (const t of svc.tables) {
+    if (t.name === table) {
+      for (const c of t.columns) if (c.name === from) c.name = to
+      for (const c of [...t.uniques, ...t.indexes, ...t.foreignKeys]) c.columns = c.columns.map(swap)
+    }
+    // A foreign key of any table of the service may point at the column.
+    for (const fk of t.foreignKeys) if (fk.refTable === table) fk.refColumns = fk.refColumns.map(swap)
+  }
   for (const steps of serviceSteps(svc))
     walkSteps(steps, (st) => {
       if (st.type !== 'sql' || st.table !== table) return
@@ -279,6 +289,68 @@ export function renameColumn(p: Project, service: string, table: string, from: s
       for (const v of st.values) v.field = swap(v.field)
       if (st.orderBy) st.orderBy = swap(st.orderBy)
     })
+}
+
+/**
+ * A unique constraint and an index share one namespace in Postgres, which cuts names beyond 63 characters. The default
+ * name starts with the table, which keeps tables apart; the validator catches the rare clash.
+ */
+function constraintName(table: Table, columns: string[], suffix: string): string {
+  const taken = [...table.uniques, ...table.indexes, ...table.foreignKeys].map((c) => c.name)
+  return uniqueName([table.name, ...columns, suffix].join('_').slice(0, 58), taken)
+}
+
+/** Constraints start on the first column, which the user then changes: an empty one would not be valid. */
+export function addUnique(table: Table): UniqueConstraint {
+  const columns = table.columns.slice(0, 1).map((c) => c.name)
+  const unique = { name: constraintName(table, columns, 'uq'), columns }
+  table.uniques.push(unique)
+  return unique
+}
+
+export function addIndex(table: Table): Index {
+  const columns = table.columns.slice(0, 1).map((c) => c.name)
+  const index = { name: constraintName(table, columns, 'idx'), columns, unique: false }
+  table.indexes.push(index)
+  return index
+}
+
+/** Points a foreign key at another table: it references that table's primary key, pairing the columns it already had. */
+export function retargetForeignKey(service: Service, table: Table, fk: ForeignKey, refTable: string) {
+  const target = service.tables.find((t) => t.name === refTable)
+  fk.refTable = refTable
+  const pk = target?.columns.filter((c) => c.primaryKey).map((c) => c.name) ?? []
+  fk.refColumns = pk.length ? pk : target?.columns.slice(0, 1).map((c) => c.name) ?? []
+  fk.columns = fk.refColumns.map((_, i) => fk.columns[i] ?? table.columns[i]?.name ?? '')
+}
+
+/**
+ * Starts a foreign key on the primary key of the first table that has one. Each referenced column is paired with a column of
+ * the same type, preferring the same name (`shipments.order_id` → `orders.order_id`); a table never starts by pointing its
+ * own key at itself.
+ */
+export function addForeignKey(service: Service, table: Table): ForeignKey | null {
+  const target = service.tables.find((t) => t.columns.some((c) => c.primaryKey))
+  if (!target) return null
+  const refColumns = target.columns.filter((c) => c.primaryKey).map((c) => c.name)
+  const used = new Set<string>()
+  const columns = refColumns.map((r) => {
+    const wanted = target.columns.find((c) => c.name === r)!.type
+    const fits = table.columns.filter((c) => c.type === wanted && !used.has(c.name) && !(table === target && c.primaryKey))
+    const name = (fits.find((c) => c.name === r) ?? fits[0])?.name ?? table.columns.find((c) => !used.has(c.name))?.name ?? ''
+    used.add(name)
+    return name
+  })
+  const fk: ForeignKey = {
+    name: constraintName(table, columns, 'fk'),
+    columns,
+    refTable: target.name,
+    refColumns,
+    onDelete: 'noAction',
+    onUpdate: 'noAction',
+  }
+  table.foreignKeys.push(fk)
+  return fk
 }
 
 export function addConsumer(p: Project, service: Service, topic = p.topics[0], base = 'on_event') {

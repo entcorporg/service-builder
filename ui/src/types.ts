@@ -53,7 +53,7 @@ export interface Assignment {
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
-export type ColumnType = 'string' | 'bool' | 'int32' | 'int64' | 'float' | 'double' | 'timestamp' | 'uuid'
+export type ColumnType = 'string' | 'bool' | 'int32' | 'int64' | 'float' | 'double' | 'timestamp' | 'uuid' | 'jsonb'
 
 export interface Column {
   name: string
@@ -64,10 +64,38 @@ export interface Column {
   default: string | null
 }
 
+/** A named `UNIQUE` constraint: the columns together identify at most one row. */
+export interface UniqueConstraint {
+  name: string
+  columns: string[]
+}
+
+/** A secondary index; the order of the columns matters. */
+export interface Index {
+  name: string
+  columns: string[]
+  unique: boolean
+}
+
+export type ReferentialAction = 'noAction' | 'restrict' | 'cascade' | 'setNull' | 'setDefault'
+
+/** `columns[i]` references `refColumns[i]` of `refTable`, in the same service. */
+export interface ForeignKey {
+  name: string
+  columns: string[]
+  refTable: string
+  refColumns: string[]
+  onDelete: ReferentialAction
+  onUpdate: ReferentialAction
+}
+
 /** A table of the database of a service. */
 export interface Table {
   name: string
   columns: Column[]
+  uniques: UniqueConstraint[]
+  indexes: Index[]
+  foreignKeys: ForeignKey[]
 }
 
 export type SqlOp = 'select' | 'insert' | 'update' | 'delete'
