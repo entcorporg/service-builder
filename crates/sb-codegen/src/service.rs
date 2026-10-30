@@ -832,16 +832,38 @@ fn http_rs(service: &Service) -> String {
             format!("Query({m}input): Query<pb::{}>,", r.request)
         });
         c.dedent();
-        c.open(format!(
-            ") -> Result<(StatusCode, Json<pb::{}>), ApiError>",
-            r.response
-        ));
+        let reply = needs_reply(r);
+        c.open(if reply {
+            ") -> Result<Response, ApiError>".to_string()
+        } else {
+            format!(
+                ") -> Result<(StatusCode, Json<pb::{}>), ApiError>",
+                r.response
+            )
+        });
         for param in &params {
             c.line(format!("input.{param} = param(&path, {param:?})?;"));
         }
         c.line(format!("flows::api::{}(&ctx, input)", r.name));
         c.line("    .await");
-        c.line(format!("    .map(|body| ({status}, Json(body)))"));
+        if reply {
+            c.line("    .map(|reply| {");
+            c.line(format!(
+                "        let status = reply.status.and_then(|s| StatusCode::from_u16(s).ok()).unwrap_or({status});"
+            ));
+            c.line("        let mut response = (status, Json(reply.body)).into_response();");
+            c.line("        for cookie in &reply.cookies {");
+            c.line(
+                "            if let Ok(value) = HeaderValue::from_str(&cookie.header_value()) {",
+            );
+            c.line("                response.headers_mut().append(axum::http::header::SET_COOKIE, value);");
+            c.line("            }");
+            c.line("        }");
+            c.line("        response");
+            c.line("    })");
+        } else {
+            c.line(format!("    .map(|body| ({status}, Json(body)))"));
+        }
         c.line("    .map_err(ApiError::from)");
         c.close();
     }
@@ -946,6 +968,7 @@ fn rpc_flows_rs(project: &Project, service: &Service) -> Result<String, CodegenE
             &mut scope,
             &r.steps,
             Some(&r.response),
+            false,
         )?;
         c.line("tx.commit().await?;");
         c.line(format!("Ok(pb::{}::default())", r.response));
@@ -954,15 +977,32 @@ fn rpc_flows_rs(project: &Project, service: &Service) -> Result<String, CodegenE
     Ok(c.finish())
 }
 
+/// Whether a route answers with a status or cookies of its own: its flow then returns a `Reply`.
+fn needs_reply(route: &sb_model::Route) -> bool {
+    let mut extras = false;
+    for step in &route.steps {
+        step.walk(&mut |s| {
+            extras |= matches!(s, Step::Respond { status, cookies, .. } if status.is_some() || !cookies.is_empty())
+        });
+    }
+    extras
+}
+
 fn api_flows_rs(project: &Project, service: &Service) -> Result<String, CodegenError> {
     let mut c =
         flows_header("One function per HTTP route, built from the steps drawn in the editor.");
     for r in &service.routes {
         c.blank();
         c.line(format!("/// `{} {}`", r.method.as_str(), r.path));
+        let reply = needs_reply(r);
+        let returns = if reply {
+            format!("eda_runtime::http::Reply<pb::{}>", r.response)
+        } else {
+            format!("pb::{}", r.response)
+        };
         c.open(format!(
-            "pub async fn {}(ctx: &Ctx, input: pb::{}) -> anyhow::Result<pb::{}>",
-            r.name, r.request, r.response
+            "pub async fn {}(ctx: &Ctx, input: pb::{}) -> anyhow::Result<{returns}>",
+            r.name, r.request
         ));
         begin(&mut c);
         let mut scope = Scope::with_input(&r.request);
@@ -973,9 +1013,17 @@ fn api_flows_rs(project: &Project, service: &Service) -> Result<String, CodegenE
             &mut scope,
             &r.steps,
             Some(&r.response),
+            reply,
         )?;
         c.line("tx.commit().await?;");
-        c.line(format!("Ok(pb::{}::default())", r.response));
+        c.line(if reply {
+            format!(
+                "Ok(eda_runtime::http::Reply::new(pb::{}::default()))",
+                r.response
+            )
+        } else {
+            format!("Ok(pb::{}::default())", r.response)
+        });
         c.close();
     }
     Ok(c.finish())
@@ -999,7 +1047,15 @@ fn consumer_flows_rs(project: &Project, service: &Service) -> Result<String, Cod
         ));
         begin(&mut c);
         let mut scope = Scope::with_input(&topic.message);
-        steps(&mut c, project, service, &mut scope, &cons.steps, None)?;
+        steps(
+            &mut c,
+            project,
+            service,
+            &mut scope,
+            &cons.steps,
+            None,
+            false,
+        )?;
         c.line("tx.commit().await?;");
         c.line("Ok(())");
         c.close();
@@ -1014,6 +1070,7 @@ fn steps(
     scope: &mut Scope,
     list: &[Step],
     response: Option<&str>,
+    reply: bool,
 ) -> Result<(), CodegenError> {
     for step in list {
         c.line(format!("// {}", describe(step)));
@@ -1097,21 +1154,68 @@ fn steps(
                 ..
             } => {
                 c.open(format!("if {}", condition_code(project, scope, condition)?));
-                steps(c, project, service, &mut scope.clone(), then, response)?;
+                steps(
+                    c,
+                    project,
+                    service,
+                    &mut scope.clone(),
+                    then,
+                    response,
+                    reply,
+                )?;
                 if !otherwise.is_empty() {
                     c.close_open("else");
-                    steps(c, project, service, &mut scope.clone(), otherwise, response)?;
+                    steps(
+                        c,
+                        project,
+                        service,
+                        &mut scope.clone(),
+                        otherwise,
+                        response,
+                        reply,
+                    )?;
                 }
                 c.close();
             }
-            Step::Respond { fields, .. } => {
+            Step::Respond {
+                fields,
+                status,
+                cookies,
+                ..
+            } => {
                 let response = response.ok_or_else(|| {
                     CodegenError::Internal("Respond used outside of an RPC handler".into())
                 })?;
                 let literal = struct_literal(project, scope, response, fields)?;
                 c.line(format!("let reply = {literal};"));
                 c.line("tx.commit().await?;");
-                c.line("return Ok(reply);");
+                if reply {
+                    let mut out = "eda_runtime::http::Reply::new(reply)".to_string();
+                    if let Some(status) = status {
+                        out.push_str(&format!(".status({status})"));
+                    }
+                    for cookie in cookies {
+                        out.push_str(&format!(
+                            ".cookie({})",
+                            cookie_code(project, scope, cookie)?
+                        ));
+                    }
+                    c.line(format!("return Ok({out});"));
+                } else {
+                    c.line("return Ok(reply);");
+                }
+            }
+            Step::RateLimit {
+                id,
+                key,
+                max,
+                window_secs,
+                ..
+            } => {
+                let key = lower(project, scope, key, &TypeRef::scalar(FieldType::String))?;
+                c.line(format!(
+                    "eda_runtime::rate_limit::check({id:?}, &({key}), {max}, {window_secs})?;"
+                ));
             }
             Step::Sql { .. } => sql_step(c, project, service, scope, step)?,
             Step::HashPassword { input, bind, .. } => {
@@ -1178,6 +1282,41 @@ fn steps(
         }
     }
     Ok(())
+}
+
+/// `Cookie::new(name, value)` with the attributes that differ from the safe defaults.
+fn cookie_code(
+    project: &Project,
+    scope: &Scope,
+    cookie: &sb_model::Cookie,
+) -> Result<String, CodegenError> {
+    let value = lower(
+        project,
+        scope,
+        &cookie.value,
+        &TypeRef::scalar(FieldType::String),
+    )?;
+    let mut out = format!("eda_runtime::http::Cookie::new({:?}, {value})", cookie.name);
+    if let Some(seconds) = cookie.max_age_secs {
+        out.push_str(&format!(".max_age({seconds})"));
+    }
+    if let Some(path) = &cookie.path {
+        out.push_str(&format!(".path({path:?})"));
+    }
+    if !cookie.http_only {
+        out.push_str(".http_only(false)");
+    }
+    if !cookie.secure {
+        out.push_str(".secure(false)");
+    }
+    match cookie.same_site {
+        sb_model::SameSite::Lax => {}
+        sb_model::SameSite::Strict => {
+            out.push_str(".same_site(eda_runtime::http::SameSite::Strict)")
+        }
+        sb_model::SameSite::None => out.push_str(".same_site(eda_runtime::http::SameSite::None)"),
+    }
+    Ok(out)
 }
 
 // ---- SQL step --------------------------------------------------------------------------
@@ -1453,6 +1592,9 @@ fn describe(step: &Step) -> String {
         Step::Branch { .. } => "branch".into(),
         Step::Respond { .. } => "respond".into(),
         Step::Fail { status, .. } => format!("fail {status}"),
+        Step::RateLimit {
+            max, window_secs, ..
+        } => format!("rate limit {max} per {window_secs}s"),
         Step::HashPassword { bind, .. } => format!("hash password into {bind}"),
         Step::VerifyPassword { bind, .. } => format!("verify password into {bind}"),
         Step::RandomToken { bind, .. } => format!("random token into {bind}"),

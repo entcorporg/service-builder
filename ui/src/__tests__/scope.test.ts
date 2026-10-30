@@ -39,7 +39,7 @@ const project = (): Project => ({
           response: 'Placed',
           steps: [
             { type: 'publish', id: 'a', topic: 'orders.placed', payload: [{ field: 'id', value: { kind: 'path', path: 'input.id' } }] },
-            { type: 'respond', id: 'b', fields: [{ field: 'id', value: { kind: 'path', path: 'input.id' } }] },
+            { type: 'respond', id: 'b', fields: [{ field: 'id', value: { kind: 'path', path: 'input.id' } }], status: null, cookies: [] },
           ],
         },
       ],
@@ -520,5 +520,20 @@ describe('password and token steps', () => {
     // Names stay free of those already in scope.
     const scope = { ...inputScope('Login'), token: scalar('string') }
     expect(makeStep('randomToken', p, scope, ctx)).toMatchObject({ bind: 'token2' })
+  })
+})
+
+describe('rate limit and the response of a route', () => {
+  const ctx = { service: 'Orders', response: 'Placed' }
+
+  it('counts by e-mail when the request has one, else for everyone', () => {
+    const p = project()
+    p.messages.push({ name: 'Login', kind: 'api', fields: [{ name: 'email', type: { kind: 'string' }, repeated: false, optional: false }] })
+    expect(makeStep('rateLimit', p, inputScope('Login'), ctx)).toMatchObject({ key: { kind: 'path', path: 'input.email' }, max: 5, windowSecs: 900 })
+    expect(makeStep('rateLimit', p, inputScope('Order'), ctx)).toMatchObject({ key: { kind: 'literal', value: 'global' } })
+  })
+
+  it('starts a response on the route status and with no cookie', () => {
+    expect(makeStep('respond', project(), inputScope('Order'), ctx)).toMatchObject({ status: null, cookies: [] })
   })
 })

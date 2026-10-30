@@ -12,6 +12,7 @@ const RUNTIME_LIB: &str = include_str!("../templates/runtime/lib.rs");
 const RUNTIME_OUTBOX: &str = include_str!("../templates/runtime/outbox.rs");
 const RUNTIME_DB: &str = include_str!("../templates/runtime/db.rs");
 const RUNTIME_CRYPTO: &str = include_str!("../templates/runtime/crypto.rs");
+const RUNTIME_RATE_LIMIT: &str = include_str!("../templates/runtime/rate_limit.rs");
 const RUNTIME_CARGO: &str = include_str!("../templates/runtime/Cargo.toml");
 
 pub fn files(project: &Project) -> Vec<GeneratedFile> {
@@ -33,6 +34,7 @@ pub fn files(project: &Project) -> Vec<GeneratedFile> {
         GeneratedFile::new("runtime/src/outbox.rs", RUNTIME_OUTBOX),
         GeneratedFile::new("runtime/src/db.rs", RUNTIME_DB),
         GeneratedFile::new("runtime/src/crypto.rs", RUNTIME_CRYPTO),
+        GeneratedFile::new("runtime/src/rate_limit.rs", RUNTIME_RATE_LIMIT),
     ]
 }
 

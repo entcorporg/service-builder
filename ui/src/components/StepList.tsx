@@ -2,12 +2,12 @@ import { useState } from 'react'
 import { declareProducer, makeStep, newId, STEP_LABELS } from '../model'
 import { candidates, isSimpleScalar, SCALARS, type Scope, scopeAfter, scopesOf, scalar } from '../scope'
 import { useStore } from '../store'
-import type { CmpOp, Condition, Diagnostic, Expr, FieldType, LogLevel, Project, Step, StepType } from '../types'
+import type { CmpOp, Cookie, Condition, Diagnostic, Expr, FieldType, LogLevel, Project, SameSite, Step, StepType } from '../types'
 import { AssignmentsEditor } from './AssignmentsEditor'
 import { ExprEditor } from './ExprEditor'
 import { Icon } from './Icon'
 import { OP_LABELS, SqlBody } from './SqlStep'
-import { Badge, Collapsible, Empty, IconButton } from './ui'
+import { Badge, Collapsible, Empty, IconButton, NumberInput } from './ui'
 
 export interface HandlerCtx {
   service: string
@@ -49,7 +49,7 @@ const FAIL_STATUSES: [number, string][] = [
   [503, 'indisponible'],
 ]
 
-const STEP_ORDER: StepType[] = ['publish', 'sql', 'callRpc', 'branch', 'let', 'log', 'respond', 'fail', 'hashPassword', 'verifyPassword', 'randomToken', 'sha256', 'code']
+const STEP_ORDER: StepType[] = ['publish', 'sql', 'callRpc', 'branch', 'let', 'log', 'respond', 'fail', 'rateLimit', 'hashPassword', 'verifyPassword', 'randomToken', 'sha256', 'code']
 
 export function StepList({ steps, base, scope, ctx, locate }: ListProps) {
   const project = useStore((s) => s.project)
@@ -101,7 +101,7 @@ function AddStep(props: { allowRespond: boolean; allowFail: boolean; onAdd: (t: 
       </button>
       {open && (
         <div className="widget-grid" role="menu">
-          {STEP_ORDER.filter((t) => (t !== 'respond' || props.allowRespond) && (t !== 'fail' || props.allowFail)).map((t) => (
+          {STEP_ORDER.filter((t) => (t !== 'respond' || props.allowRespond) && ((t !== 'fail' && t !== 'rateLimit') || props.allowFail)).map((t) => (
             <button
               key={t}
               type="button"
@@ -170,6 +170,8 @@ function summary(step: Step): string {
       return ''
     case 'fail':
       return `${step.status} ${step.message}`
+    case 'rateLimit':
+      return `${step.max} par ${step.windowSecs} s`
     case 'hashPassword':
     case 'randomToken':
     case 'sha256':
@@ -510,9 +512,32 @@ function StepBody(props: {
     case 'respond': {
       const u = as<'respond'>(props.update)
       return props.ctx.response ? (
-        <AssignmentsEditor message={props.ctx.response} assignments={step.fields} scope={scope} update={(fn) => u((s) => fn(s.fields))} />
+        <div className="stack">
+          <AssignmentsEditor message={props.ctx.response} assignments={step.fields} scope={scope} update={(fn) => u((s) => fn(s.fields))} />
+          {props.ctx.http && <RespondExtras step={step} update={u} scope={scope} />}
+        </div>
       ) : (
-        <Empty>« Répondre » n’a de sens que dans un RPC.</Empty>
+        <Empty>« Répondre » n’a de sens que dans un RPC ou une route.</Empty>
+      )
+    }
+
+    case 'rateLimit': {
+      const u = as<'rateLimit'>(props.update)
+      return (
+        <div className="stack">
+          <ExprEditor label="Clé" expr={step.key} target={TEXT} scope={scope} onChange={(v) => v && u((s) => (s.key = v))} />
+          <div className="form-row">
+            <NumberInput label="Essais maximum" min={1} value={step.max} onChange={(n) => u((s) => (s.max = n))} />
+            <small className="muted">essais en</small>
+            <NumberInput label="Fenêtre (secondes)" min={1} value={step.windowSecs} onChange={(n) => u((s) => (s.windowSecs = n))} />
+            <small className="muted">secondes</small>
+          </div>
+          <small className="muted">
+            Chaque essai est compté sous la clé (un e-mail, une adresse). Au-delà, la route répond <code>429</code> avec <code>Retry-After</code>.
+            Fenêtre glissante, comptée en mémoire dans chaque instance du service : avec plusieurs réplicas, la limite réelle est multipliée
+            d’autant.
+          </small>
+        </div>
       )
     }
 
@@ -572,6 +597,66 @@ function StepBody(props: {
 }
 
 const TEXT = scalar('string')
+
+const SUCCESS_STATUSES = [200, 201, 202]
+const SAME_SITE: { value: SameSite; label: string }[] = [
+  { value: 'lax', label: 'Lax (défaut)' },
+  { value: 'strict', label: 'Strict' },
+  { value: 'none', label: 'None (inter-sites)' },
+]
+
+/** What only an HTTP route can answer with: a success status of its own, and cookies. */
+function RespondExtras(props: { step: Extract<Step, { type: 'respond' }>; update: (fn: (s: Extract<Step, { type: 'respond' }>) => void) => void; scope: Scope }) {
+  const { step, update, scope } = props
+  const newCookie = (): Cookie => ({ name: 'session', value: { kind: 'literal', value: '' }, maxAgeSecs: null, httpOnly: true, secure: true, sameSite: 'lax', path: null })
+  return (
+    <div className="stack">
+      <div className="form-row">
+        <small className="muted">Statut</small>
+        <select aria-label="Statut de la réponse" value={step.status ?? ''} onChange={(e) => update((s) => (s.status = e.target.value === '' ? null : Number(e.target.value)))}>
+          <option value="">celui de la route</option>
+          {SUCCESS_STATUSES.map((n) => (
+            <option key={n} value={n}>{n}</option>
+          ))}
+        </select>
+      </div>
+      {step.cookies.map((c, i) => (
+        <div key={i} className="card" role="group" aria-label={`Cookie ${c.name}`}>
+          <div className="stack">
+            <div className="form-row">
+              <input className="mono" aria-label="Nom du cookie" value={c.name} spellCheck={false} onChange={(e) => update((s) => (s.cookies[i]!.name = e.target.value))} />
+              <IconButton icon="trash" title={`Supprimer le cookie ${c.name}`} danger onClick={() => update((s) => void s.cookies.splice(i, 1))} />
+            </div>
+            <ExprEditor label="Valeur du cookie" expr={c.value} target={TEXT} scope={scope} onChange={(v) => v && update((s) => (s.cookies[i]!.value = v))} />
+            <div className="form-row">
+              <label className="check" title="Sans durée, le cookie disparaît à la fermeture du navigateur">
+                <input type="checkbox" aria-label="Durée limitée" checked={c.maxAgeSecs !== null} onChange={(e) => update((s) => (s.cookies[i]!.maxAgeSecs = e.target.checked ? 900 : null))} /> expire après
+              </label>
+              {c.maxAgeSecs !== null && <NumberInput label="Durée du cookie (secondes)" min={0} value={c.maxAgeSecs} onChange={(n) => update((s) => (s.cookies[i]!.maxAgeSecs = n))} />}
+              {c.maxAgeSecs !== null && <small className="muted">secondes (0 supprime le cookie)</small>}
+            </div>
+            <div className="form-row">
+              <label className="check" title="Illisible par le JavaScript de la page">
+                <input type="checkbox" aria-label="HttpOnly" checked={c.httpOnly} onChange={(e) => update((s) => (s.cookies[i]!.httpOnly = e.target.checked))} /> HttpOnly
+              </label>
+              <label className="check" title="Envoyé en HTTPS seulement">
+                <input type="checkbox" aria-label="Secure" checked={c.secure} onChange={(e) => update((s) => (s.cookies[i]!.secure = e.target.checked))} /> Secure
+              </label>
+              <select aria-label="SameSite" value={c.sameSite} onChange={(e) => update((s) => (s.cookies[i]!.sameSite = e.target.value as SameSite))}>
+                {SAME_SITE.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </div>
+      ))}
+      <button type="button" className="link-btn" onClick={() => update((s) => void s.cookies.push(newCookie()))}>
+        + Ajouter un cookie
+      </button>
+    </div>
+  )
+}
 /** A stored hash may be absent: an unknown account. */
 const MAYBE_TEXT = { ...scalar('string'), optional: true }
 

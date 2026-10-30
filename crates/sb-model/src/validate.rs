@@ -1469,20 +1469,69 @@ impl<'a> Checker<'a> {
                 );
                 a && b
             }
-            Step::Respond { fields, .. } => {
+            Step::Respond {
+                fields,
+                status,
+                cookies,
+                ..
+            } => {
                 match env.handler {
                     Handler::Consumer => self.error(
                         "E_RESPOND_IN_CONSUMER",
                         path,
                         "Respond only makes sense in an RPC handler, consumers have nobody to answer",
                     ),
-                    Handler::Rpc { response } | Handler::Route { response } => {
+                    Handler::Rpc { response } => {
                         if let Some(msg) = p.message(response) {
                             self.assignments(msg, fields, scope, &format!("{path}/fields"));
                         }
+                        if status.is_some() || !cookies.is_empty() {
+                            self.error(
+                                "E_RESPOND_ROUTE_ONLY",
+                                path,
+                                "a status and cookies are HTTP: they only make sense in an HTTP route",
+                            );
+                        }
+                    }
+                    Handler::Route { response } => {
+                        if let Some(msg) = p.message(response) {
+                            self.assignments(msg, fields, scope, &format!("{path}/fields"));
+                        }
+                        self.respond_extras(path, scope, *status, cookies);
                     }
                 }
                 true
+            }
+            Step::RateLimit {
+                key,
+                max,
+                window_secs,
+                ..
+            } => {
+                if !matches!(env.handler, Handler::Route { .. }) {
+                    self.error(
+                        "E_RATE_LIMIT_OUTSIDE_ROUTE",
+                        path,
+                        "a rate limit answers 429 and `Retry-After`: it only makes sense in an HTTP route",
+                    );
+                }
+                if *max == 0 {
+                    self.error(
+                        "E_RATE_LIMIT_MAX",
+                        format!("{path}/max"),
+                        "at least one attempt must be allowed",
+                    );
+                }
+                if !(1..=86_400).contains(window_secs) {
+                    self.error(
+                        "E_RATE_LIMIT_WINDOW",
+                        format!("{path}/windowSecs"),
+                        "the window is 1 second to 24 hours (86400)",
+                    );
+                }
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, key, Some(&text), &format!("{path}/key"));
+                false
             }
             Step::HashPassword { input, bind, .. } => {
                 self.check_var_name(bind, &format!("{path}/bind"));
@@ -1568,6 +1617,70 @@ impl<'a> Checker<'a> {
                 }
                 false
             }
+        }
+    }
+
+    /// The status and the cookies a route can answer with.
+    fn respond_extras(
+        &mut self,
+        path: &str,
+        scope: &Scope,
+        status: Option<u16>,
+        cookies: &[Cookie],
+    ) {
+        if let Some(s) = status
+            && !matches!(s, 200..=202)
+        {
+            self.error(
+                "E_RESPOND_STATUS",
+                format!("{path}/status"),
+                format!("`{s}` is not a success status of a route (200, 201 or 202)"),
+            );
+        }
+        let text = TypeRef::scalar(FieldType::String);
+        let mut names = HashSet::new();
+        for (i, c) in cookies.iter().enumerate() {
+            let cp = format!("{path}/cookies/{i}");
+            // The characters of an HTTP token, the safe part of them.
+            if c.name.is_empty()
+                || !c
+                    .name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+            {
+                self.error(
+                    "E_COOKIE_NAME",
+                    format!("{cp}/name"),
+                    format!(
+                        "cookie name `{}` must be letters, digits, `_`, `-` or `.`",
+                        c.name
+                    ),
+                );
+            }
+            if !names.insert(c.name.as_str()) {
+                self.error(
+                    "E_COOKIE_DUPLICATE",
+                    format!("{cp}/name"),
+                    format!("cookie `{}` is set twice", c.name),
+                );
+            }
+            if c.same_site == SameSite::None && !c.secure {
+                self.error(
+                    "E_COOKIE_SAMESITE",
+                    format!("{cp}/sameSite"),
+                    "`SameSite=None` is only accepted by browsers on a `Secure` cookie",
+                );
+            }
+            if let Some(p) = &c.path
+                && (!p.starts_with('/') || p.bytes().any(|b| b <= b' ' || b == b';' || b == 0x7f))
+            {
+                self.error(
+                    "E_COOKIE_PATH",
+                    format!("{cp}/path"),
+                    "a cookie path starts with `/` and has no space, `;` or control character",
+                );
+            }
+            self.check_expr(scope, &c.value, Some(&text), &format!("{cp}/value"));
         }
     }
 
@@ -2272,6 +2385,8 @@ mod tests {
                         },
                     },
                 ],
+                status: None,
+                cookies: vec![],
             },
         ];
         assert!(errors(&p).is_empty(), "{:?}", errors(&p));
@@ -2649,6 +2764,147 @@ mod tests {
         assert!(errors(&p).is_empty(), "{:?}", errors(&p));
     }
 
+    fn respond_of(p: &mut Project) -> &mut Step {
+        route_of(p).steps.last_mut().unwrap()
+    }
+
+    #[test]
+    fn a_route_can_set_a_status_and_cookies() {
+        let mut p = sample::orders();
+        assert_eq!(
+            validate(&p),
+            vec![],
+            "the sample sets both: {:?}",
+            validate(&p)
+        );
+        let set = |p: &mut Project, f: &dyn Fn(&mut Cookie)| {
+            let Step::Respond { cookies, .. } = respond_of(p) else {
+                panic!("layout changed")
+            };
+            f(&mut cookies[0]);
+        };
+        // (expected code, how to break the cookie)
+        type Case<'a> = (&'a str, &'a dyn Fn(&mut Cookie));
+        let cases: [Case; 6] = [
+            ("E_COOKIE_NAME", &|c| c.name = "bad name;".into()),
+            ("E_COOKIE_NAME", &|c| c.name.clear()),
+            ("E_COOKIE_SAMESITE", &|c| {
+                (c.same_site, c.secure) = (SameSite::None, false)
+            }),
+            ("E_COOKIE_PATH", &|c| c.path = Some("no-slash".into())),
+            ("E_COOKIE_PATH", &|c| c.path = Some("/a; Domain=x".into())),
+            ("E_UNKNOWN_PATH", &|c| {
+                c.value = Expr::Path {
+                    path: "nope".into(),
+                }
+            }),
+        ];
+        for (code, change) in cases {
+            let mut p = p.clone();
+            set(&mut p, change);
+            assert!(
+                errors(&p).contains(&code.to_string()),
+                "{code}: {:?}",
+                errors(&p)
+            );
+        }
+        // `SameSite=None` is fine on a Secure cookie; a value must be text; names are not repeated.
+        set(&mut p, &|c| c.same_site = SameSite::None);
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        set(&mut p, &|c| {
+            c.value = Expr::Path {
+                path: "input.amount".into(),
+            }
+        });
+        assert!(errors(&p).contains(&"E_TYPE_MISMATCH".to_string()));
+        set(&mut p, &|c| {
+            c.value = Expr::Path {
+                path: "order_id".into(),
+            }
+        });
+        if let Step::Respond { cookies, .. } = respond_of(&mut p) {
+            cookies.push(cookies[0].clone());
+        }
+        assert!(errors(&p).contains(&"E_COOKIE_DUPLICATE".to_string()));
+        // Only success statuses.
+        if let Step::Respond {
+            cookies, status, ..
+        } = respond_of(&mut p)
+        {
+            cookies.pop();
+            *status = Some(404);
+        }
+        assert!(errors(&p).contains(&"E_RESPOND_STATUS".to_string()));
+    }
+
+    #[test]
+    fn a_status_and_cookies_are_for_routes_only() {
+        let mut p = sample::orders();
+        let step = Step::Respond {
+            id: "r".into(),
+            fields: vec![],
+            status: Some(201),
+            cookies: vec![],
+        };
+        p.services[0].rpcs[0].steps.push(step);
+        assert!(
+            errors(&p).contains(&"E_RESPOND_ROUTE_ONLY".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+    }
+
+    #[test]
+    fn a_rate_limit_is_checked() {
+        let mut p = sample::orders();
+        let limit = |max: u32, window_secs: u32, key: Expr| Step::RateLimit {
+            id: "rl".into(),
+            key,
+            max,
+            window_secs,
+        };
+        let lit = |v: &str| Expr::Literal { value: v.into() };
+        let mut check = |step: Step, code: Option<&str>| {
+            route_of(&mut p).steps.insert(0, step);
+            let found = errors(&p);
+            route_of(&mut p).steps.remove(0);
+            match code {
+                None => assert!(found.is_empty(), "{found:?}"),
+                Some(c) => assert!(found.contains(&c.to_string()), "{c}: {found:?}"),
+            }
+        };
+        check(limit(5, 900, lit("k")), None);
+        check(
+            limit(
+                5,
+                900,
+                Expr::Raw {
+                    code: "input.items.join(\",\")".into(),
+                },
+            ),
+            None,
+        );
+        check(limit(0, 900, lit("k")), Some("E_RATE_LIMIT_MAX"));
+        check(limit(5, 0, lit("k")), Some("E_RATE_LIMIT_WINDOW"));
+        check(limit(5, 86_401, lit("k")), Some("E_RATE_LIMIT_WINDOW"));
+        // The key is text: a number is refused.
+        check(
+            limit(
+                5,
+                60,
+                Expr::Path {
+                    path: "input.amount".into(),
+                },
+            ),
+            Some("E_TYPE_MISMATCH"),
+        );
+        // 429 and Retry-After are HTTP.
+        p.services[0].rpcs[0]
+            .steps
+            .insert(0, limit(5, 60, lit("k")));
+        assert!(errors(&p).contains(&"E_RATE_LIMIT_OUTSIDE_ROUTE".to_string()));
+    }
+
     #[test]
     fn a_table_without_a_primary_key_warns() {
         let mut p = sample::orders();
@@ -2705,7 +2961,7 @@ mod tests {
     #[test]
     fn an_insert_gives_every_column_that_has_no_default() {
         let mut p = sample::orders();
-        if let Step::Sql { values, .. } = sql_step(&mut p, 0, 2) {
+        if let Step::Sql { values, .. } = sql_step(&mut p, 0, 3) {
             values.retain(|a| a.field != "amount");
         }
         assert!(errors(&p).contains(&"E_SQL_MISSING_VALUE".into()));
@@ -2720,7 +2976,7 @@ mod tests {
                 conditions,
                 values,
                 ..
-            } = sql_step(&mut p, 0, 2)
+            } = sql_step(&mut p, 0, 3)
             {
                 *o = op;
                 conditions.clear();
@@ -2777,6 +3033,8 @@ mod tests {
         p.services[1].consumers[0].steps.push(Step::Respond {
             id: "x".into(),
             fields: vec![],
+            status: None,
+            cookies: vec![],
         });
         assert!(errors(&p).contains(&"E_RESPOND_IN_CONSUMER".into()));
     }

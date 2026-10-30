@@ -7,6 +7,7 @@
 pub mod crypto;
 pub mod db;
 pub mod outbox;
+pub mod rate_limit;
 
 pub use outbox::connect as connect_database;
 
@@ -65,6 +66,166 @@ pub mod http {
     }
 
     impl std::error::Error for HttpError {}
+
+    /// `Set-Cookie`: safe by default (`HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Cookie {
+        pub name: String,
+        pub value: String,
+        pub max_age_secs: Option<u64>,
+        pub path: String,
+        pub http_only: bool,
+        pub secure: bool,
+        pub same_site: SameSite,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum SameSite {
+        Lax,
+        Strict,
+        None,
+    }
+
+    impl Cookie {
+        pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
+            Self {
+                name: name.into(),
+                value: value.into(),
+                max_age_secs: None,
+                path: "/".to_string(),
+                http_only: true,
+                secure: true,
+                same_site: SameSite::Lax,
+            }
+        }
+
+        pub fn max_age(mut self, seconds: u64) -> Self {
+            self.max_age_secs = Some(seconds);
+            self
+        }
+
+        pub fn path(mut self, path: impl Into<String>) -> Self {
+            self.path = path.into();
+            self
+        }
+
+        pub fn http_only(mut self, yes: bool) -> Self {
+            self.http_only = yes;
+            self
+        }
+
+        pub fn secure(mut self, yes: bool) -> Self {
+            self.secure = yes;
+            self
+        }
+
+        pub fn same_site(mut self, same_site: SameSite) -> Self {
+            self.same_site = same_site;
+            self
+        }
+
+        /// The value of the `Set-Cookie` header. The cookie value is percent-encoded where needed, so that a
+        /// `;` in it cannot add attributes of its own.
+        pub fn header_value(&self) -> String {
+            let mut out = format!("{}={}", self.name, encode_value(&self.value));
+            if let Some(seconds) = self.max_age_secs {
+                out.push_str(&format!("; Max-Age={seconds}"));
+            }
+            out.push_str(&format!("; Path={}", self.path));
+            if self.http_only {
+                out.push_str("; HttpOnly");
+            }
+            if self.secure {
+                out.push_str("; Secure");
+            }
+            out.push_str(match self.same_site {
+                SameSite::Lax => "; SameSite=Lax",
+                SameSite::Strict => "; SameSite=Strict",
+                SameSite::None => "; SameSite=None",
+            });
+            out
+        }
+    }
+
+    /// The cookie-octets of RFC 6265, except `%`, which stands for an encoded byte.
+    fn encode_value(value: &str) -> String {
+        let mut out = String::with_capacity(value.len());
+        for b in value.bytes() {
+            let plain = matches!(b, 0x21 | 0x23..=0x24 | 0x26..=0x2B | 0x2D..=0x3A | 0x3C..=0x5B | 0x5D..=0x7E);
+            if plain {
+                out.push(b as char);
+            } else {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        }
+        out
+    }
+
+    /// What a route answers when its `Respond` step sets a status or cookies: the body and the extras.
+    #[derive(Debug)]
+    pub struct Reply<T> {
+        pub body: T,
+        pub status: Option<u16>,
+        pub cookies: Vec<Cookie>,
+    }
+
+    impl<T> Reply<T> {
+        pub fn new(body: T) -> Self {
+            Self {
+                body,
+                status: None,
+                cookies: Vec::new(),
+            }
+        }
+
+        pub fn status(mut self, status: u16) -> Self {
+            self.status = Some(status);
+            self
+        }
+
+        pub fn cookie(mut self, cookie: Cookie) -> Self {
+            self.cookies.push(cookie);
+            self
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_session_cookie_is_safe_by_default() {
+            let header = Cookie::new("session", "abc123").max_age(900).header_value();
+            assert_eq!(header, "session=abc123; Max-Age=900; Path=/; HttpOnly; Secure; SameSite=Lax");
+        }
+
+        #[test]
+        fn attributes_can_be_relaxed_one_by_one() {
+            let header = Cookie::new("theme", "dark")
+                .http_only(false)
+                .secure(false)
+                .same_site(SameSite::Strict)
+                .path("/app")
+                .header_value();
+            assert_eq!(header, "theme=dark; Path=/app; SameSite=Strict");
+            assert!(Cookie::new("a", "b").same_site(SameSite::None).header_value().ends_with("; Secure; SameSite=None"));
+        }
+
+        #[test]
+        fn a_value_cannot_add_attributes() {
+            let header = Cookie::new("x", "a; Domain=evil.example, b=c \"q\"\r\n é%").header_value();
+            let value = header.split("; Path=").next().unwrap();
+            assert!(!value.contains(';') && !value.contains(' ') && !value.contains('"') && !value.contains('\r'), "{value}");
+            assert_eq!(value, "x=a%3B%20Domain=evil.example%2C%20b=c%20%22q%22%0D%0A%20%C3%A9%25");
+        }
+
+        #[test]
+        fn a_reply_carries_status_and_cookies() {
+            let reply = Reply::new("body").status(201).cookie(Cookie::new("a", "1")).cookie(Cookie::new("b", "2"));
+            assert_eq!(reply.status, Some(201));
+            assert_eq!(reply.cookies.len(), 2);
+        }
+    }
 }
 
 use std::future::Future;
