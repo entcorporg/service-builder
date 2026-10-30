@@ -420,6 +420,8 @@ export function makeStep(type: StepType, p: Project, scope: Scope, ctx: { servic
         id,
         name: uniqueName('value', Object.keys(scope)),
         valueType: { kind: 'string' },
+        optional: false,
+        repeated: false,
         value: { kind: 'literal', value: '' },
       }
     case 'publish': {

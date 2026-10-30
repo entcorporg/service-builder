@@ -69,6 +69,16 @@ typés (`sb-model/src/typing.rs`) : un chemin se résout champ par champ, et il 
 même type, ou s'il s'élargit en `optional`. Les messages étant des `Option<Msg>` en prost, lire à travers un message
 absent donne la valeur par défaut (`.as_ref().map(..).unwrap_or_default()`).
 
+Un **`uuid`** est un texte (`string` en protobuf, `String` en Rust) qui a son propre type dans l'éditeur : un littéral
+doit être un UUID bien formé (`8-4-4-4-12` chiffres hexadécimaux, sinon `E_TYPE_MISMATCH`), et une colonne `uuid` se
+lit comme un `uuid`. Il se convertit librement vers et depuis `string` (les deux sont du texte, et refuser aurait cassé
+les projets qui écrivent un texte dans une colonne `uuid`) : un texte qui n'en est pas un échoue à l'exécution, au
+cast `$n::uuid` de la base. L'étape **Variable** (`let`) porte les indicateurs `optional` (`Option<T>`, le littéral
+`null` pour « absent ») et `repeated` (`Vec<T>`, un tableau JSON pour littéral), jamais les deux (`E_LET_TYPE`) ; un
+schéma peut être une liste mais jamais optionnel, sa présence étant implicite. Les chemins vers une variable
+optionnelle ou liste suivent les règles ci-dessus : une valeur simple s'élargit en optionnelle, une liste ne remplit
+qu'une liste.
+
 Le Rust brut n'est pas typé : c'est l'échappatoire. Sa syntaxe est tout de même vérifiée avec `syn`, avec le chemin
 exact de l'étape fautive.
 
@@ -190,7 +200,7 @@ index unique de la table cible, dans n'importe quel ordre (`E_FK_NOT_UNIQUE`) ; 
 (`E_FK_SET_NULL`) et `setDefault` des colonnes avec défaut (`E_FK_SET_DEFAULT`). Dans la vue Tables, ces diagnostics
 s'affichent sous la contrainte concernée, et renommer une table ou une colonne suit les contraintes qui la citent.
 
-Une colonne **`jsonb`** est un document JSON que les flux voient comme du texte, comme `timestamp` et `uuid` : lue avec
+Une colonne **`jsonb`** est un document JSON que les flux voient comme du texte, comme `timestamp` : lue avec
 `col::text`, écrite avec `$n::jsonb` (un texte qui n'est pas du JSON fait échouer la requête à l'exécution, Postgres le
 refuse). Postgres normalise le document (l'ordre des clés n'est pas conservé).
 
@@ -198,8 +208,8 @@ Le bloc **SQL** est un bloc de logique à part entière. Il lit une table du ser
 
 - **Lire** : on coche les colonnes. Le bloc est **prédictif** : la variable (`order`) est typée d'après les colonnes
   cochées, donc `order.status` est proposé dans les étapes suivantes (et refusé si la colonne n'est plus cochée,
-  `E_UNKNOWN_PATH`). Une colonne nullable donne un champ optionnel ; `timestamp`, `uuid` et `jsonb` se lisent en
-  texte (ISO 8601 pour les dates). Une seule ligne (`404` si aucune ne correspond) ou **plusieurs** (liste, à convertir vers
+  `E_UNKNOWN_PATH`). Une colonne nullable donne un champ optionnel ; `timestamp` et `jsonb` se lisent en
+  texte (ISO 8601 pour les dates), `uuid` comme un `uuid`. Une seule ligne (`404` si aucune ne correspond) ou **plusieurs** (liste, à convertir vers
   un schéma avec « Vers un schéma » : les colonnes de même nom remplissent ses champs, `E_SQL_INTO_FIELD` sinon),
   avec tri et limite. À la création du bloc, la condition est déjà posée : la clé primaire est rapprochée de la
   valeur de même nom dans la requête (`order_id = input.order_id`).

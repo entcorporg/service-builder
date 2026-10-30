@@ -145,12 +145,26 @@ pub enum FieldType {
     Double,
     Bytes,
     Timestamp,
-    Message { name: String },
+    /// A UUID in its text form: a `string` on the wire and in the generated Rust, but a type of its own
+    /// in the editor, which checks the literals. Paths convert to and from `string` freely.
+    Uuid,
+    Message {
+        name: String,
+    },
 }
 
 impl FieldType {
     pub fn is_message(&self) -> bool {
         matches!(self, FieldType::Message { .. })
+    }
+
+    /// Whether a value of type `from` can fill a `to`: the same type, or `uuid` and `string`, which are both text.
+    pub fn assignable_from(&self, from: &FieldType) -> bool {
+        self == from
+            || matches!(
+                (self, from),
+                (FieldType::Uuid, FieldType::String) | (FieldType::String, FieldType::Uuid)
+            )
     }
 }
 
@@ -267,9 +281,8 @@ impl ColumnType {
     /// The type a flow sees.
     pub fn field_type(self) -> FieldType {
         match self {
-            ColumnType::String | ColumnType::Timestamp | ColumnType::Uuid | ColumnType::Jsonb => {
-                FieldType::String
-            }
+            ColumnType::String | ColumnType::Timestamp | ColumnType::Jsonb => FieldType::String,
+            ColumnType::Uuid => FieldType::Uuid,
             ColumnType::Bool => FieldType::Bool,
             ColumnType::Int32 => FieldType::Int32,
             ColumnType::Int64 => FieldType::Int64,
@@ -536,6 +549,12 @@ pub enum Step {
         name: String,
         #[serde(rename = "valueType")]
         value_type: FieldType,
+        /// `Option<T>`: the value may be absent (`null` as a literal).
+        #[serde(default)]
+        optional: bool,
+        /// `Vec<T>`: a list (a JSON array as a literal).
+        #[serde(default)]
+        repeated: bool,
         value: Expr,
     },
     /// Publish an event on a topic.

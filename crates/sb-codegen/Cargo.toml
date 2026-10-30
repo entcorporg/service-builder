@@ -9,3 +9,6 @@ sb-model = { path = "../sb-model" }
 serde.workspace = true
 thiserror.workspace = true
 syn = { version = "3", features = ["full"] }
+
+[dev-dependencies]
+serde_json.workspace = true

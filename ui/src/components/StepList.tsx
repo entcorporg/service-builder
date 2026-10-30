@@ -28,6 +28,15 @@ interface ListProps {
   locate: (p: Project) => Step[]
 }
 
+/** The literal a new variable starts with: valid for its type, so that the project stays valid while it is edited. */
+function literalDefault(kind: string, repeated: boolean): string | number | boolean | unknown[] {
+  if (repeated) return []
+  if (kind === 'bool') return false
+  if (kind === 'string') return ''
+  if (kind === 'uuid') return '00000000-0000-0000-0000-000000000000'
+  return 0
+}
+
 const FAIL_STATUSES: [number, string][] = [
   [400, 'requête invalide'],
   [401, 'non authentifié'],
@@ -312,7 +321,7 @@ function StepBody(props: {
                     s.value = { kind: 'raw', code: `pb::${name} { ..Default::default() }` }
                   } else {
                     s.valueType = { kind: e.target.value } as FieldType
-                    s.value = { kind: 'literal', value: e.target.value === 'bool' ? false : e.target.value === 'string' ? '' : 0 }
+                    s.value = { kind: 'literal', value: literalDefault(e.target.value, s.repeated) }
                   }
                 })
               }
@@ -330,6 +339,34 @@ function StepBody(props: {
                 </optgroup>
               )}
             </select>
+          </div>
+          <div className="form-row">
+            <label className="check" title="La valeur peut être absente (Option)">
+              <input
+                type="checkbox"
+                aria-label="Optionnel"
+                checked={step.optional && !step.repeated}
+                disabled={step.repeated || step.valueType.kind === 'message'}
+                onChange={(e) => u((s) => (s.optional = e.target.checked))}
+              />{' '}
+              optionnel
+            </label>
+            <label className="check" title="Une liste de valeurs (Vec)">
+              <input
+                type="checkbox"
+                aria-label="Liste"
+                checked={step.repeated}
+                onChange={(e) =>
+                  u((s) => {
+                    s.repeated = e.target.checked
+                    s.optional = false
+                    // A schema list stays built with Rust; for the others the old literal no longer has the right shape.
+                    if (s.valueType.kind !== 'message') s.value = { kind: 'literal', value: literalDefault(s.valueType.kind, s.repeated) }
+                  })
+                }
+              />{' '}
+              liste
+            </label>
           </div>
           {step.valueType.kind === 'message' ? (
             <>
@@ -350,7 +387,7 @@ function StepBody(props: {
             <ExprEditor
               label="Valeur"
               expr={step.value}
-              target={scalar(step.valueType.kind)}
+              target={{ type: step.valueType, repeated: step.repeated, optional: step.optional && !step.repeated }}
               scope={scope}
               onChange={(v) => v && u((s) => (s.value = v))}
             />

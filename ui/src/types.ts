@@ -1,6 +1,6 @@
 // Mirror of the Rust model (crates/sb-model/src/project.rs). The JSON is camelCase.
 
-export type ScalarKind = 'string' | 'bool' | 'int32' | 'int64' | 'float' | 'double' | 'bytes' | 'timestamp'
+export type ScalarKind = 'string' | 'bool' | 'int32' | 'int64' | 'float' | 'double' | 'bytes' | 'timestamp' | 'uuid'
 
 export type FieldType = { kind: ScalarKind } | { kind: 'message'; name: string }
 
@@ -39,7 +39,8 @@ export interface Topic {
 
 export type Expr =
   | { kind: 'path'; path: string }
-  | { kind: 'literal'; value: string | number | boolean }
+  /** `null` is an absent optional value, an array a list. */
+  | { kind: 'literal'; value: string | number | boolean | null | unknown[] }
   | { kind: 'raw'; code: string }
 
 export type CmpOp = 'eq' | 'ne' | 'gt' | 'ge' | 'lt' | 'le'
@@ -109,7 +110,7 @@ export interface SqlCondition {
 
 export type Step =
   | { type: 'log'; id: string; level: LogLevel; message: string }
-  | { type: 'let'; id: string; name: string; valueType: FieldType; value: Expr }
+  | { type: 'let'; id: string; name: string; valueType: FieldType; optional: boolean; repeated: boolean; value: Expr }
   | { type: 'publish'; id: string; topic: string; payload: Assignment[] }
   | { type: 'callRpc'; id: string; service: string; method: string; request: Assignment[]; bind: string | null }
   | { type: 'branch'; id: string; condition: Condition; then: Step[]; otherwise: Step[] }

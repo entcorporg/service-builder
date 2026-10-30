@@ -316,6 +316,8 @@ mod tests {
                 value_type: FieldType::Message {
                     name: "OrderView".into(),
                 },
+                optional: false,
+                repeated: false,
                 value: Expr::Raw {
                     code: "{ pb::OrderView { order_id: input.order_id.clone(), ..Default::default() } }"
                         .into(),
@@ -558,6 +560,66 @@ mod tests {
         let api = file(&files, "services/orders/src/flows/api.rs");
         assert!(api.contains("HttpError::new(429, \"slow down\")"));
         assert!(api.contains("error.with_retry_after(u64::try_from(30).unwrap_or(0))"));
+    }
+
+    #[test]
+    fn variables_can_be_uuids_optional_or_lists() {
+        use sb_model::{Expr, FieldType, Step};
+        let mut p = sample::orders();
+        let var = |name: &str,
+                   ty: FieldType,
+                   optional: bool,
+                   repeated: bool,
+                   value: serde_json::Value| Step::Let {
+            id: format!("v_{name}"),
+            name: name.into(),
+            value_type: ty,
+            optional,
+            repeated,
+            value: Expr::Literal { value },
+        };
+        p.services[0].routes[1].steps.splice(
+            0..0,
+            [
+                var(
+                    "trace",
+                    FieldType::Uuid,
+                    false,
+                    false,
+                    "123e4567-e89b-12d3-a456-426614174000".into(),
+                ),
+                var(
+                    "limit",
+                    FieldType::Int64,
+                    true,
+                    false,
+                    serde_json::Value::Null,
+                ),
+                var(
+                    "tags",
+                    FieldType::String,
+                    false,
+                    true,
+                    serde_json::json!(["a", "b"]),
+                ),
+            ],
+        );
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&p)),
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        assert!(
+            api.contains(
+                "let trace: String = \"123e4567-e89b-12d3-a456-426614174000\".to_string();"
+            )
+        );
+        assert!(api.contains("let limit: Option<i64> = None;"));
+        assert!(
+            api.contains("let tags: Vec<String> = vec![\"a\".to_string(), \"b\".to_string()];")
+        );
     }
 
     #[test]

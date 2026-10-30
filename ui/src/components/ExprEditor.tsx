@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { type Candidate, candidates, fits, isMessage, isSimpleScalar, type Scope, type TypeRef, typeLabel } from '../scope'
 import type { Expr } from '../types'
 import { useStore } from '../store'
@@ -8,11 +8,13 @@ type Mode = 'unset' | 'path' | 'literal' | 'raw'
 const modeOf = (e: Expr | null): Mode => (e === null ? 'unset' : e.kind)
 
 /** What a literal can be typed as, given the field it fills. */
-function literalKind(target: TypeRef | null): 'string' | 'bool' | 'int' | 'float' | 'free' | 'none' {
+function literalKind(target: TypeRef | null): 'string' | 'bool' | 'int' | 'float' | 'free' | 'list' | 'none' {
   if (!target) return 'free'
-  if (target.repeated || isMessage(target.type)) return 'none'
+  if (isMessage(target.type)) return 'none'
+  if (target.repeated) return ['bytes', 'timestamp'].includes(target.type.kind) ? 'none' : 'list'
   switch (target.type.kind) {
     case 'string':
+    case 'uuid':
       return 'string'
     case 'bool':
       return 'bool'
@@ -37,7 +39,7 @@ function defaultFor(mode: Mode, target: TypeRef | null, options: Candidate[]): E
       return { kind: 'raw', code: '' }
     case 'literal': {
       const k = literalKind(target)
-      return { kind: 'literal', value: k === 'bool' ? false : k === 'int' || k === 'float' ? 0 : '' }
+      return { kind: 'literal', value: k === 'list' ? [] : k === 'bool' ? false : k === 'int' || k === 'float' ? 0 : '' }
     }
   }
 }
@@ -137,11 +139,32 @@ function LiteralInput(props: {
 }) {
   const kind = literalKind(props.target)
   const { value } = props.expr
-  const set = (v: string | number | boolean) => props.onChange({ kind: 'literal', value: v })
+  const set = (v: string | number | boolean | null | unknown[]) => props.onChange({ kind: 'literal', value: v })
   const aria = `${props.label} : valeur`
 
   if (kind === 'none') {
     return <span className="expr-value muted">Type non éditable ici, utilisez « Rust »</span>
+  }
+  if (kind === 'list') return <ListInput value={value} label={aria} onChange={set} />
+  // An optional value can be left out altogether: the literal is then `null`.
+  if (props.target?.optional) {
+    const present = { ...props.target, optional: false }
+    const absent = value === null
+    const initial = defaultFor('literal', present, [])
+    return (
+      <>
+        {absent ? <span className="expr-value muted">aucune valeur</span> : <LiteralInput {...props} target={present} />}
+        <label className="check" title="Ne pas donner de valeur">
+          <input
+            type="checkbox"
+            aria-label={`${props.label} : absent`}
+            checked={absent}
+            onChange={(e) => props.onChange(e.target.checked ? { kind: 'literal', value: null } : initial!)}
+          />{' '}
+          absent
+        </label>
+      </>
+    )
   }
   if (kind === 'bool') {
     return (
@@ -170,6 +193,39 @@ function LiteralInput(props: {
       value={String(value)}
       placeholder={kind === 'free' ? 'texte, nombre ou true/false' : 'texte'}
       onChange={(e) => set(kind === 'free' ? parseFree(e.target.value) : e.target.value)}
+    />
+  )
+}
+
+/** A list is written as a JSON array; the text is only applied once it parses as one. */
+function ListInput(props: { value: unknown; label: string; onChange: (v: unknown[]) => void }) {
+  const text = JSON.stringify(Array.isArray(props.value) ? props.value : [])
+  const [draft, setDraft] = useState(text)
+  useEffect(() => setDraft(text), [text])
+  const valid = (() => {
+    try {
+      return Array.isArray(JSON.parse(draft))
+    } catch {
+      return false
+    }
+  })()
+  return (
+    <input
+      className="expr-value mono"
+      aria-label={props.label}
+      aria-invalid={!valid}
+      value={draft}
+      spellCheck={false}
+      placeholder='["a", "b"]'
+      onChange={(e) => {
+        setDraft(e.target.value)
+        try {
+          const parsed = JSON.parse(e.target.value)
+          if (Array.isArray(parsed)) props.onChange(parsed)
+        } catch {
+          // Keep typing: the last valid list stays applied.
+        }
+      }}
     />
   )
 }

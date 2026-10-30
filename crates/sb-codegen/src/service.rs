@@ -1024,14 +1024,20 @@ fn steps(
             Step::Let {
                 name,
                 value_type,
+                optional,
+                repeated,
                 value,
                 ..
             } => {
-                let ty = TypeRef::scalar(value_type.clone());
+                let ty = TypeRef {
+                    ty: value_type.clone(),
+                    repeated: *repeated,
+                    optional: *optional && !*repeated,
+                };
                 let value = lower(project, scope, value, &ty)?;
                 c.line(format!(
                     "let {name}: {} = {value};",
-                    rust_let_type(value_type)
+                    rust_let_type(value_type, ty.optional, ty.repeated)
                 ));
                 scope.bind(name.clone(), ty);
             }

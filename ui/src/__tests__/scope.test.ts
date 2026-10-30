@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { exampleJson, exampleQuery } from '../json'
 import { addColumn, addForeignKey, addIndex, addTable, addUnique, makeStep, retargetForeignKey, renameColumn, renameTable, selectionForPath, addMessage, addRoute, addRpc, defaultStatus, pathParams, addTopic, autoMap, canConsume, canProduce, connectConsumer, consumersOf, declareProducer, removeService, renameService, renameField, renameMessage, renameTopic, nestable } from '../model'
 import { createTableSql } from '../components/TablesView'
-import { candidates, columnType, fits, inputScope, scalar, scopeAfter, scopesOf, sqlRowName, typeOfField } from '../scope'
+import { candidates, columnFieldType, columnType, fits, inputScope, scalar, scopeAfter, scopesOf, sqlRowName, typeOfField } from '../scope'
 import type { Project } from '../types'
 
 const project = (): Project => ({
@@ -74,7 +74,7 @@ describe('candidates and scopes', () => {
   it('binds variables for the steps that follow', () => {
     const p = project()
     const scopes = scopesOf(p, inputScope('Order'), [
-      { type: 'let', id: '1', name: 'total', valueType: { kind: 'int64' }, value: { kind: 'literal', value: 1 } },
+      { type: 'let', id: '1', name: 'total', valueType: { kind: 'int64' }, optional: false, repeated: false, value: { kind: 'literal', value: 1 } },
       { type: 'log', id: '2', level: 'info', message: '' },
     ])
     expect(Object.keys(scopes[0]!)).toEqual(['input'])
@@ -441,5 +441,40 @@ describe('tables and the SQL block', () => {
       'CREATE UNIQUE INDEX IF NOT EXISTS shipments_idx ON shipments (order_ref);',
       'ALTER TABLE shipments ADD CONSTRAINT shipments_fk FOREIGN KEY (order_ref, line_no) REFERENCES order_lines (order_id, line_no) ON DELETE CASCADE ON UPDATE SET NULL;',
     ])
+  })
+})
+
+describe('uuid, optional and list variables', () => {
+  const text = (kind: 'string' | 'uuid', extra: Partial<{ repeated: boolean; optional: boolean }> = {}) => ({ type: { kind }, repeated: false, optional: false, ...extra })
+
+  it('lets uuid and string fill each other, like the validator', () => {
+    expect(fits(text('uuid'), false, text('string'))).toBe(true)
+    expect(fits(text('string'), false, text('uuid'))).toBe(true)
+    expect(fits(text('uuid'), false, text('uuid', { optional: true }))).toBe(true)
+    // ...but a list of them is not one of them, and a number is neither.
+    expect(fits(text('uuid', { repeated: true }), false, text('string'))).toBe(false)
+    expect(fits({ type: { kind: 'int64' }, repeated: false, optional: false }, false, text('uuid'))).toBe(false)
+  })
+
+  it('reads a uuid column as a uuid, and the other text columns as text', () => {
+    expect(columnFieldType('uuid')).toEqual({ kind: 'uuid' })
+    expect(columnFieldType('timestamp')).toEqual({ kind: 'string' })
+    expect(columnFieldType('jsonb')).toEqual({ kind: 'string' })
+  })
+
+  it('binds a variable with the shape it was declared with', () => {
+    const p = project()
+    const let_ = (optional: boolean, repeated: boolean) =>
+      ({ type: 'let', id: '1', name: 'x', valueType: { kind: 'uuid' }, optional, repeated, value: { kind: 'literal', value: null } }) as const
+    expect(scopeAfter(p, inputScope('Order'), let_(true, false)).x).toEqual({ type: { kind: 'uuid' }, repeated: false, optional: true })
+    expect(scopeAfter(p, inputScope('Order'), let_(false, true)).x).toEqual({ type: { kind: 'uuid' }, repeated: true, optional: false })
+    // A list is never optional, whatever the file says.
+    expect(scopeAfter(p, inputScope('Order'), let_(true, true)).x).toMatchObject({ repeated: true, optional: false })
+  })
+
+  it('shows uuid fields as a uuid in the JSON example', () => {
+    const p = project()
+    p.messages.push({ name: 'Ref', kind: 'api', fields: [{ name: 'id', type: { kind: 'uuid' }, repeated: false, optional: false }] })
+    expect(exampleJson(p, 'Ref')).toContain('00000000-0000-0000-0000-000000000000')
   })
 })
