@@ -38,7 +38,7 @@ function literalDefault(kind: string, repeated: boolean): string | number | bool
 }
 
 
-const STEP_ORDER: StepType[] = ['publish', 'sql', 'callRpc', 'branch', 'let', 'log', 'respond', 'fail', 'rateLimit', 'verifyHmac', 'hashPassword', 'verifyPassword', 'randomToken', 'sha256', 'code']
+const STEP_ORDER: StepType[] = ['publish', 'sql', 'callRpc', 'branch', 'let', 'log', 'respond', 'fail', 'rateLimit', 'verifyHmac', 'encrypt', 'decrypt', 'hashPassword', 'verifyPassword', 'randomToken', 'sha256', 'code']
 
 export function StepList({ steps, base, scope, ctx, locate }: ListProps) {
   const project = useStore((s) => s.project)
@@ -167,6 +167,8 @@ function summary(step: Step): string {
     case 'hashPassword':
     case 'randomToken':
     case 'sha256':
+    case 'encrypt':
+    case 'decrypt':
       return `→ ${step.bind}`
     case 'verifyPassword':
       return `→ ${step.bind}`
@@ -564,6 +566,8 @@ function StepBody(props: {
     case 'verifyPassword':
     case 'randomToken':
     case 'sha256':
+    case 'encrypt':
+    case 'decrypt':
       return <SecretBody step={step} update={props.update} scope={scope} />
 
     case 'fail': {
@@ -679,7 +683,11 @@ function RespondExtras(props: { step: Extract<Step, { type: 'respond' }>; update
 /** A stored hash may be absent: an unknown account. */
 const MAYBE_TEXT = { ...scalar('string'), optional: true }
 
-const SECRET_HELP: Record<'hashPassword' | 'verifyPassword' | 'randomToken' | 'sha256', string> = {
+const SECRET_HELP: Record<'hashPassword' | 'verifyPassword' | 'randomToken' | 'sha256' | 'encrypt' | 'decrypt', string> = {
+  encrypt:
+    'AES-256-GCM. Le résultat est le nonce suivi du texte chiffré, en hexadécimal ; le nonce est aléatoire, donc le même texte ne donne jamais deux fois le même résultat. La clé est de 32 octets en 64 caractères hexadécimaux, dans la variable d’environnement : le service ne démarre pas sans elle.',
+  decrypt:
+    'Rend le texte scellé par « Chiffrer » avec la même clé. Une clé différente, une valeur tronquée ou modifiée est une erreur interne (500) : ce qui est stocké n’a pas été écrit par ce service, ou a été altéré.',
   hashPassword:
     'argon2id, calculé hors du runtime async (il est lent exprès). Le résultat est le texte $argon2id$… à stocker ; plus de 1 024 octets est refusé (400).',
   verifyPassword:
@@ -690,7 +698,7 @@ const SECRET_HELP: Record<'hashPassword' | 'verifyPassword' | 'randomToken' | 's
 
 /** The four steps that bind a variable from a secret: a password, a token or their hash. */
 function SecretBody(props: {
-  step: Extract<Step, { type: 'hashPassword' | 'verifyPassword' | 'randomToken' | 'sha256' }>
+  step: Extract<Step, { type: 'hashPassword' | 'verifyPassword' | 'randomToken' | 'sha256' | 'encrypt' | 'decrypt' }>
   update: Update
   scope: Scope
 }) {
@@ -705,13 +713,19 @@ function SecretBody(props: {
         </>
       ) : step.type !== 'randomToken' ? (
         <ExprEditor
-          label={step.type === 'hashPassword' ? 'Mot de passe' : 'Texte'}
+          label={step.type === 'hashPassword' ? 'Mot de passe' : step.type === 'decrypt' ? 'Texte chiffré' : 'Texte'}
           expr={step.input}
           target={TEXT}
           scope={scope}
           onChange={(v) => v && u((s) => 'input' in s && (s.input = v))}
         />
       ) : null}
+      {(step.type === 'encrypt' || step.type === 'decrypt') && (
+        <div className="form-row">
+          <span>Clé</span>
+          <input className="mono" aria-label="Variable d’environnement de la clé" value={step.keyEnv} spellCheck={false} onChange={(e) => u((s) => 'keyEnv' in s && (s.keyEnv = e.target.value))} />
+        </div>
+      )}
       <div className="form-row">
         <input className="mono" aria-label="Nom de la variable" value={step.bind} spellCheck={false} onChange={(e) => u((s) => (s.bind = e.target.value))} />
         <small className="muted">reçoit {step.type === 'verifyPassword' ? 'vrai ou faux' : 'le texte'}</small>

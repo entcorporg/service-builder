@@ -84,6 +84,14 @@ fn kind_label(kind: MessageKind) -> &'static str {
     }
 }
 
+/// An environment variable name: upper case letters, digits and `_`, starting with a letter.
+fn is_env_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_uppercase())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
 /// The longest period of a job: 30 days.
 const MAX_JOB_INTERVAL_SECS: u32 = 2_592_000;
 
@@ -1646,6 +1654,31 @@ impl<'a> Checker<'a> {
                 }
                 true
             }
+            Step::Encrypt {
+                key_env,
+                input,
+                bind,
+                ..
+            }
+            | Step::Decrypt {
+                key_env,
+                input,
+                bind,
+                ..
+            } => {
+                self.check_var_name(bind, &format!("{path}/bind"));
+                if !is_env_name(key_env) {
+                    self.error(
+                        "E_KEY_ENV",
+                        format!("{path}/keyEnv"),
+                        format!("`{key_env}` is not an environment variable name (e.g. `TOTP_ENCRYPTION_KEY`)"),
+                    );
+                }
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, input, Some(&text), &format!("{path}/input"));
+                scope.bind(bind.clone(), text);
+                false
+            }
             Step::VerifyHmac {
                 header,
                 secret_env,
@@ -1670,11 +1703,7 @@ impl<'a> Checker<'a> {
                         format!("`{header}` is not a header name (letters, digits and `-`)"),
                     );
                 }
-                if !secret_env.starts_with(|c: char| c.is_ascii_uppercase())
-                    || !secret_env
-                        .bytes()
-                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
-                {
+                if !is_env_name(secret_env) {
                     self.error(
                         "E_HMAC_SECRET_ENV",
                         format!("{path}/secretEnv"),
@@ -3552,6 +3581,54 @@ mod tests {
             "{:?}",
             errors(&p)
         );
+    }
+
+    fn with_seal() -> Project {
+        let mut p = sample::orders();
+        sample::add_sealed_text(&mut p);
+        p
+    }
+
+    #[test]
+    fn encrypt_and_decrypt_bind_a_text_and_name_their_key() {
+        let p = with_seal();
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+        let steps = |p: &mut Project| p.services[0].routes[2].steps.clone();
+        for key in ["notes_key", "NOTES-KEY", "1KEY", ""] {
+            let mut p = with_seal();
+            for step in &mut p.services[0].routes[2].steps {
+                if let Step::Encrypt { key_env, .. } | Step::Decrypt { key_env, .. } = step {
+                    *key_env = key.into();
+                }
+            }
+            assert!(
+                errors(&p).contains(&"E_KEY_ENV".to_string()),
+                "{key:?}: {:?}",
+                errors(&p)
+            );
+        }
+        // What goes in is a text; the result is one, which the next steps can read.
+        let mut p = with_seal();
+        if let Step::Encrypt { input, .. } = &mut p.services[0].routes[2].steps[0] {
+            *input = Expr::Path {
+                path: "nope".into(),
+            };
+        }
+        assert!(errors(&p).contains(&"E_UNKNOWN_PATH".to_string()));
+        let mut p = with_seal();
+        // `opened` is bound by the second step: reading it from the first is refused.
+        if let Step::Encrypt { input, .. } = &mut p.services[0].routes[2].steps[0] {
+            *input = Expr::Path {
+                path: "opened".into(),
+            };
+        }
+        assert!(errors(&p).contains(&"E_UNKNOWN_PATH".to_string()));
+        let mut p = with_seal();
+        if let Step::Decrypt { bind, .. } = &mut p.services[0].routes[2].steps[1] {
+            *bind = "tx".into();
+        }
+        assert!(errors(&p).contains(&"E_RESERVED_NAME".to_string()));
+        assert_eq!(steps(&mut with_seal()).len(), 3);
     }
 
     #[test]

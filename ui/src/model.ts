@@ -452,6 +452,8 @@ export const STEP_LABELS: Record<StepType, { label: string; hint: string }> = {
   callRpc: { label: 'Appeler un RPC', hint: 'Appeler un autre service en gRPC' },
   branch: { label: 'Condition', hint: 'Si … alors … sinon …' },
   respond: { label: 'Répondre', hint: 'Renvoyer la réponse du RPC' },
+  encrypt: { label: 'Chiffrer', hint: 'AES-256-GCM, pour ce qui est stocké (un secret TOTP, un jeton)' },
+  decrypt: { label: 'Déchiffrer', hint: 'Le texte qu’un bloc « Chiffrer » a scellé' },
   verifyHmac: { label: 'Vérifier une signature', hint: 'Webhook signé (HMAC-SHA256 du corps brut), sans session : toujours la première étape' },
   rateLimit: { label: 'Limiter le débit', hint: 'Au-delà de N essais par fenêtre : 429 et Retry-After' },
   hashPassword: { label: 'Hacher un mot de passe', hint: 'argon2id, hors du runtime async : le texte à stocker' },
@@ -532,6 +534,10 @@ export function makeStep(type: StepType, p: Project, scope: Scope, ctx: { servic
     }
     case 'respond':
       return { type, id, fields: ctx.response ? autoMap(p, scope, ctx.response) : [], status: null, cookies: [] }
+    case 'encrypt':
+      return { type, id, keyEnv: 'ENCRYPTION_KEY', input: firstText(p, scope, ['secret', 'text']), bind: uniqueName('sealed', Object.keys(scope)) }
+    case 'decrypt':
+      return { type, id, keyEnv: 'ENCRYPTION_KEY', input: firstText(p, scope, ['sealed', 'enc']), bind: uniqueName('opened', Object.keys(scope)) }
     case 'verifyHmac':
       return { type, id, header: 'Stripe-Signature', secretEnv: 'STRIPE_WEBHOOK_SECRET', toleranceSecs: 300 }
     case 'rateLimit':

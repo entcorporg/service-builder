@@ -81,6 +81,7 @@ tonic-prost-build = "0.14"
 tracing = "0.1"
 tracing-subscriber = {{ version = "0.3", features = ["env-filter"] }}
 uuid = {{ version = "1", features = ["v4"] }}
+aes-gcm = "0.10"
 argon2 = "0.6"
 sha2 = "0.11"
 rand = "0.10"

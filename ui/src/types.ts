@@ -131,6 +131,10 @@ export type Step =
   | { type: 'callRpc'; id: string; service: string; method: string; request: Assignment[]; bind: string | null }
   | { type: 'branch'; id: string; condition: Condition; then: Step[]; otherwise: Step[] }
   | { type: 'respond'; id: string; fields: Assignment[]; status: number | null; cookies: Cookie[] }
+  /** AES-256-GCM of `input`, with the key of the environment variable `keyEnv`: `hex(nonce || ciphertext)`. */
+  | { type: 'encrypt'; id: string; keyEnv: string; input: Expr; bind: string }
+  /** The text `encrypt` sealed; a wrong key or an altered value is an internal error. */
+  | { type: 'decrypt'; id: string; keyEnv: string; input: Expr; bind: string }
   /** First step of a webhook route: the HMAC of the raw body, in `header`, with the secret of `secretEnv`. */
   | { type: 'verifyHmac'; id: string; header: string; secretEnv: string; toleranceSecs: number }
   /** Past `max` attempts under `key` in `windowSecs`: a 429 with `Retry-After`. In memory, per process. */
