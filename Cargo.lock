@@ -3204,7 +3204,7 @@ dependencies = [
 
 [[package]]
 name = "sb-app"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "sb-codegen",
  "sb-model",
@@ -3214,7 +3214,7 @@ dependencies = [
 
 [[package]]
 name = "sb-codegen"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "sb-model",
  "serde",
@@ -3225,7 +3225,7 @@ dependencies = [
 
 [[package]]
 name = "sb-model"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "heck 0.5.0",
  "jsonschema",
@@ -3526,7 +3526,7 @@ dependencies = [
 
 [[package]]
 name = "service-builder"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "sb-app",
  "sb-model",
