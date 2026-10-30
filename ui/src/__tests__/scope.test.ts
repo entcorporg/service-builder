@@ -652,3 +652,16 @@ describe('signed webhooks', () => {
     })
   })
 })
+
+describe('encryption steps', () => {
+  const ctx = { service: 'Orders', response: null }
+  it('seal the secret of the request, and open what was just sealed', () => {
+    const p = project()
+    p.messages.push({ name: 'Totp', kind: 'api', fields: [{ name: 'secret', type: { kind: 'string' }, repeated: false, optional: false }] })
+    const seal = makeStep('encrypt', p, inputScope('Totp'), ctx)
+    expect(seal).toMatchObject({ type: 'encrypt', keyEnv: 'ENCRYPTION_KEY', input: { kind: 'path', path: 'input.secret' }, bind: 'sealed' })
+    const scope = scopeAfter(p, inputScope('Totp'), seal)
+    expect(scope.sealed).toEqual(scalar('string'))
+    expect(makeStep('decrypt', p, scope, ctx)).toMatchObject({ type: 'decrypt', input: { kind: 'path', path: 'sealed' }, bind: 'opened' })
+  })
+})

@@ -168,7 +168,7 @@ export function scopeAfter(project: Project, scope: Scope, step: Step): Scope {
   if (step.type === 'let' && step.name) {
     return { ...scope, [step.name]: { type: step.valueType, repeated: step.repeated, optional: step.optional && !step.repeated } }
   }
-  if ((step.type === 'hashPassword' || step.type === 'randomToken' || step.type === 'sha256' || step.type === 'verifyPassword') && step.bind) {
+  if ((step.type === 'hashPassword' || step.type === 'randomToken' || step.type === 'sha256' || step.type === 'verifyPassword' || step.type === 'encrypt' || step.type === 'decrypt') && step.bind) {
     return { ...scope, [step.bind]: scalar(step.type === 'verifyPassword' ? 'bool' : 'string') }
   }
   // A select, or a step that gives back the rows it wrote (`RETURNING`).

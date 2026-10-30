@@ -595,6 +595,42 @@ describe('editor', () => {
     await page.close()
   })
 
+  it('encrypts and decrypts a text with a key of the environment', async () => {
+    const { page } = await open()
+    await page.locator('.tree button.sub', { hasText: '/orders/{order_id}' }).click()
+    await page.locator('.endpoint').waitFor()
+    const add = async (name) => {
+      await page.locator('.add-step-btn').last().click()
+      await page.getByRole('menuitem', { name }).click()
+    }
+    await add(/^Chiffrer/)
+    await add(/^Déchiffrer/)
+    const step = (label) => page.locator('.card.step').filter({ has: page.locator('strong', { hasText: new RegExp(`^${label}$`) }) })
+    const seal = step('Chiffrer')
+    const open_ = step('Déchiffrer')
+    // What is opened starts on what was just sealed.
+    assert.equal(await open_.getByLabel('Texte chiffré : champ').inputValue(), 'sealed')
+    await seal.getByLabel('Texte : champ').selectOption('input.order_id')
+
+    // The key is an environment variable, written like one.
+    await seal.getByLabel('Variable d’environnement de la clé').fill('notes-key')
+    await settle(page)
+    assert.ok((await page.locator('.problems li').allInnerTexts()).some((t) => t.includes('E_KEY_ENV')))
+    await seal.getByLabel('Variable d’environnement de la clé').fill('NOTES_KEY')
+    await open_.getByLabel('Variable d’environnement de la clé').fill('NOTES_KEY')
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/flows/api.rs"]').click()
+    const code = await page.locator('.code-main pre').innerText()
+    assert.match(code, /let sealed: String = eda_runtime::crypto::encrypt\("NOTES_KEY", &input\.order_id\.clone\(\)\)\?;/)
+    assert.match(code, /let opened: String = eda_runtime::crypto::decrypt\("NOTES_KEY", &sealed\.clone\(\)\)\?;/)
+    await page.locator('[role="treeitem"][data-path="services/orders/src/app/config.rs"]').click()
+    assert.match(await page.locator('.code-main pre').innerText(), /eda_runtime::crypto::key\("NOTES_KEY"\)\?;/)
+    await page.close()
+  })
+
   it('hides events, proto schemas and topics while an endpoint is open', async () => {
     const { page } = await open()
     const tree = page.locator('.tree')

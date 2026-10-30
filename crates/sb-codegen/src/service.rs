@@ -346,6 +346,13 @@ fn config_rs(project: &Project, service: &Service, publishes: bool) -> String {
             c.line(format!("eda_runtime::webhook::secret({env:?})?;"));
         }
     }
+    let keys = encryption_keys(service);
+    if !keys.is_empty() {
+        c.line("// The encryption keys: a service that cannot read what it stored does not start.");
+        for env in &keys {
+            c.line(format!("eda_runtime::crypto::key({env:?})?;"));
+        }
+    }
     c.open("Ok(Self");
     c.line("brokers: eda_runtime::env_or(\"KAFKA_BROKERS\", \"localhost:9092\"),");
     let db_env = format!("{}_DATABASE_URL", shouty(&service.name));
@@ -1061,6 +1068,19 @@ fn hmac_of(route: &sb_model::Route) -> Option<(&str, &str, u32)> {
     }
 }
 
+/// The environment variables of the encryption keys a service uses, once each.
+fn encryption_keys(service: &Service) -> BTreeSet<&str> {
+    let mut keys = BTreeSet::new();
+    for step in service.handler_steps() {
+        step.walk(&mut |s| {
+            if let Step::Encrypt { key_env, .. } | Step::Decrypt { key_env, .. } = s {
+                keys.insert(key_env.as_str());
+            }
+        });
+    }
+    keys
+}
+
 /// The environment variables of the secrets of the signed webhooks of a service, once each.
 fn webhook_secrets(service: &Service) -> BTreeSet<&str> {
     service
@@ -1432,6 +1452,30 @@ fn steps(
                     "let {bind}: bool = eda_runtime::crypto::verify_password({password}, {stored}).await;"
                 ));
                 scope.bind(bind.clone(), TypeRef::scalar(FieldType::Bool));
+            }
+            Step::Encrypt {
+                key_env,
+                input,
+                bind,
+                ..
+            }
+            | Step::Decrypt {
+                key_env,
+                input,
+                bind,
+                ..
+            } => {
+                let function = if matches!(step, Step::Encrypt { .. }) {
+                    "encrypt"
+                } else {
+                    "decrypt"
+                };
+                let text = TypeRef::scalar(FieldType::String);
+                let input = lower(project, scope, input, &text)?;
+                c.line(format!(
+                    "let {bind}: String = eda_runtime::crypto::{function}({key_env:?}, &{input})?;"
+                ));
+                scope.bind(bind.clone(), text);
             }
             Step::RandomToken { bind, .. } => {
                 c.line(format!(
@@ -1807,6 +1851,8 @@ fn describe(step: &Step) -> String {
         Step::VerifyPassword { bind, .. } => format!("verify password into {bind}"),
         Step::RandomToken { bind, .. } => format!("random token into {bind}"),
         Step::Sha256 { bind, .. } => format!("sha256 into {bind}"),
+        Step::Encrypt { bind, .. } => format!("encrypt into {bind}"),
+        Step::Decrypt { bind, .. } => format!("decrypt into {bind}"),
         Step::Sql { op, table, .. } => format!(
             "sql {} {table}",
             match op {

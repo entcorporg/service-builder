@@ -887,6 +887,41 @@ mod tests {
     }
 
     #[test]
+    fn encryption_steps_read_their_key_from_the_environment_and_fail_fast() {
+        let mut p = sample::orders();
+        sample::add_sealed_text(&mut p);
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&p)),
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        assert!(api.contains("let sealed: String = eda_runtime::crypto::encrypt(\"NOTES_KEY\", &input.text.clone())?;"));
+        assert!(api.contains(
+            "let opened: String = eda_runtime::crypto::decrypt(\"NOTES_KEY\", &sealed.clone())?;"
+        ));
+        // Missing or malformed, the key stops the service at start-up, once however many steps use it.
+        let config = file(&files, "services/orders/src/app/config.rs");
+        assert_eq!(
+            config
+                .matches("eda_runtime::crypto::key(\"NOTES_KEY\")?;")
+                .count(),
+            1,
+            "{config}"
+        );
+        assert!(file(&files, "runtime/Cargo.toml").contains("aes-gcm.workspace = true"));
+        assert!(file(&files, "Cargo.toml").contains("aes-gcm = \"0.10\""));
+        assert!(
+            !file(
+                &generate(&sample::orders()).unwrap(),
+                "services/orders/src/app/config.rs"
+            )
+            .contains("crypto::key")
+        );
+    }
+
+    #[test]
     fn routes_sharing_a_path_are_served_by_one_method_router() {
         let mut p = sample::orders();
         let mut delete = p.services[0].routes[1].clone();

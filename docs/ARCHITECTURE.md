@@ -52,7 +52,7 @@ vérité : le canvas, l'inspecteur et le code généré en sont des vues.
   Un producteur sans étape *Publier* donne un avertissement. Les projets enregistrés avant (`schemaVersion` 1) sont
   migrés à l'ouverture : tout service qui publiait sur un topic en devient producteur.
 - **Services** : des RPC (gRPC), des routes HTTP, des consumers (Kafka) et des tâches planifiées. Chacun contient une **liste d'étapes**.
-- **Étapes** : `log`, `let`, `publish`, `callRpc`, `branch` (étapes imbriquées), `respond`, `fail`, `rateLimit` et `verifyHmac` (routes HTTP), `sql`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `code`.
+- **Étapes** : `log`, `let`, `publish`, `callRpc`, `branch` (étapes imbriquées), `respond`, `fail`, `rateLimit` et `verifyHmac` (routes HTTP), `sql`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `code`.
   Une liste d'étapes est un arbre (pas un graphe arbitraire) : cela se génère en Rust structuré et s'édite comme
   une pile de blocs, comme dans un page builder.
 
@@ -263,7 +263,7 @@ génération ; il n'est jamais écrit dans un fichier projet ni dans le `.proto`
 
 ### Mots de passe et jetons
 
-Quatre étapes lient une variable à partir d'un secret. Elles appellent le module fixe `eda_runtime::crypto`, livré dans le
+Six étapes lient une variable à partir d'un secret. Elles appellent le module fixe `eda_runtime::crypto`, livré dans le
 workspace généré (avec ses propres tests : `cargo test -p eda-runtime`), et valent dans tous les handlers.
 
 - **Hacher un mot de passe** (`hashPassword`) : argon2id, en `spawn_blocking` (il est lent exprès et gèlerait sinon les
@@ -275,6 +275,15 @@ workspace généré (avec ses propres tests : `cargo test -p eda-runtime`), et v
 - **Jeton aléatoire** (`randomToken`) : 256 bits en 64 caractères hexadécimaux.
 - **Empreinte SHA-256** (`sha256`) : 64 caractères hexadécimaux. Un jeton est déjà très aléatoire, un hash rapide suffit :
   on stocke l'empreinte, jamais le jeton.
+
+- **Chiffrer** / **Déchiffrer** (`encrypt`, `decrypt`) : AES-256-GCM, pour ce qui est stocké au repos (un secret TOTP, un
+  jeton d'API). Le résultat est `hex(nonce ‖ texte chiffré ‖ étiquette)` : le nonce est **aléatoire à chaque appel**, donc le
+  même texte ne donne jamais deux fois le même résultat. La clé fait 32 octets, en 64 caractères hexadécimaux, dans la
+  variable d'environnement `keyEnv` (`E_KEY_ENV`) : **le service ne démarre pas** si elle manque ou si elle est mal formée. Une
+  clé différente, une valeur tronquée ou la moindre altération (nonce, texte ou étiquette) est une erreur interne : ce qui est
+  stocké n'a pas été écrit par ce service, ou a été modifié. Le format est celui d'AES-GCM : le runtime déchiffre un texte
+  scellé par une autre implémentation (vérifié avec la bibliothèque `cryptography` de Python). Il n'y a pas de rotation de clé :
+  changer la clé rend illisible ce qui a été chiffré avec la précédente.
 
 Choix : l'empreinte est du **texte hexadécimal** (colonne `string`), pas un `bytea`, car les flux n'ont pas de type
 binaire ; la recherche d'un jeton se fait par `WHERE token_hash = …` dans un bloc SQL, sans étape de comparaison à part.

@@ -703,6 +703,25 @@ pub enum Step {
         input: Expr,
         bind: String,
     },
+    /// AES-256-GCM of a text, for what is stored at rest (a TOTP secret, an API token). The key is 32 bytes as 64
+    /// hexadecimal characters in the environment variable `key_env`. The result is `hex(nonce || ciphertext)` with
+    /// a random nonce, so the same text never gives the same result twice.
+    #[serde(rename_all = "camelCase")]
+    Encrypt {
+        id: String,
+        key_env: String,
+        input: Expr,
+        bind: String,
+    },
+    /// The text an `Encrypt` step sealed. A wrong key, a truncated or an altered value is an internal error (500):
+    /// what is stored was not written by this service, or has been tampered with.
+    #[serde(rename_all = "camelCase")]
+    Decrypt {
+        id: String,
+        key_env: String,
+        input: Expr,
+        bind: String,
+    },
     /// Authenticates a webhook by its signature, before the body is read as JSON: an HMAC-SHA256 of
     /// `"{timestamp}.{raw body}"`, sent in `header` as `t=<unix seconds>,v1=<hex>` (Stripe's scheme). A
     /// wrong, missing or stale signature (past `tolerance_secs`, which stops a replay) is a 401. It has
@@ -830,6 +849,8 @@ impl Step {
             | Step::Fail { id, .. }
             | Step::RateLimit { id, .. }
             | Step::VerifyHmac { id, .. }
+            | Step::Encrypt { id, .. }
+            | Step::Decrypt { id, .. }
             | Step::HashPassword { id, .. }
             | Step::VerifyPassword { id, .. }
             | Step::RandomToken { id, .. }

@@ -651,3 +651,45 @@ pub fn add_stripe_webhook(p: &mut Project) {
         ],
     });
 }
+
+/// Adds to the first service a route that seals a text with AES-256-GCM and opens it again, with a key of the
+/// environment (`NOTES_KEY`): what a TOTP secret goes through before it is stored.
+pub fn add_sealed_text(p: &mut Project) {
+    p.messages
+        .push(api("SealBody", vec![field("text", FieldType::String)]));
+    p.messages.push(api(
+        "SealedView",
+        vec![
+            field("sealed", FieldType::String),
+            field("opened", FieldType::String),
+        ],
+    ));
+    p.services[0].routes.push(Route {
+        name: "seal_text".into(),
+        method: HttpMethod::Post,
+        path: "/notes/seal".into(),
+        request: "SealBody".into(),
+        response: "SealedView".into(),
+        status: 200,
+        steps: vec![
+            Step::Encrypt {
+                id: "e1".into(),
+                key_env: "NOTES_KEY".into(),
+                input: path("input.text"),
+                bind: "sealed".into(),
+            },
+            Step::Decrypt {
+                id: "e2".into(),
+                key_env: "NOTES_KEY".into(),
+                input: path("sealed"),
+                bind: "opened".into(),
+            },
+            Step::Respond {
+                id: "e3".into(),
+                fields: vec![set("sealed", path("sealed")), set("opened", path("opened"))],
+                status: None,
+                cookies: vec![],
+            },
+        ],
+    });
+}
