@@ -287,6 +287,55 @@ describe('editor', () => {
     await page.close()
   })
 
+  it('declares uuid, optional and list variables', async () => {
+    const { page } = await open()
+    await page.locator('.tree button.sub', { hasText: '/orders/{order_id}' }).click()
+    await page.locator('.endpoint').waitFor()
+    const add = async () => {
+      await page.locator('.add-step-btn').first().click()
+      await page.getByRole('menuitem', { name: /Variable/ }).click()
+    }
+    const card = (n) => page.locator('.card.step', { hasText: 'Variable' }).nth(n)
+
+    // A uuid starts on a valid (nil) value; a malformed one is caught.
+    await add()
+    await card(0).getByLabel('Nom de la variable').fill('trace')
+    await card(0).getByLabel('Type', { exact: true }).selectOption('uuid')
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+    await card(0).getByLabel('Valeur : valeur').fill('not-a-uuid')
+    await settle(page)
+    assert.match(await page.locator('.status').innerText(), /erreur/)
+    await card(0).getByLabel('Valeur : valeur').fill('123e4567-e89b-12d3-a456-426614174000')
+
+    // A list: its value is a JSON array, applied once it parses.
+    await add()
+    await card(1).getByLabel('Nom de la variable').fill('tags')
+    await card(1).getByLabel('Liste').check()
+    await card(1).getByLabel('Valeur : valeur').fill('["a", "b"]')
+    await card(1).getByLabel('Valeur : valeur').fill('["a", "b"')
+    assert.equal(await card(1).getByLabel('Valeur : valeur').getAttribute('aria-invalid'), 'true')
+    await card(1).getByLabel('Valeur : valeur').fill('["a", "b"]')
+    assert.equal(await card(1).getByLabel('Optionnel').isDisabled(), true)
+
+    // An optional value starts present, and can be left out.
+    await add()
+    await card(2).getByLabel('Nom de la variable').fill('limit')
+    await card(2).getByLabel('Type', { exact: true }).selectOption('int64')
+    await card(2).getByLabel('Optionnel').check()
+    await card(2).getByLabel('Valeur : absent').check()
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/flows/api.rs"]').click()
+    const code = await page.locator('.code-main pre').innerText()
+    assert.match(code, /let trace: String = "123e4567-e89b-12d3-a456-426614174000"\.to_string\(\);/)
+    assert.match(code, /let tags: Vec<String> = vec!\["a"\.to_string\(\), "b"\.to_string\(\)\];/)
+    assert.match(code, /let limit: Option<i64> = None;/)
+    await page.close()
+  })
+
   it('hides events, proto schemas and topics while an endpoint is open', async () => {
     const { page } = await open()
     const tree = page.locator('.tree')

@@ -21,6 +21,7 @@ fn proto_type(ty: &FieldType) -> String {
         FieldType::Int64 => "int64".into(),
         FieldType::Float => "float".into(),
         FieldType::Double => "double".into(),
+        FieldType::Uuid => "string".into(),
         FieldType::Bytes => "bytes".into(),
         FieldType::Timestamp => "google.protobuf.Timestamp".into(),
         FieldType::Message { name } => name.clone(),

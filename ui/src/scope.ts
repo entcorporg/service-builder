@@ -11,7 +11,7 @@ export interface TypeRef {
 /** Variables visible at a point of a handler, mapped to their type. */
 export type Scope = Record<string, TypeRef>
 
-export const SCALARS = ['string', 'bool', 'int32', 'int64', 'float', 'double'] as const
+export const SCALARS = ['string', 'uuid', 'bool', 'int32', 'int64', 'float', 'double'] as const
 
 export function isMessage(t: FieldType): t is { kind: 'message'; name: string } {
   return t.kind === 'message'
@@ -41,13 +41,14 @@ export function typeLabel(t: TypeRef): string {
   return `${t.repeated ? 'liste de ' : ''}${t.optional ? 'optionnel ' : ''}${fieldTypeLabel(t.type)}`
 }
 
+/** Mirrors `FieldType::assignable_from`: the same type, or `uuid` and `string`, which are both text. */
+function sameBase(a: FieldType, b: FieldType): boolean {
+  const text = (t: FieldType) => t.kind === 'string' || t.kind === 'uuid'
+  return (rawName(a) === rawName(b) && isMessage(a) === isMessage(b)) || (text(a) && text(b))
+}
+
 export function sameType(a: TypeRef, b: TypeRef): boolean {
-  return (
-    a.repeated === b.repeated &&
-    a.optional === b.optional &&
-    rawName(a.type) === rawName(b.type) &&
-    isMessage(a.type) === isMessage(b.type)
-  )
+  return a.repeated === b.repeated && a.optional === b.optional && sameBase(a.type, b.type)
 }
 
 /** Plain scalar usable in comparisons and `Let`. */
@@ -65,7 +66,7 @@ export function fits(from: TypeRef, bare: boolean, to: TypeRef): boolean {
     to.optional &&
     !to.repeated &&
     !isMessage(to.type) &&
-    rawName(from.type) === rawName(to.type)
+    sameBase(from.type, to.type)
   )
 }
 
@@ -84,9 +85,9 @@ export function sqlRowName(table: string, stepId: string): string {
   return `${pascal(table)}Row${pascal(stepId)}`
 }
 
-/** What a flow sees of a column: timestamps, uuids and JSON documents are text. */
+/** What a flow sees of a column: uuids are uuids, timestamps and JSON documents are text. */
 export function columnFieldType(t: ColumnType): FieldType {
-  return { kind: t === 'timestamp' || t === 'uuid' || t === 'jsonb' ? 'string' : t } as FieldType
+  return { kind: t === 'timestamp' || t === 'jsonb' ? 'string' : t } as FieldType
 }
 
 export function columnType(c: Column): TypeRef {
@@ -163,7 +164,7 @@ export function inputScope(messageName: string): Scope {
 /** Scope after `step` ran (variables bound by Let and CallRpc). */
 export function scopeAfter(project: Project, scope: Scope, step: Step): Scope {
   if (step.type === 'let' && step.name) {
-    return { ...scope, [step.name]: { type: step.valueType, repeated: false, optional: false } }
+    return { ...scope, [step.name]: { type: step.valueType, repeated: step.repeated, optional: step.optional && !step.repeated } }
   }
   if (step.type === 'sql' && step.op === 'select' && step.bind) {
     const message = step.into ?? sqlRowName(step.table, step.id)

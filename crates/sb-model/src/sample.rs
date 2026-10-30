@@ -194,6 +194,8 @@ pub fn orders() -> Project {
                         id: "o1".into(),
                         name: "order_id".into(),
                         value_type: FieldType::String,
+                        optional: false,
+                        repeated: false,
                         value: raw("eda_runtime::new_id()"),
                     },
                     Step::Log {
@@ -270,6 +272,8 @@ pub fn orders() -> Project {
                         id: "h1".into(),
                         name: "order_id".into(),
                         value_type: FieldType::String,
+                        optional: false,
+                        repeated: false,
                         value: raw("eda_runtime::new_id()"),
                     },
                     Step::Sql {
@@ -363,6 +367,8 @@ pub fn orders() -> Project {
                     id: "p1".into(),
                     name: "approved".into(),
                     value_type: FieldType::Bool,
+                    optional: false,
+                    repeated: false,
                     value: raw("input.amount < 100_000"),
                 },
                 Step::Branch {

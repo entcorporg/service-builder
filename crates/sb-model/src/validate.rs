@@ -1317,10 +1317,23 @@ impl<'a> Checker<'a> {
             Step::Let {
                 name,
                 value_type,
+                optional,
+                repeated,
                 value,
                 ..
             } => {
-                let ty = TypeRef::scalar(value_type.clone());
+                let ty = TypeRef {
+                    ty: value_type.clone(),
+                    repeated: *repeated,
+                    optional: *optional,
+                };
+                if *optional && *repeated {
+                    self.error(
+                        "E_LET_TYPE",
+                        format!("{path}/optional"),
+                        "a list is never optional: an empty list says there is nothing",
+                    );
+                }
                 match value_type {
                     // A whole schema, built with Rust (queries over several tables, say), that a
                     // Respond step or a Publish can then read field by field.
@@ -1332,6 +1345,13 @@ impl<'a> Checker<'a> {
                                 format!("unknown message `{name}`"),
                             );
                         }
+                        if *optional {
+                            self.error(
+                                "E_LET_TYPE",
+                                format!("{path}/optional"),
+                                "a schema variable is never optional: its presence is implicit",
+                            );
+                        }
                         if !matches!(value, Expr::Raw { .. }) {
                             self.error(
                                 "E_LET_VALUE",
@@ -1340,10 +1360,10 @@ impl<'a> Checker<'a> {
                             );
                         }
                     }
-                    _ if !ty.is_simple_scalar() => self.error(
+                    _ if !TypeRef::scalar(value_type.clone()).is_simple_scalar() => self.error(
                         "E_LET_TYPE",
                         format!("{path}/valueType"),
-                        "variables hold a string, bool, int32, int64, float, double, or a schema built with Rust",
+                        "variables hold a string, uuid, bool, int32, int64, float, double (alone, optional or as a list), or a schema built with Rust",
                     ),
                     _ => {}
                 }
@@ -2035,12 +2055,124 @@ mod tests {
     }
 
     #[test]
+    fn a_variable_can_be_a_uuid_optional_or_a_list() {
+        let mut p = sample::orders();
+        let var = |ty: FieldType, optional: bool, repeated: bool, value: Expr| Step::Let {
+            id: "v".into(),
+            name: "x".into(),
+            value_type: ty,
+            optional,
+            repeated,
+            value,
+        };
+        let lit = |v: serde_json::Value| Expr::Literal { value: v };
+        let id = "123e4567-e89b-12d3-a456-426614174000";
+        let mut check = |step: Step, code: Option<&str>| {
+            p.services[0].routes[0].steps.insert(0, step);
+            let found = errors(&p);
+            p.services[0].routes[0].steps.remove(0);
+            match code {
+                None => assert!(found.is_empty(), "{found:?}"),
+                Some(c) => assert!(found.contains(&c.to_string()), "{c}: {found:?}"),
+            }
+        };
+        check(var(FieldType::Uuid, false, false, lit(id.into())), None);
+        check(
+            var(FieldType::Uuid, false, false, lit("nope".into())),
+            Some("E_TYPE_MISMATCH"),
+        );
+        check(
+            var(FieldType::Int64, true, false, lit(serde_json::Value::Null)),
+            None,
+        );
+        check(var(FieldType::Int64, true, false, lit(4.into())), None);
+        check(
+            var(FieldType::Int64, false, false, lit(serde_json::Value::Null)),
+            Some("E_TYPE_MISMATCH"),
+        );
+        check(
+            var(
+                FieldType::String,
+                false,
+                true,
+                lit(serde_json::json!(["a", "b"])),
+            ),
+            None,
+        );
+        check(
+            var(
+                FieldType::String,
+                false,
+                true,
+                lit(serde_json::json!(["a", 1])),
+            ),
+            Some("E_TYPE_MISMATCH"),
+        );
+        // A list of the request's items fills a list; a single string does not.
+        check(
+            var(
+                FieldType::String,
+                false,
+                true,
+                Expr::Path {
+                    path: "input.items".into(),
+                },
+            ),
+            None,
+        );
+        check(
+            var(
+                FieldType::String,
+                false,
+                false,
+                Expr::Path {
+                    path: "input.items".into(),
+                },
+            ),
+            Some("E_TYPE_MISMATCH"),
+        );
+        // Never both, and a schema is never optional.
+        check(
+            var(FieldType::String, true, true, lit(serde_json::json!([]))),
+            Some("E_LET_TYPE"),
+        );
+        check(
+            var(
+                FieldType::Message {
+                    name: "OrderView".into(),
+                },
+                true,
+                false,
+                Expr::Raw {
+                    code: "pb::OrderView::default()".into(),
+                },
+            ),
+            Some("E_LET_TYPE"),
+        );
+        // The variable has the shape it was declared with: reading it as a plain string is refused.
+        p.services[0].routes[0].steps.insert(
+            0,
+            var(FieldType::String, true, false, lit(serde_json::Value::Null)),
+        );
+        if let Step::Respond { fields, .. } = p.services[0].routes[0].steps.last_mut().unwrap() {
+            fields[0].value = Expr::Path { path: "x".into() };
+        }
+        assert!(
+            errors(&p).contains(&"E_TYPE_MISMATCH".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+    }
+
+    #[test]
     fn a_variable_can_hold_a_schema_built_with_rust() {
         let mut p = sample::orders();
         let let_step = |value_type: FieldType, value: Expr| Step::Let {
             id: "v".into(),
             name: "view".into(),
             value_type,
+            optional: false,
+            repeated: false,
             value,
         };
         let view = |p: &Project| p.message("OrderView").is_some();
@@ -2081,6 +2213,8 @@ mod tests {
                 value_type: FieldType::Message {
                     name: "OrderView".into(),
                 },
+                optional: false,
+                repeated: false,
                 value: Expr::Raw {
                     code: "pb::OrderView::default()".into(),
                 },
@@ -2482,6 +2616,8 @@ mod tests {
             id: "x".into(),
             name: "tx".into(),
             value_type: FieldType::String,
+            optional: false,
+            repeated: false,
             value: Expr::Literal { value: "x".into() },
         });
         assert!(errors(&p).contains(&"E_RESERVED_NAME".into()));
@@ -2511,6 +2647,8 @@ mod tests {
                 id: "l".into(),
                 name: "local".into(),
                 value_type: FieldType::String,
+                optional: false,
+                repeated: false,
                 value: Expr::Literal { value: "x".into() },
             },
         );

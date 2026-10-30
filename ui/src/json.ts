@@ -10,6 +10,7 @@ const SCALAR_EXAMPLE: Record<string, unknown> = {
   double: 0,
   bytes: '',
   timestamp: '1970-01-01T00:00:00Z',
+  uuid: '00000000-0000-0000-0000-000000000000',
 }
 
 function fieldExample(project: Project, f: Field, depth: number): unknown {

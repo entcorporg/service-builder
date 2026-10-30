@@ -99,6 +99,8 @@ function Endpoint(props: {
         id: newId(),
         name,
         valueType: { kind: 'message', name: route.response },
+        optional: false,
+        repeated: false,
         value: {
           kind: 'raw',
           code: `{\n    // Interrogez vos tables avec \`tx\`, par exemple :\n    // let rows = sqlx::query("SELECT …").fetch_all(&mut *tx).await?;\n    pb::${route.response} { ..Default::default() }\n}`,

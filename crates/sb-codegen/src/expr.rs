@@ -18,7 +18,7 @@ fn internal<T>(msg: impl Into<String>) -> Result<T, CodegenError> {
 /// Rust type of a plain scalar (used by `Let`).
 pub fn rust_scalar(ty: &FieldType) -> &'static str {
     match ty {
-        FieldType::String => "String",
+        FieldType::String | FieldType::Uuid => "String",
         FieldType::Bool => "bool",
         FieldType::Int32 => "i32",
         FieldType::Int64 => "i64",
@@ -28,11 +28,17 @@ pub fn rust_scalar(ty: &FieldType) -> &'static str {
     }
 }
 
-/// Rust type of a variable declared by a Let step: a scalar, or a schema (`pb::OrderView`).
-pub fn rust_let_type(ty: &FieldType) -> String {
-    match ty {
+/// Rust type of a variable declared by a Let step: a scalar, or a schema (`pb::OrderView`),
+/// alone, optional (`Option<..>`) or a list (`Vec<..>`).
+pub fn rust_let_type(ty: &FieldType, optional: bool, repeated: bool) -> String {
+    let base = match ty {
         FieldType::Message { name } => format!("pb::{name}"),
         other => rust_scalar(other).to_string(),
+    };
+    match (optional, repeated) {
+        (_, true) => format!("Vec<{base}>"),
+        (true, false) => format!("Option<{base}>"),
+        (false, false) => base,
     }
 }
 
@@ -67,6 +73,12 @@ pub fn path_code(rp: &ResolvedPath) -> String {
 
 pub fn literal_code(lit: &Literal, to: &TypeRef) -> String {
     let code = match lit {
+        Literal::None => return "None".to_string(),
+        Literal::List(items) => {
+            let item = TypeRef::scalar(to.ty.clone());
+            let items: Vec<String> = items.iter().map(|i| literal_code(i, &item)).collect();
+            return format!("vec![{}]", items.join(", "));
+        }
         Literal::Str(s) => format!("{s:?}.to_string()"),
         Literal::Int(i) => i.to_string(),
         Literal::Float(f) => format!("{f:?}"),
@@ -292,6 +304,42 @@ mod tests {
         assert_eq!(
             lower(&p, &scope, &float, &TypeRef::scalar(FieldType::Double)).unwrap(),
             "2.0"
+        );
+    }
+
+    #[test]
+    fn lowering_optional_and_list_literals() {
+        let (p, scope) = orders_scope();
+        let lit = |v: serde_json::Value| Expr::Literal { value: v };
+        let optional = TypeRef {
+            optional: true,
+            ..TypeRef::scalar(FieldType::Int32)
+        };
+        assert_eq!(
+            lower(&p, &scope, &lit(serde_json::Value::Null), &optional).unwrap(),
+            "None"
+        );
+        assert_eq!(
+            lower(&p, &scope, &lit(3.into()), &optional).unwrap(),
+            "Some(3)"
+        );
+        let list = TypeRef {
+            repeated: true,
+            ..TypeRef::scalar(FieldType::String)
+        };
+        assert_eq!(
+            lower(&p, &scope, &lit(serde_json::json!(["a", "b"])), &list).unwrap(),
+            "vec![\"a\".to_string(), \"b\".to_string()]"
+        );
+        assert_eq!(
+            lower(&p, &scope, &lit(serde_json::json!([])), &list).unwrap(),
+            "vec![]"
+        );
+        assert_eq!(rust_let_type(&FieldType::Uuid, false, false), "String");
+        assert_eq!(rust_let_type(&FieldType::Int64, true, false), "Option<i64>");
+        assert_eq!(
+            rust_let_type(&FieldType::Message { name: "M".into() }, false, true),
+            "Vec<pb::M>"
         );
     }
 

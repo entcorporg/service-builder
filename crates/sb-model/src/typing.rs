@@ -51,6 +51,13 @@ impl TypeRef {
                 FieldType::Bytes | FieldType::Timestamp | FieldType::Message { .. }
             )
     }
+
+    /// The same shape (list or optional) and a type that fits: `uuid` and `string` are both text.
+    pub fn accepts(&self, from: &TypeRef) -> bool {
+        self.repeated == from.repeated
+            && self.optional == from.optional
+            && self.ty.assignable_from(&from.ty)
+    }
 }
 
 impl fmt::Display for TypeRef {
@@ -70,6 +77,7 @@ impl fmt::Display for TypeRef {
             FieldType::Double => f.write_str("double"),
             FieldType::Bytes => f.write_str("bytes"),
             FieldType::Timestamp => f.write_str("timestamp"),
+            FieldType::Uuid => f.write_str("uuid"),
             FieldType::Message { name } => f.write_str(name),
         }
     }
@@ -128,14 +136,14 @@ impl ResolvedPath {
         if self.is_bare_message() {
             return (self.ty == *to).then_some(Adapt::WrapSome);
         }
-        if self.ty == *to {
+        if to.accepts(&self.ty) {
             return Some(Adapt::Identity);
         }
         let widening = !self.ty.optional
             && !self.ty.repeated
             && to.optional
             && !to.repeated
-            && self.ty.ty == to.ty
+            && to.ty.assignable_from(&self.ty.ty)
             && !to.is_message();
         widening.then_some(Adapt::WrapSome)
     }
@@ -186,18 +194,44 @@ pub enum Literal {
     Int(i64),
     Float(f64),
     Bool(bool),
+    /// `null` for an optional value: absent.
+    None,
+    /// A JSON array for a list.
+    List(Vec<Literal>),
+}
+
+/// `8-4-4-4-12` hexadecimal digits.
+pub fn is_uuid(s: &str) -> bool {
+    let groups: Vec<&str> = s.split('-').collect();
+    groups.len() == 5
+        && groups
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(g, n)| g.len() == n && g.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// Interprets a JSON literal as a value of type `to`.
 pub fn coerce_literal(value: &Value, to: &TypeRef) -> Result<Literal, String> {
     if to.repeated {
-        return Err(format!(
-            "a literal cannot fill a {to}; use a Rust expression"
-        ));
+        let Value::Array(items) = value else {
+            return Err(format!(
+                "literal {value} is not a valid {to}: write a JSON array"
+            ));
+        };
+        let item = TypeRef::scalar(to.ty.clone());
+        return items
+            .iter()
+            .map(|v| coerce_literal(v, &item))
+            .collect::<Result<_, _>>()
+            .map(Literal::List);
+    }
+    if to.optional && value.is_null() {
+        return Ok(Literal::None);
     }
     let mismatch = || format!("literal {value} is not a valid {to}");
     match (&to.ty, value) {
         (FieldType::String, Value::String(s)) => Ok(Literal::Str(s.clone())),
+        (FieldType::Uuid, Value::String(s)) if is_uuid(s) => Ok(Literal::Str(s.clone())),
         (FieldType::Bool, Value::Bool(b)) => Ok(Literal::Bool(*b)),
         (FieldType::Int32, Value::Number(n)) => n
             .as_i64()
@@ -398,5 +432,61 @@ mod tests {
         assert!(parse_template("a {b").is_err());
         assert!(parse_template("a } b").is_err());
         assert!(parse_template("{}").is_err());
+    }
+
+    #[test]
+    fn uuid_is_text_with_a_checked_literal() {
+        assert!(is_uuid("123e4567-e89b-12d3-a456-426614174000"));
+        for bad in [
+            "",
+            "123e4567e89b12d3a456426614174000",
+            "123e4567-e89b-12d3-a456-42661417400g",
+            "x",
+        ] {
+            assert!(!is_uuid(bad), "{bad}");
+        }
+        let uuid = TypeRef::scalar(FieldType::Uuid);
+        assert_eq!(
+            coerce_literal(&"123e4567-e89b-12d3-a456-426614174000".into(), &uuid),
+            Ok(Literal::Str("123e4567-e89b-12d3-a456-426614174000".into()))
+        );
+        assert!(coerce_literal(&"not a uuid".into(), &uuid).is_err());
+        // Both are text: either fills the other.
+        assert!(uuid.accepts(&TypeRef::scalar(FieldType::String)));
+        assert!(TypeRef::scalar(FieldType::String).accepts(&uuid));
+        assert!(!uuid.accepts(&TypeRef::scalar(FieldType::Int64)));
+        // ...but a list of uuids is not a uuid.
+        assert!(!uuid.accepts(&TypeRef {
+            repeated: true,
+            ..uuid.clone()
+        }));
+    }
+
+    #[test]
+    fn literals_can_be_absent_or_lists() {
+        let optional = TypeRef {
+            optional: true,
+            ..TypeRef::scalar(FieldType::Int32)
+        };
+        assert_eq!(coerce_literal(&Value::Null, &optional), Ok(Literal::None));
+        assert!(coerce_literal(&Value::Null, &TypeRef::scalar(FieldType::Int32)).is_err());
+        let list = TypeRef {
+            repeated: true,
+            ..TypeRef::scalar(FieldType::String)
+        };
+        assert_eq!(
+            coerce_literal(&serde_json::json!(["a", "b"]), &list),
+            Ok(Literal::List(vec![
+                Literal::Str("a".into()),
+                Literal::Str("b".into())
+            ]))
+        );
+        assert_eq!(
+            coerce_literal(&serde_json::json!([]), &list),
+            Ok(Literal::List(vec![]))
+        );
+        // One element of the wrong type, or no array at all, is refused.
+        assert!(coerce_literal(&serde_json::json!(["a", 1]), &list).is_err());
+        assert!(coerce_literal(&"a".into(), &list).is_err());
     }
 }
