@@ -809,6 +809,7 @@ impl<'a> Checker<'a> {
                 }
             }
 
+            self.hmac_placement(r, &format!("{rp}/steps"));
             let env = Env {
                 service: s,
                 handler: Handler::Route {
@@ -1645,6 +1646,50 @@ impl<'a> Checker<'a> {
                 }
                 true
             }
+            Step::VerifyHmac {
+                header,
+                secret_env,
+                tolerance_secs,
+                ..
+            } => {
+                if !matches!(env.handler, Handler::Route { .. }) {
+                    self.error(
+                        "E_HMAC_OUTSIDE_ROUTE",
+                        path,
+                        "a signature is read from an HTTP header: it only makes sense in an HTTP route",
+                    );
+                }
+                if header.is_empty()
+                    || !header
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                {
+                    self.error(
+                        "E_HMAC_HEADER",
+                        format!("{path}/header"),
+                        format!("`{header}` is not a header name (letters, digits and `-`)"),
+                    );
+                }
+                if !secret_env.starts_with(|c: char| c.is_ascii_uppercase())
+                    || !secret_env
+                        .bytes()
+                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+                {
+                    self.error(
+                        "E_HMAC_SECRET_ENV",
+                        format!("{path}/secretEnv"),
+                        format!("`{secret_env}` is not an environment variable name (e.g. `STRIPE_WEBHOOK_SECRET`)"),
+                    );
+                }
+                if !(1..=86_400).contains(tolerance_secs) {
+                    self.error(
+                        "E_HMAC_TOLERANCE",
+                        format!("{path}/toleranceSecs"),
+                        "the clock tolerance is 1 second to 24 hours (86400)",
+                    );
+                }
+                false
+            }
             Step::RateLimit {
                 key,
                 max,
@@ -1760,6 +1805,42 @@ impl<'a> Checker<'a> {
                 }
                 false
             }
+        }
+    }
+
+    /// A signed webhook is checked on the raw body, before it is read: the step is the first of the route, only
+    /// once, and the route carries a body.
+    fn hmac_placement(&mut self, route: &Route, steps_path: &str) {
+        let mut count = 0;
+        for step in &route.steps {
+            step.walk(&mut |s| count += usize::from(matches!(s, Step::VerifyHmac { .. })));
+        }
+        if count == 0 {
+            return;
+        }
+        if !matches!(route.steps.first(), Some(Step::VerifyHmac { .. })) {
+            self.error(
+                "E_HMAC_POSITION",
+                steps_path,
+                "the signature is checked before anything else: make it the first step of the route, not inside a condition",
+            );
+        }
+        if count > 1 {
+            self.error(
+                "E_HMAC_DUPLICATE",
+                steps_path,
+                "a route checks one signature",
+            );
+        }
+        if !route.method.has_body() {
+            self.error(
+                "E_HMAC_METHOD",
+                steps_path,
+                format!(
+                    "a signature covers the body: a {} route has none (use POST, PUT or PATCH)",
+                    route.method.as_str()
+                ),
+            );
         }
     }
 
@@ -3364,6 +3445,113 @@ mod tests {
         }
         set(&mut p, None);
         assert!(errors(&p).is_empty());
+    }
+
+    fn with_webhook() -> Project {
+        let mut p = sample::orders();
+        sample::add_stripe_webhook(&mut p);
+        p
+    }
+
+    fn webhook_step(p: &mut Project) -> &mut Step {
+        &mut p.services[0].routes[2].steps[0]
+    }
+
+    #[test]
+    fn a_signed_webhook_is_valid_and_checked() {
+        let p = with_webhook();
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+        type Case<'a> = (&'a str, &'a dyn Fn(&mut Step));
+        let cases: [Case; 5] = [
+            ("E_HMAC_HEADER", &|s| {
+                if let Step::VerifyHmac { header, .. } = s {
+                    *header = "Bad Header".into()
+                }
+            }),
+            ("E_HMAC_SECRET_ENV", &|s| {
+                if let Step::VerifyHmac { secret_env, .. } = s {
+                    *secret_env = "stripe-secret".into()
+                }
+            }),
+            ("E_HMAC_SECRET_ENV", &|s| {
+                if let Step::VerifyHmac { secret_env, .. } = s {
+                    *secret_env = "".into()
+                }
+            }),
+            ("E_HMAC_TOLERANCE", &|s| {
+                if let Step::VerifyHmac { tolerance_secs, .. } = s {
+                    *tolerance_secs = 0
+                }
+            }),
+            ("E_HMAC_TOLERANCE", &|s| {
+                if let Step::VerifyHmac { tolerance_secs, .. } = s {
+                    *tolerance_secs = 86_401
+                }
+            }),
+        ];
+        for (code, change) in cases {
+            let mut p = with_webhook();
+            change(webhook_step(&mut p));
+            assert!(
+                errors(&p).contains(&code.to_string()),
+                "{code}: {:?}",
+                errors(&p)
+            );
+        }
+    }
+
+    #[test]
+    fn the_signature_is_checked_first_and_once_on_a_route_with_a_body() {
+        // Not first: something would run on an unauthenticated request.
+        let mut p = with_webhook();
+        p.services[0].routes[2].steps.swap(0, 1);
+        assert!(
+            errors(&p).contains(&"E_HMAC_POSITION".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+        // Not inside a condition either: it would be skipped.
+        let mut p = with_webhook();
+        let step = p.services[0].routes[2].steps.remove(0);
+        p.services[0].routes[2].steps.insert(
+            0,
+            Step::Branch {
+                id: "b".into(),
+                condition: Condition::Raw {
+                    code: "true".into(),
+                },
+                then: vec![step],
+                otherwise: vec![],
+            },
+        );
+        assert!(
+            errors(&p).contains(&"E_HMAC_POSITION".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+        // Once.
+        let mut p = with_webhook();
+        let again = p.services[0].routes[2].steps[0].clone();
+        p.services[0].routes[2].steps.insert(1, again);
+        assert!(errors(&p).contains(&"E_HMAC_DUPLICATE".to_string()));
+        // A body to sign: not a GET.
+        let mut p = with_webhook();
+        p.services[0].routes[2].method = HttpMethod::Get;
+        p.services[0].routes[2].path = "/webhook/stripe".into();
+        assert!(
+            errors(&p).contains(&"E_HMAC_METHOD".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+        // HTTP only.
+        let mut p = with_webhook();
+        let step = webhook_step(&mut p).clone();
+        p.services[0].rpcs[0].steps.insert(0, step);
+        assert!(
+            errors(&p).contains(&"E_HMAC_OUTSIDE_ROUTE".to_string()),
+            "{:?}",
+            errors(&p)
+        );
     }
 
     #[test]

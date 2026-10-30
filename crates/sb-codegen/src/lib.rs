@@ -161,6 +161,7 @@ mod tests {
                 "runtime/src/lib.rs",
                 "runtime/src/outbox.rs",
                 "runtime/src/rate_limit.rs",
+                "runtime/src/webhook.rs",
                 "services/notifications/Cargo.toml",
                 "services/notifications/src/app/bootstrap.rs",
                 "services/notifications/src/app/config.rs",
@@ -836,6 +837,53 @@ mod tests {
         let other = file(&files, "services/notifications/src/flows/consumers.rs");
         assert!(!other.contains("dedup"));
         assert!(!file(&files, "services/notifications/src/transport/kafka.rs").contains("dedup"));
+    }
+
+    #[test]
+    fn a_signed_webhook_reads_the_raw_body_and_verifies_it_before_parsing() {
+        let mut p = sample::orders();
+        sample::add_stripe_webhook(&mut p);
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&p)),
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        let files = generate(&p).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        let handler = &http[http.find("async fn handle_stripe_webhook(").unwrap()..];
+        // The extractors give the bytes, not a parsed body...
+        assert!(handler.contains("headers: HeaderMap,"));
+        assert!(handler.contains("body: Bytes,"));
+        assert!(
+            !handler[..handler.find("flows::api::stripe_webhook").unwrap()].contains("Json(input)")
+        );
+        // ...checked against the header, the secret of the environment and the tolerance, and only then read.
+        let check = handler.find("eda_runtime::webhook::check(\"STRIPE_WEBHOOK_SECRET\", headers.get(\"Stripe-Signature\")").unwrap();
+        let parse = handler
+            .find("Json::<pb::StripeEvent>::from_bytes(&body)")
+            .unwrap();
+        assert!(
+            check < parse,
+            "the signature is verified before the body is read"
+        );
+        assert!(handler.contains("&body, 300)?;"));
+        // The other routes keep their extractor.
+        assert!(http.contains("Json(input): Json<pb::PlaceOrderBody>"));
+        // A service that cannot verify its webhooks does not start.
+        assert!(
+            file(&files, "services/orders/src/app/config.rs")
+                .contains("eda_runtime::webhook::secret(\"STRIPE_WEBHOOK_SECRET\")?;")
+        );
+        assert!(
+            file(&files, "services/orders/src/flows/api.rs")
+                .contains("signature in `Stripe-Signature` already verified")
+        );
+        assert!(file(&files, "runtime/Cargo.toml").contains("hmac.workspace = true"));
+        assert!(file(&files, "Cargo.toml").contains("hmac = \"0.13\""));
+        // Nothing of it in a project that has no signed webhook.
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/src/app/config.rs").contains("webhook"));
+        assert!(!file(&plain, "services/orders/src/transport/http.rs").contains("HeaderMap"));
     }
 
     #[test]

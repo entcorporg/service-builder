@@ -452,6 +452,7 @@ export const STEP_LABELS: Record<StepType, { label: string; hint: string }> = {
   callRpc: { label: 'Appeler un RPC', hint: 'Appeler un autre service en gRPC' },
   branch: { label: 'Condition', hint: 'Si … alors … sinon …' },
   respond: { label: 'Répondre', hint: 'Renvoyer la réponse du RPC' },
+  verifyHmac: { label: 'Vérifier une signature', hint: 'Webhook signé (HMAC-SHA256 du corps brut), sans session : toujours la première étape' },
   rateLimit: { label: 'Limiter le débit', hint: 'Au-delà de N essais par fenêtre : 429 et Retry-After' },
   hashPassword: { label: 'Hacher un mot de passe', hint: 'argon2id, hors du runtime async : le texte à stocker' },
   verifyPassword: { label: 'Vérifier un mot de passe', hint: 'Vrai ou faux ; un compte inconnu coûte le même temps' },
@@ -531,6 +532,8 @@ export function makeStep(type: StepType, p: Project, scope: Scope, ctx: { servic
     }
     case 'respond':
       return { type, id, fields: ctx.response ? autoMap(p, scope, ctx.response) : [], status: null, cookies: [] }
+    case 'verifyHmac':
+      return { type, id, header: 'Stripe-Signature', secretEnv: 'STRIPE_WEBHOOK_SECRET', toleranceSecs: 300 }
     case 'rateLimit':
       // Counted per e-mail when the request has one: the usual guard of a login.
       return { type, id, key: firstText(p, scope, ['email'], { fallback: { kind: 'literal', value: 'global' }, onlyNamed: true }), max: 5, windowSecs: 900 }

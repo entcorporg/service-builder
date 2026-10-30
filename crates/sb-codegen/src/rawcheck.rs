@@ -49,6 +49,7 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                 }
             }
             Step::RateLimit { key, .. } => expr(key, &format!("{path}/key"), out),
+            Step::VerifyHmac { .. } => {}
             Step::HashPassword { input, .. } | Step::Sha256 { input, .. } => {
                 expr(input, &format!("{path}/input"), out)
             }

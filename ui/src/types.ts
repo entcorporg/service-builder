@@ -131,6 +131,8 @@ export type Step =
   | { type: 'callRpc'; id: string; service: string; method: string; request: Assignment[]; bind: string | null }
   | { type: 'branch'; id: string; condition: Condition; then: Step[]; otherwise: Step[] }
   | { type: 'respond'; id: string; fields: Assignment[]; status: number | null; cookies: Cookie[] }
+  /** First step of a webhook route: the HMAC of the raw body, in `header`, with the secret of `secretEnv`. */
+  | { type: 'verifyHmac'; id: string; header: string; secretEnv: string; toleranceSecs: number }
   /** Past `max` attempts under `key` in `windowSecs`: a 429 with `Retry-After`. In memory, per process. */
   | { type: 'rateLimit'; id: string; key: Expr; max: number; windowSecs: number }
   /** argon2id (off the async runtime) of `input`: the PHC string to store. */

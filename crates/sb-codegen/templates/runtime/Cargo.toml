@@ -16,6 +16,7 @@ argon2.workspace = true
 sha2.workspace = true
 rand.workspace = true
 hex.workspace = true
+hmac.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

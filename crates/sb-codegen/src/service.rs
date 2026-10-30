@@ -339,6 +339,13 @@ fn config_rs(project: &Project, service: &Service, publishes: bool) -> String {
     c.blank();
     c.open("impl Config");
     c.open("pub fn from_env() -> anyhow::Result<Self>");
+    let secrets = webhook_secrets(service);
+    if !secrets.is_empty() {
+        c.line("// The secrets of the signed webhooks: a service that cannot verify them does not start.");
+        for env in &secrets {
+            c.line(format!("eda_runtime::webhook::secret({env:?})?;"));
+        }
+    }
     c.open("Ok(Self");
     c.line("brokers: eda_runtime::env_or(\"KAFKA_BROKERS\", \"localhost:9092\"),");
     let db_env = format!("{}_DATABASE_URL", shouty(&service.name));
@@ -786,6 +793,9 @@ fn http_rs(service: &Service) -> String {
     c.line("use std::collections::HashMap;");
     c.blank();
     c.line("use axum::{");
+    if service.routes.iter().any(|r| hmac_of(r).is_some()) {
+        c.line("    body::Bytes,");
+    }
     c.line("    Json, Router,");
     c.line(format!(
         "    extract::{{{}State}},",
@@ -796,7 +806,11 @@ fn http_rs(service: &Service) -> String {
                 ""
             }
     ));
-    c.line("    http::{HeaderValue, StatusCode},");
+    c.line(if service.routes.iter().any(|r| hmac_of(r).is_some()) {
+        "    http::{HeaderMap, HeaderValue, StatusCode},"
+    } else {
+        "    http::{HeaderValue, StatusCode},"
+    });
     c.line("    response::{IntoResponse, Response},");
     c.line(format!("    routing::{{{}}},", verbs.join(", ")));
     c.line("};");
@@ -865,11 +879,18 @@ fn http_rs(service: &Service) -> String {
         if !params.is_empty() {
             c.line("Path(path): Path<HashMap<String, String>>,");
         }
-        c.line(if r.method.has_body() {
-            format!("Json({m}input): Json<pb::{}>,", r.request)
+        let signed = hmac_of(r);
+        if signed.is_some() {
+            // The signature covers the exact bytes: they are read as JSON only once it checks out.
+            c.line("headers: HeaderMap,");
+            c.line("body: Bytes,");
         } else {
-            format!("Query({m}input): Query<pb::{}>,", r.request)
-        });
+            c.line(if r.method.has_body() {
+                format!("Json({m}input): Json<pb::{}>,", r.request)
+            } else {
+                format!("Query({m}input): Query<pb::{}>,", r.request)
+            });
+        }
         c.dedent();
         let reply = needs_reply(r);
         c.open(if reply {
@@ -880,6 +901,17 @@ fn http_rs(service: &Service) -> String {
                 r.response
             )
         });
+        if let Some((header, secret_env, tolerance)) = signed {
+            c.line(format!(
+                "eda_runtime::webhook::check({secret_env:?}, headers.get({header:?}).and_then(|v| v.to_str().ok()), &body, {tolerance})?;"
+            ));
+            c.line(format!(
+                "let {m}input = Json::<pb::{}>::from_bytes(&body)",
+                r.request
+            ));
+            c.line("    .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.body_text()))?");
+            c.line("    .0;");
+        }
         for param in &params {
             c.line(format!("input.{param} = param(&path, {param:?})?;"));
         }
@@ -1014,6 +1046,29 @@ fn rpc_flows_rs(project: &Project, service: &Service) -> Result<String, CodegenE
         c.close();
     }
     Ok(c.finish())
+}
+
+/// The signature check of a route, if it has one: the header, the environment variable of the secret, the tolerance.
+fn hmac_of(route: &sb_model::Route) -> Option<(&str, &str, u32)> {
+    match route.steps.first() {
+        Some(Step::VerifyHmac {
+            header,
+            secret_env,
+            tolerance_secs,
+            ..
+        }) => Some((header, secret_env, *tolerance_secs)),
+        _ => None,
+    }
+}
+
+/// The environment variables of the secrets of the signed webhooks of a service, once each.
+fn webhook_secrets(service: &Service) -> BTreeSet<&str> {
+    service
+        .routes
+        .iter()
+        .filter_map(hmac_of)
+        .map(|(_, env, _)| env)
+        .collect()
 }
 
 /// Whether a route answers with a status or cookies of its own: its flow then returns a `Reply`.
@@ -1334,6 +1389,10 @@ fn steps(
                 } else {
                     c.line("return Ok(reply);");
                 }
+            }
+            // Checked by the HTTP handler on the raw body, before it is read as JSON (`transport/http.rs`).
+            Step::VerifyHmac { header, .. } => {
+                c.line(format!("// signature in `{header}` already verified"));
             }
             Step::RateLimit {
                 id,
@@ -1740,6 +1799,7 @@ fn describe(step: &Step) -> String {
         Step::Branch { .. } => "branch".into(),
         Step::Respond { .. } => "respond".into(),
         Step::Fail { status, .. } => format!("fail {status}"),
+        Step::VerifyHmac { header, .. } => format!("verify the signature in {header}"),
         Step::RateLimit {
             max, window_secs, ..
         } => format!("rate limit {max} per {window_secs}s"),

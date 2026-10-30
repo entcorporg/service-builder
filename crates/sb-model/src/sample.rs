@@ -610,3 +610,44 @@ pub fn add_cleaner_job(p: &mut Project) {
         ],
     });
 }
+
+/// Adds to the first service a webhook signed like Stripe's: no session, authenticated by the HMAC of the
+/// raw body in `Stripe-Signature`, with a 5 minute clock tolerance against replays.
+pub fn add_stripe_webhook(p: &mut Project) {
+    p.messages.push(api(
+        "StripeEvent",
+        vec![
+            field("id", FieldType::String),
+            field("event_type", FieldType::String),
+        ],
+    ));
+    p.messages
+        .push(api("WebhookAck", vec![field("received", FieldType::Bool)]));
+    p.services[0].routes.push(Route {
+        name: "stripe_webhook".into(),
+        method: HttpMethod::Post,
+        path: "/webhook/stripe".into(),
+        request: "StripeEvent".into(),
+        response: "WebhookAck".into(),
+        status: 200,
+        steps: vec![
+            Step::VerifyHmac {
+                id: "w1".into(),
+                header: "Stripe-Signature".into(),
+                secret_env: "STRIPE_WEBHOOK_SECRET".into(),
+                tolerance_secs: 300,
+            },
+            Step::Log {
+                id: "w2".into(),
+                level: LogLevel::Info,
+                message: "stripe event {input.event_type} ({input.id})".into(),
+            },
+            Step::Respond {
+                id: "w3".into(),
+                fields: vec![set("received", lit(true))],
+                status: None,
+                cookies: vec![],
+            },
+        ],
+    });
+}
