@@ -639,6 +639,9 @@ pub enum Step {
         descending: bool,
         #[serde(default)]
         limit: Option<u32>,
+        /// One row expected and none found: the answer, instead of the 404 of the table.
+        #[serde(default)]
+        missing: Option<SqlMissing>,
     },
     /// Hashes a password with argon2id, off the async runtime (it is slow on purpose). The PHC string
     /// (`$argon2id$...`) is what gets stored.
@@ -682,6 +685,15 @@ pub enum Step {
     /// Escape hatch: raw Rust statements inserted verbatim.
     #[serde(rename_all = "camelCase")]
     Code { id: String, code: String },
+}
+
+/// What a route answers when a step that expects one row finds none: a token that is unknown, expired or
+/// already used, an account that does not exist. The message is fixed text, like the one of `Fail`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlMissing {
+    pub status: u16,
+    pub message: String,
 }
 
 /// A `Set-Cookie` of a route response. Safe by default: `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`.
@@ -825,6 +837,8 @@ pub enum Expr {
     Raw {
         code: String,
     },
+    /// The database clock (`now()`), for the timestamp columns of an SQL step: `expires_at > now()`.
+    Now,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -899,9 +913,9 @@ impl Project {
         for svc in &self.services {
             for step in svc.handler_steps() {
                 step.walk(&mut |s| {
+                    // A select, or a step that returns the rows it wrote (`RETURNING`).
                     let Step::Sql {
                         id,
-                        op: SqlOp::Select,
                         table,
                         columns,
                         into: None,
@@ -910,6 +924,9 @@ impl Project {
                     else {
                         return;
                     };
+                    if columns.is_empty() {
+                        return;
+                    }
                     let Some(t) = svc.table(table) else { return };
                     out.messages.push(Message {
                         name: sql_row_name(table, id),

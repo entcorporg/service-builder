@@ -42,6 +42,8 @@ export type Expr =
   /** `null` is an absent optional value, an array a list. */
   | { kind: 'literal'; value: string | number | boolean | null | unknown[] }
   | { kind: 'raw'; code: string }
+  /** The database clock (`now()`): a timestamp column of an SQL step only. */
+  | { kind: 'now' }
 
 export type CmpOp = 'eq' | 'ne' | 'gt' | 'ge' | 'lt' | 'le'
 
@@ -159,6 +161,8 @@ export type Step =
       orderBy: string | null
       descending: boolean
       limit: number | null
+      /** One row expected and none found: the answer, instead of a 404. */
+      missing: { status: number; message: string } | null
     }
   | { type: 'code'; id: string; code: string }
 

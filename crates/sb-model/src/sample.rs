@@ -303,6 +303,7 @@ pub fn orders() -> Project {
                         order_by: None,
                         descending: false,
                         limit: None,
+                        missing: None,
                     },
                     Step::Publish {
                         id: "h2".into(),
@@ -354,6 +355,7 @@ pub fn orders() -> Project {
                         order_by: None,
                         descending: false,
                         limit: None,
+                        missing: None,
                     },
                     Step::Respond {
                         id: "h4".into(),
@@ -466,4 +468,95 @@ pub fn orders() -> Project {
     p.services = vec![orders, payments, notifications];
     p.freeze_field_numbers();
     p
+}
+
+/// Adds to the first service the consumption of a single-use token, the way e-mail verification and
+/// password reset do it: the hash of the token is looked up and the row is marked used **in one statement**
+/// (`UPDATE ... RETURNING`), so two requests racing with the same token cannot both win.
+pub fn add_single_use_token(p: &mut Project) {
+    let string = || FieldType::String;
+    p.messages
+        .push(api("VerifyBody", vec![field("token", string())]));
+    p.messages
+        .push(api("VerifiedView", vec![field("account_id", string())]));
+
+    let mut token_hash = Column::new("token_hash", ColumnType::String);
+    token_hash.primary_key = true;
+    let mut used = Column::new("used", ColumnType::Bool);
+    used.default = Some("false".into());
+    let mut new_email = Column::new("new_email", ColumnType::String);
+    new_email.nullable = true;
+    let service = &mut p.services[0];
+    service.tables.push(Table::new(
+        "auth_tokens",
+        vec![
+            token_hash,
+            Column::new("kind", ColumnType::String),
+            used,
+            Column::new("expires_at", ColumnType::Timestamp),
+            Column::new("account_id", ColumnType::String),
+            new_email,
+        ],
+    ));
+    service.routes.push(Route {
+        name: "verify_email".into(),
+        method: HttpMethod::Post,
+        path: "/verify-email".into(),
+        request: "VerifyBody".into(),
+        response: "VerifiedView".into(),
+        status: 200,
+        steps: vec![
+            Step::Sha256 {
+                id: "t1".into(),
+                input: path("input.token"),
+                bind: "token_hash".into(),
+            },
+            // Unknown, expired or already used: the same answer, whichever it is.
+            Step::Sql {
+                id: "t2".into(),
+                op: SqlOp::Update,
+                table: "auth_tokens".into(),
+                bind: Some("consumed".into()),
+                columns: vec!["account_id".into(), "new_email".into()],
+                many: false,
+                into: None,
+                conditions: vec![
+                    SqlCondition {
+                        column: "token_hash".into(),
+                        op: CmpOp::Eq,
+                        value: path("token_hash"),
+                    },
+                    SqlCondition {
+                        column: "kind".into(),
+                        op: CmpOp::Eq,
+                        value: lit("email"),
+                    },
+                    SqlCondition {
+                        column: "used".into(),
+                        op: CmpOp::Eq,
+                        value: lit(false),
+                    },
+                    SqlCondition {
+                        column: "expires_at".into(),
+                        op: CmpOp::Gt,
+                        value: Expr::Now,
+                    },
+                ],
+                values: vec![set("used", lit(true))],
+                order_by: None,
+                descending: false,
+                limit: None,
+                missing: Some(SqlMissing {
+                    status: 400,
+                    message: "invalid or expired token".into(),
+                }),
+            },
+            Step::Respond {
+                id: "t3".into(),
+                fields: vec![set("account_id", path("consumed.account_id"))],
+                status: None,
+                cookies: vec![],
+            },
+        ],
+    });
 }

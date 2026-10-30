@@ -113,6 +113,7 @@ pub fn lower(
             Ok(literal_code(&lit, to))
         }
         Expr::Raw { code } => Ok(code.trim().to_string()),
+        Expr::Now => internal("`now()` only exists in an SQL step"),
     }
 }
 
@@ -173,7 +174,7 @@ pub fn condition_code(
                             .ok_or_else(|| CodegenError::Internal("unsupported literal".into()))?;
                         lower(project, scope, e, &t)
                     }
-                    (Expr::Path { .. }, None) => internal("unresolved comparison side"),
+                    (Expr::Path { .. } | Expr::Now, None) => internal("unresolved comparison side"),
                 }
             };
             Ok(format!("({}) {} ({})", side(left)?, cmp(*op), side(right)?))

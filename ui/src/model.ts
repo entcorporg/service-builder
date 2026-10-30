@@ -396,6 +396,34 @@ export function autoMap(p: Project, scope: Scope, message: string): Assignment[]
   return out
 }
 
+/** An expression as a short text, for summaries and previews. */
+export function exprText(e: Expr): string {
+  switch (e.kind) {
+    case 'path':
+      return e.path
+    case 'raw':
+      return e.code
+    case 'now':
+      return 'now()'
+    case 'literal':
+      return JSON.stringify(e.value)
+  }
+}
+
+/** The error statuses a route is likely to answer with, for the steps that end a route (`fail`, a missing row). */
+export const ERROR_STATUSES: [number, string][] = [
+  [400, 'requête invalide'],
+  [401, 'non authentifié'],
+  [403, 'interdit'],
+  [404, 'introuvable'],
+  [409, 'conflit'],
+  [410, 'disparu'],
+  [422, 'non traitable'],
+  [429, 'trop de requêtes'],
+  [500, 'erreur interne'],
+  [503, 'indisponible'],
+]
+
 export const STEP_LABELS: Record<StepType, { label: string; hint: string }> = {
   log: { label: 'Journal', hint: 'Écrire une ligne de log' },
   let: { label: 'Variable', hint: 'Calculer et nommer une valeur' },
@@ -521,6 +549,7 @@ export function makeStep(type: StepType, p: Project, scope: Scope, ctx: { servic
         orderBy: null,
         descending: false,
         limit: null,
+        missing: null,
       }
     }
     case 'code':

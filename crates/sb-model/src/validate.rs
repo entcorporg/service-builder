@@ -1033,16 +1033,15 @@ impl<'a> Checker<'a> {
 
     fn sql(&mut self, env: &Env, path: &str, step: &Step, scope: &mut Scope) {
         let Step::Sql {
-            id,
             op,
             table,
             bind,
             columns,
             many,
-            into,
             conditions,
             values,
             order_by,
+            missing,
             ..
         } = step
         else {
@@ -1069,14 +1068,7 @@ impl<'a> Checker<'a> {
                     format!("{cp}/column"),
                     format!("table `{table}` has no column `{}`", c.column),
                 ),
-                Some(col) => {
-                    self.check_expr(
-                        scope,
-                        &c.value,
-                        Some(&Self::column_type(col)),
-                        &format!("{cp}/value"),
-                    );
-                }
+                Some(col) => self.sql_value(scope, &c.value, col, &format!("{cp}/value")),
             }
         }
         if matches!(op, SqlOp::Update | SqlOp::Delete) && conditions.is_empty() {
@@ -1096,15 +1088,6 @@ impl<'a> Checker<'a> {
                         "tick at least one column to read",
                     );
                 }
-                for (i, name) in columns.iter().enumerate() {
-                    if column(name).is_none() {
-                        self.error(
-                            "E_UNKNOWN_COLUMN",
-                            format!("{path}/columns/{i}"),
-                            format!("table `{table}` has no column `{name}`"),
-                        );
-                    }
-                }
                 if let Some(o) = order_by
                     && column(o).is_none()
                 {
@@ -1114,35 +1097,7 @@ impl<'a> Checker<'a> {
                         format!("table `{table}` has no column `{o}`"),
                     );
                 }
-                let Some(var) = bind else {
-                    self.error(
-                        "E_SQL_BIND",
-                        format!("{path}/bind"),
-                        "name the variable that receives the result",
-                    );
-                    return;
-                };
-                self.check_var_name(var, &format!("{path}/bind"));
-                let ty = match into {
-                    Some(schema) => {
-                        self.sql_into(path, table, columns, t, schema);
-                        TypeRef {
-                            repeated: *many,
-                            ..TypeRef::message(schema)
-                        }
-                    }
-                    None => {
-                        if *many {
-                            self.error(
-                                "E_SQL_MANY_INTO",
-                                format!("{path}/into"),
-                                "a list of rows has to be converted into a schema (`into`) to be used",
-                            );
-                        }
-                        TypeRef::message(sql_row_name(table, id))
-                    }
-                };
-                scope.bind(var.clone(), ty);
+                self.sql_result(path, step, t, scope);
             }
             SqlOp::Insert | SqlOp::Update => {
                 let mut seen = HashSet::new();
@@ -1161,14 +1116,7 @@ impl<'a> Checker<'a> {
                             format!("{vp}/field"),
                             format!("table `{table}` has no column `{}`", a.field),
                         ),
-                        Some(col) => {
-                            self.check_expr(
-                                scope,
-                                &a.value,
-                                Some(&Self::column_type(col)),
-                                &format!("{vp}/value"),
-                            );
-                        }
+                        Some(col) => self.sql_value(scope, &a.value, col, &format!("{vp}/value")),
                     }
                 }
                 if *op == SqlOp::Update && values.is_empty() {
@@ -1177,6 +1125,9 @@ impl<'a> Checker<'a> {
                         format!("{path}/values"),
                         "give at least one column a new value",
                     );
+                }
+                if !columns.is_empty() {
+                    self.sql_result(path, step, t, scope);
                 }
                 if *op == SqlOp::Insert {
                     for col in t.columns.iter().filter(|c| c.is_required_on_insert()) {
@@ -1190,8 +1141,119 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            SqlOp::Delete => {}
+            SqlOp::Delete => {
+                if !columns.is_empty() {
+                    self.sql_result(path, step, t, scope);
+                }
+            }
         }
+
+        if let Some(m) = missing {
+            let mp = format!("{path}/missing");
+            let one_row = !columns.is_empty() && bind.is_some() && !*many;
+            if !one_row {
+                self.error(
+                    "E_SQL_MISSING_USELESS",
+                    &mp,
+                    "an answer for a missing row needs a step that reads one row (tick columns, name the variable, not a list)",
+                );
+            }
+            if !matches!(env.handler, Handler::Route { .. }) {
+                self.error(
+                    "E_SQL_MISSING_OUTSIDE_ROUTE",
+                    &mp,
+                    "the answer to a missing row is an HTTP status: it only makes sense in an HTTP route",
+                );
+            }
+            if !(400..=599).contains(&m.status) {
+                self.error(
+                    "E_SQL_MISSING_STATUS",
+                    format!("{mp}/status"),
+                    format!("`{}` is not an error status (400 to 599)", m.status),
+                );
+            }
+            if m.message.trim().is_empty() {
+                self.error(
+                    "E_SQL_MISSING_MESSAGE",
+                    format!("{mp}/message"),
+                    "say what the client is told (a 5xx answers a generic text)",
+                );
+            }
+        }
+    }
+
+    /// A value written or compared in an SQL step: typed after its column, or the database clock for a timestamp.
+    fn sql_value(&mut self, scope: &Scope, value: &Expr, col: &Column, path: &str) {
+        if matches!(value, Expr::Now) {
+            if col.ty != ColumnType::Timestamp {
+                self.error(
+                    "E_NOW_COLUMN",
+                    path,
+                    format!(
+                        "`now()` is a timestamp: column `{}` is {}",
+                        col.name,
+                        col.ty.sql()
+                    ),
+                );
+            }
+            return;
+        }
+        self.check_expr(scope, value, Some(&Self::column_type(col)), path);
+    }
+
+    /// The variable that receives the rows of a step: what a select reads, or what an insert, update or delete
+    /// returns (`RETURNING`). Typed after the ticked columns, or after the schema they are converted into.
+    fn sql_result(&mut self, path: &str, step: &Step, t: &Table, scope: &mut Scope) {
+        let Step::Sql {
+            id,
+            table,
+            bind,
+            columns,
+            many,
+            into,
+            ..
+        } = step
+        else {
+            return;
+        };
+        for (i, name) in columns.iter().enumerate() {
+            if t.column(name).is_none() {
+                self.error(
+                    "E_UNKNOWN_COLUMN",
+                    format!("{path}/columns/{i}"),
+                    format!("table `{table}` has no column `{name}`"),
+                );
+            }
+        }
+        let Some(var) = bind else {
+            self.error(
+                "E_SQL_BIND",
+                format!("{path}/bind"),
+                "name the variable that receives the result",
+            );
+            return;
+        };
+        self.check_var_name(var, &format!("{path}/bind"));
+        let ty = match into {
+            Some(schema) => {
+                self.sql_into(path, table, columns, t, schema);
+                TypeRef {
+                    repeated: *many,
+                    ..TypeRef::message(schema)
+                }
+            }
+            None => {
+                if *many {
+                    self.error(
+                        "E_SQL_MANY_INTO",
+                        format!("{path}/into"),
+                        "a list of rows has to be converted into a schema (`into`) to be used",
+                    );
+                }
+                TypeRef::message(sql_row_name(table, id))
+            }
+        };
+        scope.bind(var.clone(), ty);
     }
 
     /// `into`: every field of the schema is filled by the column of the same name, with the same type.
@@ -1752,6 +1814,14 @@ impl<'a> Checker<'a> {
                     Some(rp.ty)
                 }
             },
+            Expr::Now => {
+                self.error(
+                    "E_NOW_OUTSIDE_SQL",
+                    path,
+                    "`now()` is the database clock: it only fills a timestamp column of an SQL step",
+                );
+                None
+            }
             Expr::Literal { value } => match expected {
                 Some(to) => {
                     if let Err(e) = coerce_literal(value, to) {
@@ -1799,7 +1869,7 @@ impl<'a> Checker<'a> {
                     return;
                 }
                 if let (Some(l), Some(r)) = (&lp, &rp)
-                    && l != r
+                    && !l.accepts(r)
                 {
                     self.error(
                         "E_TYPE_MISMATCH",
@@ -1828,6 +1898,11 @@ impl<'a> Checker<'a> {
                                 "empty Rust expression",
                             );
                         }
+                        Expr::Now => self.error(
+                            "E_NOW_OUTSIDE_SQL",
+                            format!("{path}/{name}"),
+                            "`now()` is the database clock: it only fills a timestamp column of an SQL step",
+                        ),
                         _ => {}
                     }
                 }
@@ -2903,6 +2978,175 @@ mod tests {
             .steps
             .insert(0, limit(5, 60, lit("k")));
         assert!(errors(&p).contains(&"E_RATE_LIMIT_OUTSIDE_ROUTE".to_string()));
+    }
+
+    fn with_token() -> Project {
+        let mut p = sample::orders();
+        sample::add_single_use_token(&mut p);
+        p
+    }
+
+    fn token_step(p: &mut Project) -> &mut Step {
+        &mut p.services[0].routes[2].steps[1]
+    }
+
+    #[test]
+    fn an_update_can_return_the_row_it_changed() {
+        let mut p = with_token();
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+
+        // The row it gives back is typed after the ticked columns, so the response can read it...
+        let respond_reads = |p: &mut Project, path: &str| {
+            if let Step::Respond { fields, .. } = &mut p.services[0].routes[2].steps[2] {
+                fields[0].value = Expr::Path { path: path.into() };
+            }
+        };
+        // ...as what they are: `new_email` is nullable, so it is an optional string, not a text.
+        respond_reads(&mut p, "consumed.new_email");
+        assert!(
+            errors(&p).contains(&"E_TYPE_MISMATCH".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+        // ...and only them: `used` was not ticked.
+        respond_reads(&mut p, "consumed.used");
+        assert!(
+            errors(&p).contains(&"E_UNKNOWN_PATH".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+        respond_reads(&mut p, "consumed.account_id");
+
+        // A step that gives rows back names where they go; a list needs a schema, like a select.
+        {
+            let Step::Sql { bind, .. } = token_step(&mut p) else {
+                panic!()
+            };
+            *bind = None;
+        }
+        assert!(errors(&p).contains(&"E_SQL_BIND".to_string()));
+        {
+            let Step::Sql { bind, columns, .. } = token_step(&mut p) else {
+                panic!()
+            };
+            *bind = Some("consumed".into());
+            columns.push("ghost".into());
+        }
+        assert!(errors(&p).contains(&"E_UNKNOWN_COLUMN".to_string()));
+        {
+            let Step::Sql { columns, many, .. } = token_step(&mut p) else {
+                panic!()
+            };
+            columns.pop();
+            *many = true;
+        }
+        assert!(errors(&p).contains(&"E_SQL_MANY_INTO".to_string()));
+        // A delete can give rows back too.
+        {
+            let Step::Sql { many, op, .. } = token_step(&mut p) else {
+                panic!()
+            };
+            *many = false;
+            *op = SqlOp::Delete;
+        }
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+    }
+
+    #[test]
+    fn now_is_the_database_clock_of_a_timestamp_column() {
+        // `used` is a bool: it cannot be compared with a clock.
+        let mut p = with_token();
+        {
+            let Step::Sql { conditions, .. } = token_step(&mut p) else {
+                panic!()
+            };
+            conditions[2].value = Expr::Now;
+        }
+        assert!(
+            errors(&p).contains(&"E_NOW_COLUMN".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+        // It also fills a timestamp column.
+        let mut p = with_token();
+        {
+            let Step::Sql { values, .. } = token_step(&mut p) else {
+                panic!()
+            };
+            values.push(Assignment {
+                field: "expires_at".into(),
+                value: Expr::Now,
+            });
+        }
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        // But it is no value for a Rust expression: a variable, a branch or a response.
+        route_of(&mut p).steps.insert(
+            0,
+            Step::Branch {
+                id: "b".into(),
+                condition: Condition::Compare {
+                    left: Expr::Now,
+                    op: CmpOp::Gt,
+                    right: Expr::Literal { value: "x".into() },
+                },
+                then: vec![],
+                otherwise: vec![],
+            },
+        );
+        assert!(
+            errors(&p).contains(&"E_NOW_OUTSIDE_SQL".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+    }
+
+    #[test]
+    fn the_answer_to_a_missing_row_is_checked() {
+        // (expected code, how to break the answer)
+        type Case<'a> = (&'a str, &'a dyn Fn(&mut SqlMissing));
+        let cases: [Case; 3] = [
+            ("E_SQL_MISSING_STATUS", &|m| m.status = 200),
+            ("E_SQL_MISSING_STATUS", &|m| m.status = 600),
+            ("E_SQL_MISSING_MESSAGE", &|m| m.message = " ".into()),
+        ];
+        for (code, change) in cases {
+            let mut p = with_token();
+            if let Step::Sql { missing, .. } = token_step(&mut p) {
+                change(missing.as_mut().unwrap());
+            }
+            assert!(
+                errors(&p).contains(&code.to_string()),
+                "{code}: {:?}",
+                errors(&p)
+            );
+        }
+        // It only makes sense for a step that reads one row: not a list, not a step that gives nothing back.
+        let mut p = with_token();
+        {
+            let Step::Sql { many, .. } = token_step(&mut p) else {
+                panic!()
+            };
+            *many = true;
+        }
+        assert!(errors(&p).contains(&"E_SQL_MISSING_USELESS".to_string()));
+        let mut p = with_token();
+        {
+            let Step::Sql { columns, bind, .. } = token_step(&mut p) else {
+                panic!()
+            };
+            columns.clear();
+            *bind = None;
+        }
+        assert!(errors(&p).contains(&"E_SQL_MISSING_USELESS".to_string()));
+        // A gRPC handler has no status to answer with.
+        let mut p = with_token();
+        let step = token_step(&mut p).clone();
+        p.services[0].rpcs[0].steps.insert(0, step);
+        assert!(
+            errors(&p).contains(&"E_SQL_MISSING_OUTSIDE_ROUTE".to_string()),
+            "{:?}",
+            errors(&p)
+        );
     }
 
     #[test]

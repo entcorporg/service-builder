@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { exampleJson, exampleQuery } from '../json'
 import { addColumn, addForeignKey, addIndex, addTable, addUnique, makeStep, retargetForeignKey, renameColumn, renameTable, selectionForPath, addMessage, addRoute, addRpc, defaultStatus, pathParams, addTopic, autoMap, canConsume, canProduce, connectConsumer, consumersOf, declareProducer, removeService, renameService, renameField, renameMessage, renameTopic, nestable } from '../model'
+import { sqlPreview } from '../components/SqlStep'
 import { createTableSql } from '../components/TablesView'
-import { candidates, columnFieldType, columnType, fits, inputScope, scalar, scopeAfter, scopesOf, sqlRowName, typeOfField } from '../scope'
+import { candidates, columnFieldType, columnType, fits, sqlRows, inputScope, scalar, scopeAfter, scopesOf, sqlRowName, typeOfField } from '../scope'
 import type { Project } from '../types'
 
 const project = (): Project => ({
@@ -535,5 +536,58 @@ describe('rate limit and the response of a route', () => {
 
   it('starts a response on the route status and with no cookie', () => {
     expect(makeStep('respond', project(), inputScope('Order'), ctx)).toMatchObject({ status: null, cookies: [] })
+  })
+})
+
+describe('SQL steps that give rows back', () => {
+  type SqlStep = Extract<import('../types').Step, { type: 'sql' }>
+  const update = (over: Partial<SqlStep> = {}): SqlStep =>
+    ({
+      type: 'sql',
+      id: 'u1',
+      op: 'update',
+      table: 'orders',
+      bind: 'consumed',
+      columns: ['order_id', 'note'],
+      many: false,
+      into: null,
+      where: [{ column: 'order_id', op: 'eq', value: { kind: 'path', path: 'input.id' } }, { column: 'created_at', op: 'gt', value: { kind: 'now' } }],
+      values: [{ field: 'amount', value: { kind: 'literal', value: 1 } }],
+      orderBy: null,
+      descending: false,
+      limit: null,
+      missing: null,
+      ...over,
+    }) as SqlStep
+
+  it('binds the returned row, typed after the ticked columns, like a select', () => {
+    const p = project()
+    const { svc } = (() => {
+      const svc = p.services[0]!
+      const t = addTable(svc)
+      t.name = 'orders'
+      t.columns = [
+        { name: 'order_id', type: 'string', nullable: false, primaryKey: true, default: null },
+        { name: 'amount', type: 'int64', nullable: false, primaryKey: false, default: null },
+        { name: 'note', type: 'string', nullable: true, primaryKey: false, default: null },
+        { name: 'created_at', type: 'timestamp', nullable: false, primaryKey: false, default: 'now()' },
+      ]
+      svc.routes = [{ name: 'r', method: 'post', path: '/r', request: 'Order', response: 'Placed', status: 200, steps: [update()] }]
+      return { svc }
+    })()
+    expect(scopeAfter(p, inputScope('Order'), update()).consumed).toMatchObject({ type: { kind: 'message' }, repeated: false })
+    const row = sqlRows(p).get(sqlRowName('orders', 'u1'))!
+    expect(row.fields).toEqual([
+      { name: 'order_id', type: { kind: 'string' }, repeated: false, optional: false },
+      { name: 'note', type: { kind: 'string' }, repeated: false, optional: true },
+    ])
+    // An update that gives nothing back binds nothing.
+    expect(scopeAfter(p, inputScope('Order'), update({ columns: [], bind: null }))).toEqual(inputScope('Order'))
+    expect(svc.routes).toHaveLength(1)
+  })
+
+  it('reads as the SQL it generates', () => {
+    expect(sqlPreview(update())).toBe('UPDATE orders SET amount = 1 WHERE order_id = input.id AND created_at > now() RETURNING order_id, note')
+    expect(sqlPreview(update({ columns: [], bind: null }))).not.toContain('RETURNING')
   })
 })

@@ -107,7 +107,7 @@ export function sqlRows(project: Project): Map<string, Message> {
       if (s.type === 'branch') {
         visit(svc, s.then)
         visit(svc, s.otherwise)
-      } else if (s.type === 'sql' && s.op === 'select' && !s.into) {
+      } else if (s.type === 'sql' && s.columns.length > 0 && !s.into) {
         const table = svc.tables.find((t) => t.name === s.table)
         if (!table) continue
         rows.set(sqlRowName(s.table, s.id), {
@@ -170,7 +170,8 @@ export function scopeAfter(project: Project, scope: Scope, step: Step): Scope {
   if ((step.type === 'hashPassword' || step.type === 'randomToken' || step.type === 'sha256' || step.type === 'verifyPassword') && step.bind) {
     return { ...scope, [step.bind]: scalar(step.type === 'verifyPassword' ? 'bool' : 'string') }
   }
-  if (step.type === 'sql' && step.op === 'select' && step.bind) {
+  // A select, or a step that gives back the rows it wrote (`RETURNING`).
+  if (step.type === 'sql' && step.columns.length > 0 && step.bind) {
     const message = step.into ?? sqlRowName(step.table, step.id)
     return { ...scope, [step.bind]: { type: { kind: 'message', name: message }, repeated: step.many, optional: false } }
   }

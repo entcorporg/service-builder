@@ -3,7 +3,7 @@ import { type Candidate, candidates, fits, isMessage, isSimpleScalar, type Scope
 import type { Expr } from '../types'
 import { useStore } from '../store'
 
-type Mode = 'unset' | 'path' | 'literal' | 'raw'
+type Mode = 'unset' | 'path' | 'literal' | 'raw' | 'now'
 
 const modeOf = (e: Expr | null): Mode => (e === null ? 'unset' : e.kind)
 
@@ -37,6 +37,8 @@ function defaultFor(mode: Mode, target: TypeRef | null, options: Candidate[]): E
       return { kind: 'path', path: options[0]?.path ?? '' }
     case 'raw':
       return { kind: 'raw', code: '' }
+    case 'now':
+      return { kind: 'now' }
     case 'literal': {
       const k = literalKind(target)
       return { kind: 'literal', value: k === 'list' ? [] : k === 'bool' ? false : k === 'int' || k === 'float' ? 0 : '' }
@@ -58,6 +60,8 @@ export function ExprEditor(props: {
   target: TypeRef | null
   scope: Scope
   allowUnset?: boolean
+  /** Offers the database clock: the value of a timestamp column of an SQL step. */
+  allowNow?: boolean
   onChange: (expr: Expr | null) => void
   label: string
 }) {
@@ -92,7 +96,10 @@ export function ExprEditor(props: {
         <option value="path">Champ</option>
         <option value="literal">Valeur</option>
         <option value="raw">Rust</option>
+        {(props.allowNow || mode === 'now') && <option value="now">Maintenant</option>}
       </select>
+
+      {mode === 'now' && <span className="expr-value muted" aria-label={`${props.label} : horloge`}>l’heure de la base (<code>now()</code>)</span>}
 
       {mode === 'path' && (
         <select

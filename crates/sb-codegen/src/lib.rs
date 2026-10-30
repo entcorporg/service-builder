@@ -738,6 +738,32 @@ mod tests {
     }
 
     #[test]
+    fn a_single_use_token_is_consumed_by_one_statement() {
+        let mut p = sample::orders();
+        sample::add_single_use_token(&mut p);
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&p)),
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        // One UPDATE ... RETURNING: the state, the expiry (database clock, no parameter) and the marking
+        // happen together, so two requests with the same token cannot both get a row.
+        assert!(api.contains(
+            "UPDATE \\\"auth_tokens\\\" SET \\\"used\\\" = $1 WHERE \\\"token_hash\\\" = $2 AND \\\"kind\\\" = $3 AND \\\"used\\\" = $4 AND \\\"expires_at\\\" > now() RETURNING \\\"account_id\\\", \\\"new_email\\\""
+        ), "{api}");
+        assert!(api.contains(".fetch_optional(&mut *tx)"));
+        // No row: the answer the author chose, not the default 404.
+        assert!(api.contains("HttpError::new(400, \"invalid or expired token\")"));
+        assert!(!api.contains("auth_tokens: no row matches"));
+        assert!(api.contains("struct AuthTokensRowT2 {"));
+        // The table is created, with the timestamp column the clock is compared with.
+        let schema = file(&files, "services/orders/src/app/schema.rs");
+        assert!(schema.contains("\\\"expires_at\\\" TIMESTAMPTZ NOT NULL"));
+    }
+
+    #[test]
     fn routes_sharing_a_path_are_served_by_one_method_router() {
         let mut p = sample::orders();
         let mut delete = p.services[0].routes[1].clone();
