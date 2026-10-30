@@ -693,3 +693,58 @@ pub fn add_sealed_text(p: &mut Project) {
         ],
     });
 }
+
+/// Adds to the first service a sign-up route whose request carries rules: an e-mail, a password of 10 to 128
+/// characters (the bound that keeps a huge one away from argon2), an optional SIREN, a list of contact
+/// e-mails and a nested company. The route reads none of them by hand: the generated handler checks them
+/// before any step runs.
+pub fn add_signup(p: &mut Project) {
+    let string = || FieldType::String;
+    let ruled = |name: &str, rules: Vec<Rule>| {
+        let mut f = field(name, string());
+        f.rules = rules;
+        f
+    };
+    let mut siren = ruled("siren", vec![Rule::Siren]);
+    siren.optional = true;
+    let mut contacts = ruled("contacts", vec![Rule::Email]);
+    contacts.repeated = true;
+    let company = msg_field("company", "SignupCompany");
+    p.messages.push(api(
+        "SignupCompany",
+        vec![ruled("name", vec![Rule::Length { min: 1, max: 100 }])],
+    ));
+    p.messages.push(api(
+        "SignupBody",
+        vec![
+            ruled("email", vec![Rule::Email]),
+            ruled("password", vec![Rule::Length { min: 10, max: 128 }]),
+            siren,
+            contacts,
+            company,
+        ],
+    ));
+    p.messages
+        .push(api("SignupAck", vec![field("email", string())]));
+    p.services[0].routes.push(Route {
+        name: "signup".into(),
+        method: HttpMethod::Post,
+        path: "/signup".into(),
+        request: "SignupBody".into(),
+        response: "SignupAck".into(),
+        status: 201,
+        steps: vec![
+            Step::HashPassword {
+                id: "s1".into(),
+                input: path("input.password"),
+                bind: "password_hash".into(),
+            },
+            Step::Respond {
+                id: "s2".into(),
+                fields: vec![set("email", path("input.email"))],
+                status: None,
+                cookies: vec![],
+            },
+        ],
+    });
+}

@@ -10,6 +10,7 @@ pub mod dedup;
 pub mod jobs;
 pub mod outbox;
 pub mod rate_limit;
+pub mod validation;
 pub mod webhook;
 
 pub use outbox::connect as connect_database;

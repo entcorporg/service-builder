@@ -1,8 +1,8 @@
 import { nestable, nextTag, renameField } from '../model'
 import { SCALARS } from '../scope'
 import { useStore } from '../store'
-import type { Field, FieldType, MessageKind } from '../types'
-import { CommitInput, IconButton } from './ui'
+import type { Field, FieldType, MessageKind, Rule } from '../types'
+import { CommitInput, IconButton, NumberInput } from './ui'
 
 // API schemas travel as JSON: bytes and timestamp have no JSON form yet.
 const TYPE_OPTIONS = (kind: MessageKind): string[] => (kind === 'api' ? [...SCALARS] : [...SCALARS, 'bytes', 'timestamp'])
@@ -13,6 +13,53 @@ export function typeValue(t: FieldType): string {
 
 export function parseType(v: string): FieldType {
   return v.startsWith('msg:') ? { kind: 'message', name: v.slice(4) } : ({ kind: v } as FieldType)
+}
+
+const RULES: { rule: Rule['rule']; label: string; make: () => Rule }[] = [
+  { rule: 'length', label: 'Longueur', make: () => ({ rule: 'length', min: 1, max: 128 }) },
+  { rule: 'email', label: 'E-mail', make: () => ({ rule: 'email' }) },
+  { rule: 'siren', label: 'SIREN', make: () => ({ rule: 'siren' }) },
+]
+
+/** The rules of a text field of an API schema: what a request must satisfy, checked before any step runs. */
+function FieldRules(props: { field: Field; onChange: (fn: (f: Field) => void) => void }) {
+  const rules = props.field.rules ?? []
+  const left = RULES.filter((r) => !rules.some((x) => x.rule === r.rule))
+  const set = (fn: (rules: Rule[]) => void) =>
+    props.onChange((f) => {
+      const next = [...(f.rules ?? [])]
+      fn(next)
+      f.rules = next.length > 0 ? next : undefined
+    })
+  return (
+    <div className="flex flex-wrap items-center gap-2 pb-1.5 pl-9 text-xs" role="group" aria-label={`Règles de ${props.field.name}`}>
+      <span className="text-2xs tracking-[0.7px] text-faint uppercase">Règles</span>
+      {rules.map((r, i) => (
+        <span key={r.rule} className="inline-flex items-center gap-1.5 rounded-md border border-line bg-panel-2 py-0.5 pr-0.5 pl-2">
+          {r.rule === 'length' ? (
+            <>
+              longueur
+              <span className="w-14"><NumberInput label={`Longueur minimale de ${props.field.name}`} min={0} value={r.min} onChange={(n) => set((x) => (x[i] = { ...r, min: n }))} /></span>
+              à
+              <span className="w-14"><NumberInput label={`Longueur maximale de ${props.field.name}`} min={0} value={r.max} onChange={(n) => set((x) => (x[i] = { ...r, max: n }))} /></span>
+              <span className="text-faint" title="Des caractères, pas des octets ; le texte est rogné avant d’être compté">car.</span>
+            </>
+          ) : (
+            RULES.find((x) => x.rule === r.rule)!.label
+          )}
+          <IconButton icon="x" size={11} title={`Retirer la règle ${r.rule} de ${props.field.name}`} onClick={() => set((x) => void x.splice(i, 1))} />
+        </span>
+      ))}
+      {left.length > 0 && (
+        <select aria-label={`Ajouter une règle à ${props.field.name}`} value="" onChange={(e) => set((x) => void x.push(RULES.find((r) => r.rule === e.target.value)!.make()))}>
+          <option value="">+ règle…</option>
+          {left.map((r) => (
+            <option key={r.rule} value={r.rule}>{r.label}</option>
+          ))}
+        </select>
+      )}
+    </div>
+  )
 }
 
 export function FieldRow(props: {
@@ -30,11 +77,13 @@ export function FieldRow(props: {
   const messages = nestable(project, props.kind)
   const f = props.field
   const isMsg = f.type.kind === 'message'
+  const text = f.type.kind === 'string' || f.type.kind === 'uuid'
   return (
+    <>
     <div className="field-row">
       <span className="tag" title="Numéro de champ protobuf, stable">#{props.tag}</span>
       <CommitInput value={f.name} mono label="Nom du champ" onCommit={props.onRename} />
-      <select aria-label="Type du champ" value={typeValue(f.type)} onChange={(e) => props.onChange((x) => { x.type = parseType(e.target.value); if (x.type.kind === 'message') x.optional = false })}>
+      <select aria-label="Type du champ" value={typeValue(f.type)} onChange={(e) => props.onChange((x) => { x.type = parseType(e.target.value); if (x.type.kind === 'message') x.optional = false; if (x.type.kind !== 'string' && x.type.kind !== 'uuid') x.rules = undefined })}>
         <optgroup label="Types simples">
           {TYPE_OPTIONS(props.kind).map((k) => (
             <option key={k} value={k}>{k}</option>
@@ -67,6 +116,8 @@ export function FieldRow(props: {
       <IconButton icon="trash" title={`Supprimer ${f.name}`} danger onClick={props.onDelete} />
       {props.origin && <span className="origin" title="D’où vient la valeur dans la requête HTTP">{props.origin}</span>}
     </div>
+    {props.kind === 'api' && text && <FieldRules field={f} onChange={props.onChange} />}
+    </>
   )
 }
 
