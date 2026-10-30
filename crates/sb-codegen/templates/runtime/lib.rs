@@ -8,6 +8,7 @@ pub mod crypto;
 pub mod db;
 pub mod dedup;
 pub mod jobs;
+pub mod jwt;
 pub mod outbox;
 pub mod rate_limit;
 pub mod validation;

@@ -346,6 +346,18 @@ fn config_rs(project: &Project, service: &Service, publishes: bool) -> String {
             c.line(format!("eda_runtime::webhook::secret({env:?})?;"));
         }
     }
+    let (seeds, urls) = jwt_settings(service);
+    if !seeds.is_empty() || !urls.is_empty() {
+        c.line(
+            "// The keys of the tokens: a service that cannot sign or verify them does not start.",
+        );
+        for env in &seeds {
+            c.line(format!("eda_runtime::jwt::JwtKeys::from_env({env:?})?;"));
+        }
+        for env in &urls {
+            c.line(format!("eda_runtime::jwt::jwks_url({env:?})?;"));
+        }
+    }
     let keys = encryption_keys(service);
     if !keys.is_empty() {
         c.line("// The encryption keys: a service that cannot read what it stored does not start.");
@@ -1174,6 +1186,48 @@ fn hmac_of(route: &sb_model::Route) -> Option<(&str, &str, u32)> {
     }
 }
 
+/// A claim as a JSON value: a path keeps its type (a list stays a list, an absent optional is `null`), a literal is
+/// its JSON, and raw Rust is anything that serializes.
+fn claim_json(project: &Project, scope: &Scope, value: &Expr) -> Result<String, CodegenError> {
+    Ok(match value {
+        Expr::Path { path } => {
+            let rp = sb_model::typing::resolve_path(project, scope, path)
+                .map_err(CodegenError::Internal)?;
+            format!("eda_runtime::jwt::json!({})", crate::expr::path_code(&rp))
+        }
+        Expr::Literal { value } => format!("eda_runtime::jwt::json!({value})"),
+        Expr::Raw { code } => format!("eda_runtime::jwt::json!({})", code.trim()),
+        Expr::Now => {
+            return Err(CodegenError::Internal(
+                "`now()` only exists in an SQL step".into(),
+            ));
+        }
+    })
+}
+
+/// The seeds and the JWKS URLs the JWT steps of a service read from the environment, once each.
+fn jwt_settings(service: &Service) -> (BTreeSet<&str>, BTreeSet<&str>) {
+    let (mut seeds, mut urls) = (BTreeSet::new(), BTreeSet::new());
+    for step in service.handler_steps() {
+        step.walk(&mut |s| match s {
+            Step::SignJwt { key_env, .. } => {
+                seeds.insert(key_env.as_str());
+            }
+            Step::Jwks { key_envs, .. } => seeds.extend(key_envs.iter().map(String::as_str)),
+            Step::VerifyJwt { source, .. } => match source {
+                sb_model::JwksSource::Keys { key_envs } => {
+                    seeds.extend(key_envs.iter().map(String::as_str))
+                }
+                sb_model::JwksSource::Url { url_env } => {
+                    urls.insert(url_env.as_str());
+                }
+            },
+            _ => {}
+        });
+    }
+    (seeds, urls)
+}
+
 /// The environment variables of the encryption keys a service uses, once each.
 fn encryption_keys(service: &Service) -> BTreeSet<&str> {
     let mut keys = BTreeSet::new();
@@ -1583,6 +1637,75 @@ fn steps(
                 ));
                 scope.bind(bind.clone(), text);
             }
+            Step::SignJwt {
+                key_env,
+                issuer,
+                ttl_secs,
+                claims,
+                bind,
+                ..
+            } => {
+                c.open(format!("let {bind}: String ="));
+                c.line("let mut claims = eda_runtime::jwt::json::Map::new();");
+                for claim in claims {
+                    let value = claim_json(project, scope, &claim.value)?;
+                    c.line(format!(
+                        "claims.insert({:?}.to_string(), {value});",
+                        claim.field
+                    ));
+                }
+                c.line(format!(
+                    "eda_runtime::jwt::sign({key_env:?}, {issuer:?}, {ttl_secs}, claims)?"
+                ));
+                c.close_with(";");
+                scope.bind(bind.clone(), TypeRef::scalar(FieldType::String));
+            }
+            Step::VerifyJwt {
+                token,
+                bearer,
+                source,
+                issuer,
+                schema,
+                bind,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let token = lower(project, scope, token, &text)?;
+                let source = match source {
+                    sb_model::JwksSource::Keys { key_envs } => {
+                        let list: Vec<String> = key_envs.iter().map(|k| format!("{k:?}")).collect();
+                        format!("eda_runtime::jwt::Source::Keys(&[{}])", list.join(", "))
+                    }
+                    sb_model::JwksSource::Url { url_env } => {
+                        format!("eda_runtime::jwt::Source::Url({url_env:?})")
+                    }
+                };
+                c.open(format!("let {bind}: pb::{schema} ="));
+                c.line(format!("let token = {token};"));
+                if *bearer {
+                    c.line("let token = eda_runtime::jwt::bearer(&token);");
+                }
+                c.line(format!(
+                    "eda_runtime::jwt::claims_into(eda_runtime::jwt::verify({source}, {issuer:?}, {}).await?)?",
+                    if *bearer { "token" } else { "&token" }
+                ));
+                c.close_with(";");
+                scope.bind(bind.clone(), TypeRef::message(schema));
+            }
+            Step::Jwks { key_envs, bind, .. } => {
+                let list: Vec<String> = key_envs.iter().map(|k| format!("{k:?}")).collect();
+                c.line(format!("let {bind} = pb::Jwks {{"));
+                c.line(format!(
+                    "    keys: eda_runtime::jwt::public_keys(&[{}])?",
+                    list.join(", ")
+                ));
+                c.line("        .into_iter()");
+                c.line("        .map(|k| pb::Jwk { kty: k.kty, crv: k.crv, alg: k.alg, kid: k.kid, x: k.x, ..Default::default() })");
+                c.line("        .collect(),");
+                c.line("    ..Default::default()");
+                c.line("};");
+                scope.bind(bind.clone(), TypeRef::message("Jwks"));
+            }
             Step::RandomToken { bind, .. } => {
                 c.line(format!(
                     "let {bind}: String = eda_runtime::crypto::random_token();"
@@ -1958,6 +2081,9 @@ fn describe(step: &Step) -> String {
         Step::RandomToken { bind, .. } => format!("random token into {bind}"),
         Step::Sha256 { bind, .. } => format!("sha256 into {bind}"),
         Step::Encrypt { bind, .. } => format!("encrypt into {bind}"),
+        Step::SignJwt { bind, .. } => format!("sign a token into {bind}"),
+        Step::VerifyJwt { bind, .. } => format!("verify a token into {bind}"),
+        Step::Jwks { bind, .. } => format!("publish the public keys into {bind}"),
         Step::Decrypt { bind, .. } => format!("decrypt into {bind}"),
         Step::Sql { op, table, .. } => format!(
             "sql {} {table}",

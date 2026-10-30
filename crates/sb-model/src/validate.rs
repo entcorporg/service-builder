@@ -1723,6 +1723,144 @@ impl<'a> Checker<'a> {
                 }
                 true
             }
+            Step::SignJwt {
+                key_env,
+                issuer,
+                ttl_secs,
+                claims,
+                bind,
+                ..
+            } => {
+                self.check_var_name(bind, &format!("{path}/bind"));
+                self.jwt_key_env(&format!("{path}/keyEnv"), key_env);
+                self.jwt_issuer(&format!("{path}/issuer"), issuer);
+                if !(1..=2_592_000).contains(ttl_secs) {
+                    self.error(
+                        "E_JWT_TTL",
+                        format!("{path}/ttlSecs"),
+                        "a token lives 1 second to 30 days (2592000)",
+                    );
+                }
+                let mut seen = HashSet::new();
+                for (i, claim) in claims.iter().enumerate() {
+                    let cp = format!("{path}/claims/{i}");
+                    let name = claim.field.as_str();
+                    let valid_name = name.starts_with(|c: char| c.is_ascii_lowercase())
+                        && name.len() <= 32
+                        && name
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+                    if !valid_name {
+                        self.error(
+                            "E_JWT_CLAIM_NAME",
+                            format!("{cp}/field"),
+                            format!("claim name `{name}` must be lower case letters, digits and `_`, 32 characters at most"),
+                        );
+                    } else if matches!(name, "iss" | "iat" | "exp") {
+                        self.error(
+                            "E_JWT_CLAIM_RESERVED",
+                            format!("{cp}/field"),
+                            format!("`{name}` is set by the step: the issuer, and the issue and expiry times"),
+                        );
+                    }
+                    if !seen.insert(name) {
+                        self.error(
+                            "E_JWT_CLAIM_DUPLICATE",
+                            format!("{cp}/field"),
+                            format!("claim `{name}` is set twice"),
+                        );
+                    }
+                    // A claim is JSON: text, number, boolean, or a list or an optional of those.
+                    if let Some(t) =
+                        self.check_expr(scope, &claim.value, None, &format!("{cp}/value"))
+                        && (t.is_message()
+                            || matches!(t.ty, FieldType::Bytes | FieldType::Timestamp))
+                    {
+                        self.error(
+                            "E_JWT_CLAIM_TYPE",
+                            format!("{cp}/value"),
+                            format!("claim `{name}` is a {t}: a claim is a text, a number, a boolean, or a list of those"),
+                        );
+                    }
+                }
+                if !seen.contains("sub") {
+                    self.error(
+                        "E_JWT_NO_SUB",
+                        format!("{path}/claims"),
+                        "an access token names who it is for: add a `sub` claim (verifying a token requires it)",
+                    );
+                }
+                scope.bind(bind.clone(), TypeRef::scalar(FieldType::String));
+                false
+            }
+            Step::VerifyJwt {
+                token,
+                source,
+                issuer,
+                schema,
+                bind,
+                ..
+            } => {
+                if !matches!(env.handler, Handler::Route { .. }) {
+                    self.error(
+                        "E_JWT_OUTSIDE_ROUTE",
+                        path,
+                        "a refused token is a 401: verifying one only makes sense in an HTTP route",
+                    );
+                }
+                self.check_var_name(bind, &format!("{path}/bind"));
+                self.jwt_issuer(&format!("{path}/issuer"), issuer);
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, token, Some(&text), &format!("{path}/token"));
+                match source {
+                    JwksSource::Keys { key_envs } => {
+                        if key_envs.is_empty() {
+                            self.error(
+                                "E_JWT_KEYS",
+                                format!("{path}/source/keyEnvs"),
+                                "name at least one seed whose public key checks the token",
+                            );
+                        }
+                        for (i, k) in key_envs.iter().enumerate() {
+                            self.jwt_key_env(&format!("{path}/source/keyEnvs/{i}"), k);
+                        }
+                    }
+                    JwksSource::Url { url_env } => {
+                        self.jwt_key_env(&format!("{path}/source/urlEnv"), url_env)
+                    }
+                }
+                match p.message(schema) {
+                    Some(m) if m.kind == MessageKind::Api => {}
+                    Some(_) => self.error(
+                        "E_JWT_SCHEMA",
+                        format!("{path}/schema"),
+                        format!("`{schema}` is not an API schema: the claims are read as JSON"),
+                    ),
+                    None => self.error(
+                        "E_JWT_SCHEMA",
+                        format!("{path}/schema"),
+                        format!("unknown schema `{schema}`: declare an API schema with the claims to read (`sub`, `roles`...)"),
+                    ),
+                }
+                scope.bind(bind.clone(), TypeRef::message(schema));
+                false
+            }
+            Step::Jwks { key_envs, bind, .. } => {
+                self.check_var_name(bind, &format!("{path}/bind"));
+                if key_envs.is_empty() {
+                    self.error(
+                        "E_JWT_KEYS",
+                        format!("{path}/keyEnvs"),
+                        "name at least one seed to publish the public key of",
+                    );
+                }
+                for (i, k) in key_envs.iter().enumerate() {
+                    self.jwt_key_env(&format!("{path}/keyEnvs/{i}"), k);
+                }
+                self.jwks_schema(path);
+                scope.bind(bind.clone(), TypeRef::message("Jwks"));
+                false
+            }
             Step::Encrypt {
                 key_env,
                 input,
@@ -1903,6 +2041,51 @@ impl<'a> Checker<'a> {
                 }
                 false
             }
+        }
+    }
+
+    /// The name of an environment variable.
+    fn jwt_key_env(&mut self, path: &str, name: &str) {
+        if !is_env_name(name) {
+            self.error(
+                "E_KEY_ENV",
+                path,
+                format!("`{name}` is not an environment variable name (e.g. `JWT_SIGNING_KEY`)"),
+            );
+        }
+    }
+
+    fn jwt_issuer(&mut self, path: &str, issuer: &str) {
+        if issuer.trim().is_empty() || issuer.chars().count() > 100 {
+            self.error(
+                "E_JWT_ISSUER",
+                path,
+                "the issuer is a name of 1 to 100 characters, the same on the service that signs and on those that verify",
+            );
+        }
+    }
+
+    /// The step `jwks` fills the API schema `Jwks`, a list of `Jwk`: the shape of a JWKS (RFC 7517).
+    fn jwks_schema(&mut self, path: &str) {
+        let p = self.project;
+        let ok = p.message("Jwks").is_some_and(|m| {
+            m.kind == MessageKind::Api
+                && m.field("keys").is_some_and(|f| {
+                    f.repeated && matches!(&f.ty, FieldType::Message { name } if name == "Jwk")
+                })
+        }) && p.message("Jwk").is_some_and(|m| {
+            m.kind == MessageKind::Api
+                && ["kty", "crv", "alg", "kid", "x"].iter().all(|n| {
+                    m.field(n)
+                        .is_some_and(|f| f.ty == FieldType::String && !f.repeated && !f.optional)
+                })
+        });
+        if !ok {
+            self.error(
+                "E_JWKS_SCHEMA",
+                path,
+                "publishing a JWKS needs the API schemas `Jwks` (`keys`: a list of `Jwk`) and `Jwk` (`kty`, `crv`, `alg`, `kid`, `x`: texts)",
+            );
         }
     }
 
@@ -3815,6 +3998,231 @@ mod tests {
             .collect();
         assert_eq!(warned.len(), 2, "{warned:?}");
         assert!(warned[0].message.contains("never checked"));
+    }
+
+    fn with_jwt() -> Project {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        p
+    }
+
+    /// The `whoami` route is the third; its `verifyJwt` is the first step, the `jwks` route is the fourth.
+    fn jwt_step(p: &mut Project, route: usize) -> &mut Step {
+        &mut p.services[0].routes[route].steps[0]
+    }
+
+    #[test]
+    fn a_token_can_be_signed_checked_and_its_keys_published() {
+        let p = with_jwt();
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+        // A signed claim keeps its type: the verifying side reads `claims.roles` as a list of texts, as the schema says.
+        let mut p = with_jwt();
+        if let Step::Respond { fields, .. } = &mut p.services[0].routes[2].steps[1] {
+            fields[1].value = Expr::Path {
+                path: "claims.sub".into(),
+            };
+        }
+        assert!(
+            errors(&p).contains(&"E_TYPE_MISMATCH".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+    }
+
+    #[test]
+    fn the_claims_of_a_token_are_checked() {
+        // (expected code, how to break the step)
+        type Case<'a> = (&'a str, &'a dyn Fn(&mut Step));
+        fn sign(step: &mut Step) -> &mut Vec<Assignment> {
+            match step {
+                Step::SignJwt { claims, .. } => claims,
+                _ => panic!("not a signJwt"),
+            }
+        }
+        let cases: [Case; 7] = [
+            ("E_JWT_CLAIM_RESERVED", &|s| {
+                sign(s).push(Assignment {
+                    field: "exp".into(),
+                    value: Expr::Literal { value: 1.into() },
+                })
+            }),
+            ("E_JWT_CLAIM_RESERVED", &|s| sign(s)[0].field = "iss".into()),
+            ("E_JWT_CLAIM_NAME", &|s| {
+                sign(s)[0].field = "Sub Ject".into()
+            }),
+            ("E_JWT_CLAIM_DUPLICATE", &|s| {
+                let again = sign(s)[0].clone();
+                sign(s).push(again)
+            }),
+            ("E_JWT_NO_SUB", &|s| sign(s)[0].field = "uid".into()),
+            ("E_JWT_CLAIM_TYPE", &|s| {
+                sign(s)[0].value = Expr::Path {
+                    path: "input".into(),
+                }
+            }),
+            ("E_UNKNOWN_PATH", &|s| {
+                sign(s)[0].value = Expr::Path {
+                    path: "nope".into(),
+                }
+            }),
+        ];
+        for (code, change) in cases {
+            let mut p = with_jwt();
+            // Add the step to a route of the sample.
+            let mut step = Step::SignJwt {
+                id: "j".into(),
+                key_env: "JWT_SIGNING_KEY".into(),
+                issuer: "orders".into(),
+                ttl_secs: 300,
+                claims: vec![Assignment {
+                    field: "sub".into(),
+                    value: Expr::Path {
+                        path: "input.order_id".into(),
+                    },
+                }],
+                bind: "token".into(),
+            };
+            change(&mut step);
+            p.services[0].routes[1].steps.insert(0, step);
+            assert!(
+                errors(&p).contains(&code.to_string()),
+                "{code}: {:?}",
+                errors(&p)
+            );
+        }
+        // Lifetime, issuer and key.
+        for (code, change) in [
+            (
+                "E_JWT_TTL",
+                &(|s: &mut Step| {
+                    if let Step::SignJwt { ttl_secs, .. } = s {
+                        *ttl_secs = 0
+                    }
+                }) as &dyn Fn(&mut Step),
+            ),
+            ("E_JWT_TTL", &|s| {
+                if let Step::SignJwt { ttl_secs, .. } = s {
+                    *ttl_secs = 2_592_001
+                }
+            }),
+            ("E_JWT_ISSUER", &|s| {
+                if let Step::SignJwt { issuer, .. } = s {
+                    issuer.clear()
+                }
+            }),
+            ("E_KEY_ENV", &|s| {
+                if let Step::SignJwt { key_env, .. } = s {
+                    *key_env = "signing-key".into()
+                }
+            }),
+        ] {
+            let mut p = with_jwt();
+            let mut step = Step::SignJwt {
+                id: "j".into(),
+                key_env: "JWT_SIGNING_KEY".into(),
+                issuer: "orders".into(),
+                ttl_secs: 300,
+                claims: vec![Assignment {
+                    field: "sub".into(),
+                    value: Expr::Path {
+                        path: "input.order_id".into(),
+                    },
+                }],
+                bind: "token".into(),
+            };
+            change(&mut step);
+            p.services[0].routes[1].steps.insert(0, step);
+            assert!(
+                errors(&p).contains(&code.to_string()),
+                "{code}: {:?}",
+                errors(&p)
+            );
+        }
+    }
+
+    #[test]
+    fn verifying_a_token_and_publishing_keys_are_checked() {
+        type Case<'a> = (&'a str, usize, &'a dyn Fn(&mut Step));
+        let cases: [Case; 8] = [
+            ("E_JWT_SCHEMA", 2, &|s| {
+                if let Step::VerifyJwt { schema, .. } = s {
+                    *schema = "Nope".into()
+                }
+            }),
+            ("E_JWT_SCHEMA", 2, &|s| {
+                if let Step::VerifyJwt { schema, .. } = s {
+                    *schema = "Customer".into()
+                }
+            }),
+            ("E_JWT_KEYS", 2, &|s| {
+                if let Step::VerifyJwt { source, .. } = s {
+                    *source = JwksSource::Keys { key_envs: vec![] }
+                }
+            }),
+            ("E_KEY_ENV", 2, &|s| {
+                if let Step::VerifyJwt { source, .. } = s {
+                    *source = JwksSource::Url {
+                        url_env: "auth url".into(),
+                    }
+                }
+            }),
+            ("E_JWT_ISSUER", 2, &|s| {
+                if let Step::VerifyJwt { issuer, .. } = s {
+                    issuer.clear()
+                }
+            }),
+            ("E_TYPE_MISMATCH", 2, &|s| {
+                if let Step::VerifyJwt { token, .. } = s {
+                    *token = Expr::Path {
+                        path: "input".into(),
+                    }
+                }
+            }),
+            ("E_JWT_KEYS", 3, &|s| {
+                if let Step::Jwks { key_envs, .. } = s {
+                    key_envs.clear()
+                }
+            }),
+            ("E_KEY_ENV", 3, &|s| {
+                if let Step::Jwks { key_envs, .. } = s {
+                    key_envs[0] = "lower".into()
+                }
+            }),
+        ];
+        for (code, route, change) in cases {
+            let mut p = with_jwt();
+            change(jwt_step(&mut p, route));
+            assert!(
+                errors(&p).contains(&code.to_string()),
+                "{code}: {:?}",
+                errors(&p)
+            );
+        }
+        // The JWKS needs its two schemas, in the shape of RFC 7517.
+        let mut p = with_jwt();
+        p.messages.retain(|m| m.name != "Jwk");
+        assert!(
+            errors(&p).contains(&"E_JWKS_SCHEMA".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+        let mut p = with_jwt();
+        p.messages
+            .iter_mut()
+            .find(|m| m.name == "Jwk")
+            .unwrap()
+            .fields
+            .retain(|f| f.name != "kid");
+        assert!(errors(&p).contains(&"E_JWKS_SCHEMA".to_string()));
+        // Refusing a token is a 401: HTTP only.
+        let mut p = with_jwt();
+        let step = jwt_step(&mut p, 2).clone();
+        p.services[0].rpcs[0].steps.insert(0, step);
+        assert!(
+            errors(&p).contains(&"E_JWT_OUTSIDE_ROUTE".to_string()),
+            "{:?}",
+            errors(&p)
+        );
     }
 
     #[test]
