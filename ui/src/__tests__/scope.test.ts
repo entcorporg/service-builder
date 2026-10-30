@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { exampleJson, exampleQuery } from '../json'
-import { addColumn, addForeignKey, addIndex, addTable, addUnique, makeStep, retargetForeignKey, renameColumn, renameTable, selectionForPath, addMessage, addRoute, addRpc, defaultStatus, pathParams, addTopic, autoMap, canConsume, canProduce, connectConsumer, consumersOf, declareProducer, removeService, renameService, renameField, renameMessage, renameTopic, nestable } from '../model'
+import { addColumn, addForeignKey, addJob, addIndex, addTable, addUnique, makeStep, retargetForeignKey, renameColumn, renameTable, selectionForPath, addMessage, addRoute, addRpc, defaultStatus, pathParams, addTopic, autoMap, canConsume, canProduce, connectConsumer, consumersOf, declareProducer, removeService, renameService, renameField, renameMessage, renameTopic, nestable } from '../model'
 import { sqlPreview } from '../components/SqlStep'
+import { everyLabel } from '../components/Inspector'
 import { createTableSql } from '../components/TablesView'
 import { candidates, columnFieldType, columnType, fits, sqlRows, inputScope, scalar, scopeAfter, scopesOf, sqlRowName, typeOfField } from '../scope'
 import type { Project } from '../types'
@@ -32,6 +33,7 @@ const project = (): Project => ({
       httpPort: null,
       routes: [],
       tables: [],
+      jobs: [],
       position: { x: 0, y: 0 },
       rpcs: [
         {
@@ -126,7 +128,7 @@ describe('rename cascades', () => {
   it('finds the services consuming a topic', () => {
     const p = project()
     expect(consumersOf(p, 'orders.placed').map((s) => s.name)).toEqual(['Orders'])
-    p.services.push({ name: 'Notifications', port: 50052, position: { x: 0, y: 0 }, rpcs: [], httpPort: null, routes: [], tables: [], consumers: [] })
+    p.services.push({ name: 'Notifications', port: 50052, position: { x: 0, y: 0 }, rpcs: [], httpPort: null, routes: [], tables: [], consumers: [], jobs: [] })
     connectConsumer(p, 'Notifications', 'orders.placed')
     expect(consumersOf(p, 'orders.placed').map((s) => s.name)).toEqual(['Orders', 'Notifications'])
   })
@@ -135,14 +137,14 @@ describe('rename cascades', () => {
 describe('connecting a topic to a service', () => {
   it('creates a consumer named after the topic', () => {
     const p = project()
-    p.services.push({ name: 'Notifications', port: 50052, position: { x: 0, y: 0 }, rpcs: [], httpPort: null, routes: [], tables: [], consumers: [] })
+    p.services.push({ name: 'Notifications', port: 50052, position: { x: 0, y: 0 }, rpcs: [], httpPort: null, routes: [], tables: [], consumers: [], jobs: [] })
     expect(canConsume(p, 'Notifications', 'orders.placed')).toBe(true)
     expect(connectConsumer(p, 'Notifications', 'orders.placed')).toMatchObject({ name: 'on_orders_placed', topic: 'orders.placed', steps: [] })
     expect(p.services[1]!.consumers).toHaveLength(1)
   })
   it('refuses a topic the service already consumes, and unknown ends', () => {
     const p = project()
-    p.services.push({ name: 'Notifications', port: 50052, position: { x: 0, y: 0 }, rpcs: [], httpPort: null, routes: [], tables: [], consumers: [] })
+    p.services.push({ name: 'Notifications', port: 50052, position: { x: 0, y: 0 }, rpcs: [], httpPort: null, routes: [], tables: [], consumers: [], jobs: [] })
     connectConsumer(p, 'Notifications', 'orders.placed')
     expect(canConsume(p, 'Notifications', 'orders.placed')).toBe(false)
     expect(connectConsumer(p, 'Notifications', 'orders.placed')).toBeNull()
@@ -154,7 +156,7 @@ describe('connecting a topic to a service', () => {
 describe('declaring producers', () => {
   const withNotifications = () => {
     const p = project()
-    p.services.push({ name: 'Notifications', port: 50052, position: { x: 0, y: 0 }, rpcs: [], httpPort: null, routes: [], tables: [], consumers: [] })
+    p.services.push({ name: 'Notifications', port: 50052, position: { x: 0, y: 0 }, rpcs: [], httpPort: null, routes: [], tables: [], consumers: [], jobs: [] })
     return p
   }
   it('makes a service a producer once, and only if both ends exist', () => {
@@ -230,7 +232,7 @@ describe('HTTP routes', () => {
   })
   it('takes the next free HTTP port for a second service', () => {
     const p = project()
-    p.services.push({ name: 'Billing', port: 50052, position: { x: 0, y: 0 }, rpcs: [], httpPort: null, routes: [], tables: [], consumers: [] })
+    p.services.push({ name: 'Billing', port: 50052, position: { x: 0, y: 0 }, rpcs: [], httpPort: null, routes: [], tables: [], consumers: [], jobs: [] })
     addRoute(p, p.services[0]!)
     addRoute(p, p.services[1]!)
     expect(p.services.map((s) => s.httpPort)).toEqual([8081, 8082])
@@ -589,5 +591,22 @@ describe('SQL steps that give rows back', () => {
   it('reads as the SQL it generates', () => {
     expect(sqlPreview(update())).toBe('UPDATE orders SET amount = 1 WHERE order_id = input.id AND created_at > now() RETURNING order_id, note')
     expect(sqlPreview(update({ columns: [], bind: null }))).not.toContain('RETURNING')
+  })
+})
+
+describe('jobs', () => {
+  it('start empty, hourly, and take a name of their own', () => {
+    const svc = project().services[0]!
+    expect(addJob(svc)).toEqual({ name: 'job', everySecs: 3600, steps: [] })
+    expect(addJob(svc).name).toBe('job2')
+  })
+  it('say their period like a person', () => {
+    expect([30, 60, 420, 3600, 5400, 86400, 172800].map(everyLabel)).toEqual(['30 s', '1 min', '7 min', '1 h', '90 min', '1 j', '2 j'])
+  })
+  it('are walked like the other handlers: renaming a message reaches the steps of a job', () => {
+    const p = project()
+    p.services[0]!.jobs.push({ name: 'j', everySecs: 60, steps: [{ type: 'publish', id: 'p', topic: 'orders.placed', payload: [{ field: 'id', value: { kind: 'path', path: 'x' } }] }] })
+    renameField(p, 'Placed', 'id', 'ident')
+    expect((p.services[0]!.jobs[0]!.steps[0] as Extract<import('../types').Step, { type: 'publish' }>).payload[0]!.field).toBe('ident')
   })
 })

@@ -41,6 +41,7 @@ pub fn generate(project: &Project, service: &Service) -> Result<Vec<GeneratedFil
     let has_rpcs = !service.rpcs.is_empty();
     let has_routes = !service.routes.is_empty();
     let has_consumers = !service.consumers.is_empty();
+    let has_jobs = !service.jobs.is_empty();
     let has_topics = !used_topics(project, service).is_empty();
     let publishes = publishes(service);
     let file = |path: &str, content: String| GeneratedFile::new(format!("{src}/{path}"), content);
@@ -84,6 +85,9 @@ pub fn generate(project: &Project, service: &Service) -> Result<Vec<GeneratedFil
     if publishes {
         transport.push("outbox");
     }
+    if has_jobs {
+        transport.push("scheduler");
+    }
     files.push(file(
         "transport/mod.rs",
         mod_rs(
@@ -103,6 +107,9 @@ pub fn generate(project: &Project, service: &Service) -> Result<Vec<GeneratedFil
     if publishes {
         files.push(file("transport/outbox.rs", outbox_rs()));
     }
+    if has_jobs {
+        files.push(file("transport/scheduler.rs", scheduler_rs(service)));
+    }
 
     let mut flows = vec![];
     if has_routes {
@@ -113,6 +120,9 @@ pub fn generate(project: &Project, service: &Service) -> Result<Vec<GeneratedFil
     }
     if has_rpcs {
         flows.push("rpc");
+    }
+    if has_jobs {
+        flows.push("jobs");
     }
     files.push(file(
         "flows/mod.rs",
@@ -132,6 +142,9 @@ pub fn generate(project: &Project, service: &Service) -> Result<Vec<GeneratedFil
             "flows/consumers.rs",
             consumer_flows_rs(project, service)?,
         ));
+    }
+    if has_jobs {
+        files.push(file("flows/jobs.rs", job_flows_rs(project, service)?));
     }
     Ok(files)
 }
@@ -259,6 +272,12 @@ fn main_rs(service: &Service, has_topics: bool, publishes: bool) -> String {
     if !service.consumers.is_empty() {
         c.line("transport::kafka::spawn_consumers(&config, &ctx);");
     }
+    let has_jobs = !service.jobs.is_empty();
+    if has_jobs {
+        c.line("let scheduler = transport::scheduler::Scheduler::spawn(&ctx);");
+        // An async block, so that a `?` ends the service and not `main`: the jobs are stopped either way.
+        c.open("let result: anyhow::Result<()> = async");
+    }
     match (service.rpcs.is_empty(), service.routes.is_empty()) {
         (true, true) => c.line("app::bootstrap::wait_for_shutdown().await"),
         (false, true) => c.line("transport::grpc::serve(&config, ctx).await"),
@@ -271,6 +290,12 @@ fn main_rs(service: &Service, has_topics: bool, publishes: bool) -> String {
             c.line("Ok(())")
         }
     };
+    if has_jobs {
+        // Whatever ended the service, the jobs finish the run they are in and stop.
+        c.close_with(".await;");
+        c.line("scheduler.stop().await;");
+        c.line("result");
+    }
     c.close();
     c.finish()
 }
@@ -404,10 +429,11 @@ fn bootstrap_rs(project: &Project, service: &Service, publishes: bool) -> String
         c.line(format!(
             "tracing::info!(\"{} running{}, press Ctrl+C to stop\");",
             service.name,
-            if service.consumers.is_empty() {
-                ""
-            } else {
-                " (consumers only)"
+            match (service.consumers.is_empty(), service.jobs.is_empty()) {
+                (true, true) => "",
+                (false, true) => " (consumers only)",
+                (true, false) => " (jobs only)",
+                (false, false) => " (consumers and jobs only)",
             }
         ));
         c.line("tokio::signal::ctrl_c().await?;");
@@ -1061,6 +1087,83 @@ fn consumer_flows_rs(project: &Project, service: &Service) -> Result<String, Cod
         c.close();
     }
     Ok(c.finish())
+}
+
+fn job_flows_rs(project: &Project, service: &Service) -> Result<String, CodegenError> {
+    let mut c = flows_header("One function per job, built from the steps drawn in the editor.");
+    for job in &service.jobs {
+        c.blank();
+        c.line(format!("/// Every {} s.", job.every_secs));
+        c.open(format!(
+            "pub async fn {}(ctx: &Ctx) -> anyhow::Result<()>",
+            job.name
+        ));
+        begin(&mut c);
+        // No request, no event: there is no `input`.
+        let mut scope = Scope::default();
+        steps(
+            &mut c, project, service, &mut scope, &job.steps, None, false,
+        )?;
+        c.line("tx.commit().await?;");
+        c.line("Ok(())");
+        c.close();
+    }
+    Ok(c.finish())
+}
+
+/// Starts every job of the service on its schedule, and stops them when the service ends.
+fn scheduler_rs(service: &Service) -> String {
+    let mut c = Code::new();
+    c.line(HEADER);
+    c.line("//! Runs the jobs of this service on their schedule (see `eda_runtime::jobs`).");
+    c.blank();
+    c.line("use std::time::Duration;");
+    c.blank();
+    c.line("use tokio::{sync::watch, task::JoinHandle};");
+    c.blank();
+    c.line("use crate::{app::ctx::Ctx, flows};");
+    c.blank();
+    c.line("/// The running jobs. Every instance of the service runs them: their steps must be safe to repeat.");
+    c.open("pub struct Scheduler");
+    c.line("stop: watch::Sender<bool>,");
+    c.line("handles: Vec<JoinHandle<()>>,");
+    c.close();
+    c.blank();
+    c.open("impl Scheduler");
+    c.open("pub fn spawn(ctx: &Ctx) -> Self");
+    c.line("let (stop, shutdown) = watch::channel(false);");
+    c.line("let mut handles = Vec::new();");
+    for job in &service.jobs {
+        c.line(format!(
+            "// `{}` every {} s -> flows::jobs::{}",
+            job.name, job.every_secs, job.name
+        ));
+        c.block();
+        c.line("let ctx = ctx.clone();");
+        c.line(format!(
+            "handles.push(eda_runtime::jobs::spawn_periodic({:?}, Duration::from_secs({}), shutdown.clone(), move || {{",
+            job.name, job.every_secs
+        ));
+        c.line("    let ctx = ctx.clone();");
+        c.line(format!(
+            "    async move {{ flows::jobs::{}(&ctx).await }}",
+            job.name
+        ));
+        c.line("}));");
+        c.close();
+    }
+    c.line("Self { stop, handles }");
+    c.close();
+    c.blank();
+    c.line("/// Asks the jobs to stop and waits for the runs in progress to finish.");
+    c.open("pub async fn stop(self)");
+    c.line("let _ = self.stop.send(true);");
+    c.open("for handle in self.handles");
+    c.line("let _ = handle.await;");
+    c.close();
+    c.close();
+    c.close();
+    c.finish()
 }
 
 fn steps(

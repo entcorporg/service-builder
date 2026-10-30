@@ -78,7 +78,13 @@ function ServiceNode({ data, selected }: NodeProps<Node<ServiceData, 'service'>>
             <span className="mono">{c.name}</span>
           </li>
         ))}
-        {service.rpcs.length === 0 && service.routes.length === 0 && service.consumers.length === 0 && <li className="none">vide</li>}
+        {service.jobs.map((j) => (
+          <li key={j.name} className="consumer">
+            <span className="tag-pill consumer">TÂCHE</span>
+            <span className="mono">{j.name}</span>
+          </li>
+        ))}
+        {service.rpcs.length === 0 && service.routes.length === 0 && service.consumers.length === 0 && service.jobs.length === 0 && <li className="none">vide</li>}
       </ul>
       <Handle type="source" position={Position.Right} id="out" />
       <Handle type="source" position={Position.Bottom} id="rpc-out" />
@@ -137,7 +143,7 @@ export function buildGraph(project: Project, diagnostics: Diagnostic[], selected
     // Declared producers and publishing steps both draw the arrow (a step without declaration is also an error).
     const published = new Set<string>(project.topics.filter((t) => t.producers.includes(service.name)).map((t) => t.name))
     const called = new Map<string, Set<string>>()
-    const handlers = [...service.rpcs.map((r) => r.steps), ...service.routes.map((r) => r.steps), ...service.consumers.map((c) => c.steps)]
+    const handlers = [...service.rpcs.map((r) => r.steps), ...service.routes.map((r) => r.steps), ...service.consumers.map((c) => c.steps), ...service.jobs.map((j) => j.steps)]
     for (const steps of handlers) {
       walkSteps(steps, (s) => {
         if (s.type === 'publish' && s.topic) published.add(s.topic)

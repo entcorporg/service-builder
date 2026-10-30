@@ -33,7 +33,8 @@ describe('editor', () => {
     await page.locator('.node.service', { hasText: 'Orders' }).click()
     assert.equal(await page.getByLabel('Nom du service').inputValue(), 'Orders')
     await page.locator('.card.rpc .card-toggle', { hasText: 'CreateOrder' }).click()
-    assert.equal(await page.locator('.card.step').count(), 4)
+    // The steps of this RPC, not those of the jobs listed below it.
+    assert.equal(await page.locator('.card.rpc .card.step').count(), 4)
 
     await page.getByRole('tab', { name: /Code généré/ }).click()
     await page.waitForSelector('.code-view pre')
@@ -480,6 +481,47 @@ describe('editor', () => {
     const code = await page.locator('.code-main pre').innerText()
     assert.match(code, /UPDATE .{1,4}orders.{1,4} SET .{1,4}status.{1,4} = \$1 WHERE .{1,4}order_id.{1,4} = \$2 AND .{1,4}created_at.{1,4} < now\(\) RETURNING /)
     assert.match(code, /HttpError::new\(\s*409,\s*"already used"/)
+    await page.close()
+  })
+
+  it('schedules a job: no input, nobody to answer, and it starts with the service', async () => {
+    const { page } = await open()
+    const orders = page.locator('.node.service', { hasText: 'Orders' })
+    // The sample already has a job, listed on the node.
+    assert.match(await orders.innerText(), /heartbeat/)
+    await orders.click()
+    const section = page.getByRole('region', { name: 'Tâches planifiées' })
+    assert.match(await section.innerText(), /heartbeat\s*toutes les 1 h/)
+
+    await section.getByRole('button', { name: 'Ajouter une tâche planifiée' }).click()
+    await section.locator('.card-toggle', { hasText: 'job' }).last().click()
+    await section.getByLabel('Nom de la tâche').last().fill('cleaner')
+    await section.getByLabel('Nom de la tâche').last().press('Enter')
+    await section.getByLabel('Période de la tâche (secondes)').last().fill('420')
+    assert.match(await section.innerText(), /cleaner\s*toutes les 7 min/)
+
+    // Nothing to answer and no HTTP: those steps are not offered.
+    await section.locator('.add-step-btn').last().click()
+    assert.equal(await page.getByRole('menuitem', { name: /Répondre|Refuser|Limiter le débit/ }).count(), 0)
+    await page.getByRole('menuitem', { name: /^SQL/ }).click()
+    const card = section.locator('.card.step', { hasText: 'SQL' }).last()
+    await card.getByRole('button', { name: 'Supprimer', exact: true }).click()
+    await card.getByRole('button', { name: '+ Ajouter une condition' }).click()
+    await card.getByLabel('Colonne', { exact: true }).last().selectOption('created_at')
+    await card.getByLabel('Opérateur').last().selectOption('le')
+    await card.getByLabel('valeur de created_at : source').selectOption('now')
+    // No `input` to read: only what the job itself made.
+    assert.equal(await card.getByLabel('valeur de created_at : champ').count(), 0)
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/flows/jobs.rs"]').click()
+    const jobs = await page.locator('.code-main pre').innerText()
+    assert.match(jobs, /pub async fn cleaner\(ctx: &Ctx\) -> anyhow::Result<\(\)>/)
+    assert.match(jobs, /DELETE FROM .{1,4}orders.{1,4} WHERE .{1,4}created_at.{1,4} <= now\(\)/)
+    await page.locator('[role="treeitem"][data-path="services/orders/src/transport/scheduler.rs"]').click()
+    assert.match(await page.locator('.code-main pre').innerText(), /spawn_periodic\(\s*"cleaner",\s*Duration::from_secs\(420\)/)
     await page.close()
   })
 

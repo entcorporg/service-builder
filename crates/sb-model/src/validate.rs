@@ -84,6 +84,9 @@ fn kind_label(kind: MessageKind) -> &'static str {
     }
 }
 
+/// The longest period of a job: 30 days.
+const MAX_JOB_INTERVAL_SECS: u32 = 2_592_000;
+
 /// `tx` is the database transaction every handler runs in.
 const RESERVED_VARS: [&str; 3] = ["input", "ctx", "tx"];
 
@@ -504,12 +507,16 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            if s.rpcs.is_empty() && s.consumers.is_empty() && s.routes.is_empty() {
+            if s.rpcs.is_empty()
+                && s.consumers.is_empty()
+                && s.routes.is_empty()
+                && s.jobs.is_empty()
+            {
                 self.warn(
                     "W_EMPTY_SERVICE",
                     base.clone(),
                     format!(
-                        "service `{}` has no RPC, no HTTP route and no consumer",
+                        "service `{}` has no RPC, no HTTP route, no consumer and no job",
                         s.name
                     ),
                 );
@@ -615,6 +622,43 @@ impl<'a> Checker<'a> {
                 };
                 let mut scope = Scope::with_input(&topic.message);
                 self.steps(&env, &format!("{cp}/steps"), &c.steps, &mut scope);
+            }
+
+            let mut job_names = HashSet::new();
+            for (j, job) in s.jobs.iter().enumerate() {
+                let jp = format!("{base}/jobs/{j}");
+                if !is_snake_ident(&job.name) {
+                    self.error(
+                        "E_JOB_NAME",
+                        format!("{jp}/name"),
+                        format!(
+                            "job name `{}` must be snake_case (e.g. `{}`)",
+                            job.name,
+                            snake(&job.name)
+                        ),
+                    );
+                }
+                if !job_names.insert(job.name.as_str()) {
+                    self.error(
+                        "E_DUPLICATE_JOB",
+                        format!("{jp}/name"),
+                        format!("job `{}` is defined twice in `{}`", job.name, s.name),
+                    );
+                }
+                if !(1..=MAX_JOB_INTERVAL_SECS).contains(&job.every_secs) {
+                    self.error(
+                        "E_JOB_INTERVAL",
+                        format!("{jp}/everySecs"),
+                        format!("a job runs every 1 second to 30 days ({MAX_JOB_INTERVAL_SECS} s)"),
+                    );
+                }
+                // No request, no event: nothing to read as `input`, nobody to answer.
+                let env = Env {
+                    service: s,
+                    handler: Handler::Consumer,
+                };
+                let mut scope = Scope::default();
+                self.steps(&env, &format!("{jp}/steps"), &job.steps, &mut scope);
             }
         }
     }
@@ -1541,7 +1585,7 @@ impl<'a> Checker<'a> {
                     Handler::Consumer => self.error(
                         "E_RESPOND_IN_CONSUMER",
                         path,
-                        "Respond only makes sense in an RPC handler, consumers have nobody to answer",
+                        "Respond only makes sense in an RPC or an HTTP route: consumers and jobs have nobody to answer",
                     ),
                     Handler::Rpc { response } => {
                         if let Some(msg) = p.message(response) {
@@ -3147,6 +3191,89 @@ mod tests {
             "{:?}",
             errors(&p)
         );
+    }
+
+    fn with_cleaner() -> Project {
+        let mut p = with_token();
+        sample::add_cleaner_job(&mut p);
+        p
+    }
+
+    #[test]
+    fn a_job_runs_steps_without_a_request() {
+        let mut p = with_cleaner();
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+        // There is no `input`, and nobody to answer.
+        p.services[0].jobs[0].steps.insert(
+            0,
+            Step::Log {
+                id: "x".into(),
+                level: LogLevel::Info,
+                message: "{input.order_id}".into(),
+            },
+        );
+        assert!(
+            !errors(&p).is_empty(),
+            "a job has no input: {:?}",
+            validate(&p)
+        );
+        p.services[0].jobs[0].steps.remove(0);
+        for step in [
+            Step::Respond {
+                id: "r".into(),
+                fields: vec![],
+                status: None,
+                cookies: vec![],
+            },
+            fail(400, None),
+            Step::RateLimit {
+                id: "l".into(),
+                key: Expr::Literal { value: "k".into() },
+                max: 1,
+                window_secs: 60,
+            },
+        ] {
+            p.services[0].jobs[0].steps.push(step);
+        }
+        let found = errors(&p);
+        for code in [
+            "E_RESPOND_IN_CONSUMER",
+            "E_FAIL_OUTSIDE_ROUTE",
+            "E_RATE_LIMIT_OUTSIDE_ROUTE",
+        ] {
+            assert!(found.contains(&code.to_string()), "{code}: {found:?}");
+        }
+    }
+
+    #[test]
+    fn jobs_are_named_and_scheduled_sensibly() {
+        for (code, change) in [
+            (
+                "E_JOB_NAME",
+                &(|j: &mut Job| j.name = "Cleaner Job".into()) as &dyn Fn(&mut Job),
+            ),
+            ("E_JOB_INTERVAL", &|j| j.every_secs = 0),
+            ("E_JOB_INTERVAL", &|j| j.every_secs = 2_592_001),
+        ] {
+            let mut p = with_cleaner();
+            change(&mut p.services[0].jobs[0]);
+            assert!(
+                errors(&p).contains(&code.to_string()),
+                "{code}: {:?}",
+                errors(&p)
+            );
+        }
+        let mut p = with_cleaner();
+        let twin = p.services[0].jobs[0].clone();
+        p.services[0].jobs.push(twin);
+        assert!(errors(&p).contains(&"E_DUPLICATE_JOB".to_string()));
+        // A service with only a job is not empty.
+        let mut p = with_cleaner();
+        let svc = &mut p.services[0];
+        svc.rpcs.clear();
+        svc.routes.clear();
+        svc.consumers.clear();
+        assert!(!validate(&p).iter().any(|d| d.code == "W_EMPTY_SERVICE"));
     }
 
     #[test]

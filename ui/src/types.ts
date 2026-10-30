@@ -196,6 +196,13 @@ export interface Consumer {
   steps: Step[]
 }
 
+/** A task a service runs every `everySecs` seconds, from its start-up, on every instance. */
+export interface Job {
+  name: string
+  everySecs: number
+  steps: Step[]
+}
+
 export interface Service {
   name: string
   port: number
@@ -205,6 +212,8 @@ export interface Service {
   routes: Route[]
   tables: Table[]
   consumers: Consumer[]
+  /** Tasks run on a schedule: no request, no event, no input. */
+  jobs: Job[]
   position: Position
 }
 

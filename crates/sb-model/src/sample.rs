@@ -370,11 +370,21 @@ pub fn orders() -> Project {
             },
         ],
         consumers: vec![],
+        jobs: vec![Job {
+            name: "heartbeat".into(),
+            every_secs: 3600,
+            steps: vec![Step::Log {
+                id: "j1".into(),
+                level: LogLevel::Info,
+                message: "orders service is running".into(),
+            }],
+        }],
     };
 
     let payments = Service {
         name: "Payments".into(),
         port: 50052,
+        jobs: vec![],
         position: Position { x: 460.0, y: 120.0 },
         rpcs: vec![],
         http_port: None,
@@ -424,6 +434,7 @@ pub fn orders() -> Project {
     let notifications = Service {
         name: "Notifications".into(),
         port: 50053,
+        jobs: vec![],
         position: Position { x: 920.0, y: 120.0 },
         rpcs: vec![],
         http_port: None,
@@ -556,6 +567,41 @@ pub fn add_single_use_token(p: &mut Project) {
                 fields: vec![set("account_id", path("consumed.account_id"))],
                 status: None,
                 cookies: vec![],
+            },
+        ],
+    });
+}
+
+/// Adds to the first service the job that purges the tokens that expired, every 7 minutes. It needs the
+/// `auth_tokens` table of [`add_single_use_token`]. A `DELETE` of what expired is safe to run on every instance.
+pub fn add_cleaner_job(p: &mut Project) {
+    p.services[0].jobs.push(Job {
+        name: "cleaner".into(),
+        every_secs: 420,
+        steps: vec![
+            Step::Log {
+                id: "c1".into(),
+                level: LogLevel::Debug,
+                message: "purging the expired tokens".into(),
+            },
+            Step::Sql {
+                id: "c2".into(),
+                op: SqlOp::Delete,
+                table: "auth_tokens".into(),
+                bind: None,
+                columns: vec![],
+                many: false,
+                into: None,
+                conditions: vec![SqlCondition {
+                    column: "expires_at".into(),
+                    op: CmpOp::Le,
+                    value: Expr::Now,
+                }],
+                values: vec![],
+                order_by: None,
+                descending: false,
+                limit: None,
+                missing: None,
             },
         ],
     });

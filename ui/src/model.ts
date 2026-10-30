@@ -1,7 +1,7 @@
 // Editing helpers on the project document: factories and rename cascades.
 // All mutate a draft (immer), never the live state.
 import { candidates, columnType, fits, type Scope, type TypeRef, typeOfField } from './scope'
-import type { Assignment, Column, Expr, ForeignKey, HttpMethod, Index, Message, MessageKind, Project, Route, Service, Step, StepType, Table, UniqueConstraint } from './types'
+import type { Assignment, Column, Expr, ForeignKey, HttpMethod, Index, Job, Message, MessageKind, Project, Route, Service, Step, StepType, Table, UniqueConstraint } from './types'
 
 export function newId(): string {
   return crypto.randomUUID().slice(0, 8)
@@ -30,6 +30,7 @@ function allHandlers(p: Project) {
     ...s.rpcs.map((r) => ({ steps: r.steps, response: r.response as string | null })),
     ...s.routes.map((r) => ({ steps: r.steps, response: r.response as string | null })),
     ...s.consumers.map((c) => ({ steps: c.steps, response: null as string | null })),
+    ...s.jobs.map((j) => ({ steps: j.steps, response: null as string | null })),
   ])
 }
 
@@ -128,6 +129,7 @@ export function renameField(p: Project, message: string, from: string, to: strin
     for (const r of s.rpcs) visit(r.steps, r.response)
     for (const r of s.routes) visit(r.steps, r.response)
     for (const c of s.consumers) visit(c.steps, null)
+    for (const j of s.jobs) visit(j.steps, null)
   }
 }
 
@@ -173,6 +175,7 @@ export function addService(p: Project, position: { x: number; y: number }): Serv
     routes: [],
     tables: [],
     consumers: [],
+    jobs: [],
     position,
   }
   p.services.push(svc)
@@ -252,7 +255,7 @@ export function addColumn(table: Table): Column {
 
 /** Every top-level list of steps of the service (the SQL steps that name its tables are in there). */
 function serviceSteps(svc: Service): Step[][] {
-  return [...svc.rpcs.map((r) => r.steps), ...svc.routes.map((r) => r.steps), ...svc.consumers.map((c) => c.steps)]
+  return [...svc.rpcs.map((r) => r.steps), ...svc.routes.map((r) => r.steps), ...svc.consumers.map((c) => c.steps), ...svc.jobs.map((j) => j.steps)]
 }
 
 export function renameTable(p: Project, service: string, from: string, to: string) {
@@ -351,6 +354,13 @@ export function addForeignKey(service: Service, table: Table): ForeignKey | null
   }
   table.foreignKeys.push(fk)
   return fk
+}
+
+/** A job every hour, which the user then names and draws; it starts empty. */
+export function addJob(service: Service): Job {
+  const job: Job = { name: uniqueName('job', service.jobs.map((j) => j.name)), everySecs: 3600, steps: [] }
+  service.jobs.push(job)
+  return job
 }
 
 export function addConsumer(p: Project, service: Service, topic = p.topics[0], base = 'on_event') {

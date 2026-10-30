@@ -220,8 +220,23 @@ pub struct Service {
     pub tables: Vec<Table>,
     #[serde(default)]
     pub consumers: Vec<Consumer>,
+    /// Tasks run on a schedule, with no request and no event: purging what expired, for instance.
+    #[serde(default)]
+    pub jobs: Vec<Job>,
     #[serde(default)]
     pub position: Position,
+}
+
+/// A task a service runs every `every_secs` seconds, from its start-up and in the transaction of its steps. It has
+/// no `input`, and no response to give. Every instance of the service runs it: its steps should be safe to repeat
+/// (a `DELETE` of what expired is).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Job {
+    pub name: String,
+    pub every_secs: u32,
+    #[serde(default)]
+    pub steps: Vec<Step>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1045,13 +1060,14 @@ impl Service {
         self.rpcs.iter().find(|r| r.name == name)
     }
 
-    /// The top-level steps of every handler: RPCs, HTTP routes and consumers.
+    /// The top-level steps of every handler: RPCs, HTTP routes, consumers and jobs.
     pub fn handler_steps(&self) -> impl Iterator<Item = &Step> {
         self.rpcs
             .iter()
             .flat_map(|r| &r.steps)
             .chain(self.routes.iter().flat_map(|r| &r.steps))
             .chain(self.consumers.iter().flat_map(|c| &c.steps))
+            .chain(self.jobs.iter().flat_map(|j| &j.steps))
     }
 }
 
