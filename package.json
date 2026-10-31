@@ -1,7 +1,7 @@
 {
   "name": "service-builder",
   "private": true,
-  "version": "1.18.0",
+  "version": "2.0.0",
   "description": "Visual builder for event-driven Rust backends (gRPC + Kafka)",
   "scripts": {
     "dev": "tauri dev",
