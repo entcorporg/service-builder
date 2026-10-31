@@ -47,7 +47,7 @@ function ServiceNode({ data, selected }: NodeProps<Node<ServiceData, 'service'>>
       <header>
         <Icon name="service" size={15} />
         <strong>{service.name}</strong>
-        <span className="node-port mono">:{service.port}</span>
+        <span className="node-port mono">{service.kind === 'mta' ? 'mta' : `:${service.port}`}</span>
         {data.errors > 0 && <Badge kind="error" count={data.errors} />}
         {data.errors === 0 && data.warnings > 0 && <Badge kind="warning" count={data.warnings} />}
       </header>
@@ -74,8 +74,8 @@ function ServiceNode({ data, selected }: NodeProps<Node<ServiceData, 'service'>>
         ))}
         {service.consumers.map((c) => (
           <li key={c.name} className="consumer">
-            <span className="tag-pill consumer">KAFKA</span>
-            <span className="mono">{c.name}</span>
+            <span className="tag-pill consumer">{c.mail ? 'MAIL' : 'KAFKA'}</span>
+            <span className="mono">{c.mail ? c.topic : c.name}</span>
           </li>
         ))}
         {service.jobs.map((j) => (

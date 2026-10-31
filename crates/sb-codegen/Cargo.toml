@@ -9,6 +9,8 @@ sb-model = { path = "../sb-model" }
 serde.workspace = true
 thiserror.workspace = true
 syn = { version = "3", features = ["full"] }
+# Only to check the syntax of the mails; the generated service renders them with all the built-ins.
+tera = { version = "1", default-features = false }
 
 [dev-dependencies]
 serde_json.workspace = true

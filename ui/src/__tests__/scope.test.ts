@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { exampleJson, exampleQuery } from '../json'
-import { addColumn, addForeignKey, addJob, ensureJwksSchemas, ensurePasskeySchema, setSoftDelete, tenantCandidates, ensureTotpSchema, eventKeys, addIndex, addTable, addUnique, makeStep, retargetForeignKey, renameColumn, renameTable, selectionForPath, addMessage, addRoute, addRpc, defaultStatus, pathParams, addTopic, autoMap, canConsume, canProduce, connectConsumer, consumersOf, declareProducer, removeService, renameService, renameField, renameMessage, renameTopic, nestable } from '../model'
+import { addColumn, addForeignKey, addJob, addMtaService, addMailEvent, mailFields, removeMailEvent, setMailTopic, ensureJwksSchemas, ensurePasskeySchema, setSoftDelete, tenantCandidates, ensureTotpSchema, eventKeys, addIndex, addTable, addUnique, makeStep, retargetForeignKey, renameColumn, renameTable, selectionForPath, addMessage, addRoute, addRpc, defaultStatus, pathParams, addTopic, autoMap, canConsume, canProduce, connectConsumer, consumersOf, declareProducer, removeService, renameService, renameField, renameMessage, renameTopic, nestable } from '../model'
 import { sqlPreview } from '../components/SqlStep'
 import { everyLabel } from '../components/Inspector'
 import { createTableSql } from '../components/TablesView'
@@ -840,5 +840,72 @@ describe('tenant and soft delete', () => {
     p.services[0]!.tables = [t]
     renameColumn(p, p.services[0]!.name, 'notes', 'tenant_id', 'org_id')
     expect(p.services[0]!.tables[0]!.tenantColumn).toBe('org_id')
+  })
+})
+
+describe('mail service', () => {
+  const text = (name: string) => ({ name, type: { kind: 'string' as const }, repeated: false, optional: false })
+  const withEvents = () => {
+    const p = project()
+    p.messages.push(
+      { name: 'Registered', kind: 'event', fields: [text('user_id'), text('email'), text('name')] },
+      { name: 'Reset', kind: 'event', fields: [text('event_id'), text('address'), text('link')] },
+    )
+    p.topics.push(
+      { name: 'accounts.registered', message: 'Registered', partitions: 1, replicationFactor: 1, keyField: 'user_id', producers: ['Orders'], position: { x: 0, y: 0 } },
+      { name: 'accounts.reset', message: 'Reset', partitions: 1, replicationFactor: 1, keyField: 'event_id', producers: ['Orders'], position: { x: 0, y: 0 } },
+    )
+    return p
+  }
+
+  it('starts with an HTTP port of its own, no event and no mail', () => {
+    const p = withEvents()
+    const mailer = addMtaService(p, { x: 0, y: 0 })
+    expect(mailer).toMatchObject({ name: 'Mailer', kind: 'mta', consumers: [], templates: [], rpcs: [], routes: [], tables: [], jobs: [] })
+    expect(mailer.httpPort).toBeGreaterThan(0)
+    expect(addMtaService(p, { x: 0, y: 0 }).name).toBe('Mailer2')
+    expect(new Set(p.services.map((s) => s.port)).size).toBe(p.services.length)
+  })
+
+  it('mails an event with the address and the identity it can find, and a mail to rewrite', () => {
+    const p = withEvents()
+    const mailer = addMtaService(p, { x: 0, y: 0 })
+    const first = addMailEvent(p, mailer, 'accounts.registered')!
+    expect(first.mail).toMatchObject({ recipient: 'email', dedupField: 'user_id', dedupFallback: 'topicAndRecipient', optionalRecipient: false })
+    expect(first.name).toBe('on_accounts_registered')
+    expect(mailer.templates).toEqual([expect.objectContaining({ eventType: 'accounts.registered', html: expect.stringContaining('{{ name }}') })])
+    // The event id is the identity, whatever the address field is called.
+    const second = addMailEvent(p, mailer, 'accounts.reset')!
+    expect(second.mail).toMatchObject({ recipient: 'address', dedupField: 'event_id' })
+    // Without a topic it takes the first one that has no mail, and an event is mailed once.
+    expect(addMailEvent(p, mailer)!.topic).toBe('orders.placed')
+    expect(addMailEvent(p, mailer)).toBeNull()
+    expect(addMailEvent(p, mailer, 'accounts.reset')).toBeNull()
+    expect(mailFields(p, 'accounts.registered')).toEqual(['user_id', 'email', 'name'])
+  })
+
+  it('moves the mail with its event, and removes it with it', () => {
+    const p = withEvents()
+    const mailer = addMtaService(p, { x: 0, y: 0 })
+    addMailEvent(p, mailer, 'accounts.registered')
+    setMailTopic(p, mailer, 0, 'accounts.reset')
+    expect(mailer.consumers[0]).toMatchObject({ topic: 'accounts.reset', mail: { dedupField: 'event_id' } })
+    expect(mailer.templates!.map((t) => t.eventType)).toEqual(['accounts.reset'])
+    removeMailEvent(mailer, 0)
+    expect(mailer.consumers).toEqual([])
+    expect(mailer.templates).toEqual([])
+  })
+
+  it('drawing an arrow from a topic gives it a mail, and renames keep the rule and the mail', () => {
+    const p = withEvents()
+    const mailer = addMtaService(p, { x: 0, y: 0 })
+    connectConsumer(p, mailer.name, 'accounts.registered')
+    expect(mailer.consumers[0]!.mail).toBeDefined()
+    expect(mailer.templates).toHaveLength(1)
+    renameField(p, 'Registered', 'email', 'address')
+    expect(mailer.consumers[0]!.mail!.recipient).toBe('address')
+    renameTopic(p, 'accounts.registered', 'users.registered')
+    expect(mailer.consumers[0]!.topic).toBe('users.registered')
+    expect(mailer.templates![0]!.eventType).toBe('users.registered')
   })
 })

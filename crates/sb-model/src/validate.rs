@@ -548,13 +548,13 @@ impl<'a> Checker<'a> {
                     format!("port {} is already used by `{other}`", s.port),
                 );
             }
-            if !s.routes.is_empty() {
+            if !s.routes.is_empty() || s.kind == ServiceKind::Mta {
                 match s.http_port {
                     None | Some(0) => self.error(
                         "E_HTTP_PORT",
                         format!("{base}/httpPort"),
                         format!(
-                            "`{}` has HTTP routes: give it an HTTP port (1 to 65535)",
+                            "`{}` has HTTP routes or serves health and metrics: give it an HTTP port (1 to 65535)",
                             s.name
                         ),
                     ),
@@ -586,6 +586,7 @@ impl<'a> Checker<'a> {
             self.routes(s, &base);
             self.tables(s, &base);
             self.table_constraints(s, &base);
+            self.mta_service(s, &base);
 
             let mut rpc_names = HashSet::new();
             for (j, r) in s.rpcs.iter().enumerate() {
@@ -677,6 +678,20 @@ impl<'a> Checker<'a> {
                 };
                 if p.message(&topic.message).is_none() {
                     continue; // already reported on the topic
+                }
+                if s.kind == ServiceKind::Mta {
+                    self.mail_rule(c, &cp, &topic.message);
+                    continue;
+                }
+                if c.mail.is_some() {
+                    self.error(
+                        "E_MAIL_OUTSIDE_MTA",
+                        format!("{cp}/mail"),
+                        format!(
+                            "`{}` is not a mail service: a mail rule only belongs to a consumer of a service of kind `mta`",
+                            s.name
+                        ),
+                    );
                 }
                 if let Some(field) = &c.idempotent_on {
                     self.idempotent_field(&format!("{cp}/idempotentOn"), &topic.message, field);
@@ -1008,6 +1023,208 @@ impl<'a> Checker<'a> {
     }
 
     // ---- tables and SQL ---------------------------------------------------------------
+
+    /// A mail service is fixed code with two inputs, the events it mails and the mails: it has nothing of its own
+    /// to draw, and each event has exactly one mail.
+    fn mta_service(&mut self, s: &Service, base: &str) {
+        if s.kind != ServiceKind::Mta {
+            if !s.templates.is_empty() {
+                self.error(
+                    "E_TEMPLATE_OUTSIDE_MTA",
+                    format!("{base}/templates"),
+                    format!("`{}` is not a mail service: mail templates belong to a service of kind `mta`", s.name),
+                );
+            }
+            return;
+        }
+        for (what, empty) in [
+            ("RPCs", s.rpcs.is_empty()),
+            ("HTTP routes", s.routes.is_empty()),
+            ("tables", s.tables.is_empty()),
+            ("jobs", s.jobs.is_empty()),
+        ] {
+            if !empty {
+                self.error(
+                    "E_MTA_CONTENT",
+                    base,
+                    format!(
+                        "`{}` is a mail service (fixed code, with its own queue, bounce and template tables): it has no {what} to draw",
+                        s.name
+                    ),
+                );
+            }
+        }
+        let mut topics = HashSet::new();
+        for (j, c) in s.consumers.iter().enumerate() {
+            if !topics.insert(c.topic.as_str()) {
+                self.error(
+                    "E_MTA_DUPLICATE_EVENT",
+                    format!("{base}/consumers/{j}/topic"),
+                    format!(
+                        "`{}` already mails the events of `{}`: a topic has one mail",
+                        s.name, c.topic
+                    ),
+                );
+            }
+        }
+        let mut seen = HashSet::new();
+        for (j, t) in s.templates.iter().enumerate() {
+            let tp = format!("{base}/templates/{j}");
+            if !seen.insert(t.event_type.as_str()) {
+                self.error(
+                    "E_MTA_TEMPLATE_DUPLICATE",
+                    format!("{tp}/eventType"),
+                    format!("`{}` has two mails", t.event_type),
+                );
+            }
+            if !topics.contains(t.event_type.as_str()) {
+                self.error(
+                    "E_MTA_TEMPLATE_UNKNOWN",
+                    format!("{tp}/eventType"),
+                    format!(
+                        "`{}` mails no event on `{}`: add the event or remove the mail",
+                        s.name, t.event_type
+                    ),
+                );
+            }
+            if t.subject.trim().is_empty() {
+                self.error(
+                    "E_MTA_TEMPLATE_SUBJECT",
+                    format!("{tp}/subject"),
+                    "a mail needs a subject",
+                );
+            }
+            if t.html.trim().is_empty() && t.text.trim().is_empty() {
+                self.error(
+                    "E_MTA_TEMPLATE_BODY",
+                    &tp,
+                    "a mail needs a body: HTML, text, or both",
+                );
+            }
+            // The mails are seeded by a migration that quotes them with this delimiter.
+            for (field, text) in [
+                ("eventType", &t.event_type),
+                ("subject", &t.subject),
+                ("html", &t.html),
+                ("text", &t.text),
+            ] {
+                if text.contains("$tpl$") {
+                    self.error(
+                        "E_MTA_TEMPLATE_DELIMITER",
+                        format!("{tp}/{field}"),
+                        "`$tpl$` is the delimiter of the migration that seeds the mails: it cannot appear in one",
+                    );
+                }
+            }
+        }
+        for (j, c) in s.consumers.iter().enumerate() {
+            if !seen.contains(c.topic.as_str()) {
+                self.error(
+                    "E_MTA_TEMPLATE_MISSING",
+                    format!("{base}/consumers/{j}/topic"),
+                    format!("the event `{}` has no mail: add its template", c.topic),
+                );
+            }
+        }
+    }
+
+    /// The mail an event sends: where to read the address, the identity and the sender from, in a schema the JSON of
+    /// which the mails are rendered from.
+    fn mail_rule(&mut self, c: &Consumer, cp: &str, message: &str) {
+        if !c.steps.is_empty() {
+            self.error(
+                "E_MTA_STEPS",
+                format!("{cp}/steps"),
+                "an event of a mail service sends its mail: it has no steps",
+            );
+        }
+        if c.idempotent_on.is_some() {
+            self.error(
+                "E_MTA_STEPS",
+                format!("{cp}/idempotentOn"),
+                "a mail service deduplicates on the field of its mail rule",
+            );
+        }
+        let Some(rule) = &c.mail else {
+            self.error(
+                "E_MTA_RULE",
+                format!("{cp}/mail"),
+                format!(
+                    "event `{}` of a mail service needs a mail rule: where its address is",
+                    c.topic
+                ),
+            );
+            return;
+        };
+        let Some(msg) = self.project.message(message) else {
+            return;
+        };
+        let text = |name: &str, path: String, what: &str, this: &mut Self| match msg.field(name) {
+            Some(f) if !f.repeated && matches!(f.ty, FieldType::String | FieldType::Uuid) => {}
+            Some(_) => this.error(
+                "E_MTA_FIELD_TYPE",
+                path,
+                format!("`{name}` ({what}) must be a single text (string or uuid) of `{message}`"),
+            ),
+            None => this.error(
+                "E_MTA_FIELD",
+                path,
+                format!("`{message}` has no field `{name}` ({what})"),
+            ),
+        };
+        text(
+            &rule.recipient,
+            format!("{cp}/mail/recipient"),
+            "the address",
+            self,
+        );
+        text(
+            &rule.dedup_field,
+            format!("{cp}/mail/dedupField"),
+            "the identity of the event",
+            self,
+        );
+        if let Some(f) = &rule.sender_company_via {
+            text(
+                f,
+                format!("{cp}/mail/senderCompanyVia"),
+                "the company shown as sender",
+                self,
+            );
+        }
+        if let Some(f) = &rule.reply_to {
+            text(
+                f,
+                format!("{cp}/mail/replyTo"),
+                "the Reply-To address",
+                self,
+            );
+        }
+        // The event is rendered from its JSON: a timestamp has none yet.
+        let mut todo = vec![message];
+        let mut seen = HashSet::new();
+        while let Some(name) = todo.pop() {
+            if !seen.insert(name) {
+                continue;
+            }
+            let Some(m) = self.project.message(name) else {
+                continue;
+            };
+            for f in &m.fields {
+                match &f.ty {
+                    FieldType::Timestamp => {
+                        self.error(
+                            "E_MTA_EVENT_FIELD",
+                            format!("{cp}/topic"),
+                            format!("`{}.{}` is a timestamp, which has no JSON form yet: a mail is rendered from the JSON of its event", m.name, f.name),
+                        );
+                    }
+                    FieldType::Message { name } => todo.push(name),
+                    _ => {}
+                }
+            }
+        }
+    }
 
     /// The columns the tenant filter and the soft delete lean on must exist, and be what they are used as.
     fn tenant_and_soft_delete(&mut self, t: &Table, tp: &str) {
@@ -4944,6 +5161,129 @@ mod tests {
             columns.extend(["tenant_id".to_string(), "deleted_at".to_string()]);
         }
         assert_eq!(errors(&p), Vec::<String>::new());
+    }
+
+    fn with_mailer() -> Project {
+        let mut p = sample::orders();
+        sample::add_signup(&mut p);
+        sample::add_mailer(&mut p);
+        p
+    }
+
+    fn mailer(p: &mut Project) -> &mut Service {
+        p.services.iter_mut().find(|s| s.name == "Mailer").unwrap()
+    }
+
+    #[test]
+    fn a_mail_service_mails_the_events_it_listens_to() {
+        let p = with_mailer();
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+    }
+
+    #[test]
+    fn what_a_mail_service_is_made_of_is_checked() {
+        type Case<'a> = (&'a str, &'a dyn Fn(&mut Project));
+        let cases: [Case; 17] = [
+            // Fixed code: nothing of its own to draw.
+            ("E_MTA_CONTENT", &|p| {
+                mailer(p).jobs.push(Job {
+                    name: "j".into(),
+                    every_secs: 60,
+                    steps: vec![],
+                })
+            }),
+            ("E_MTA_CONTENT", &|p| {
+                mailer(p)
+                    .tables
+                    .push(Table::new("t", vec![Column::new("a", ColumnType::String)]))
+            }),
+            ("E_HTTP_PORT", &|p| mailer(p).http_port = None),
+            // Each event has a rule, and no steps.
+            ("E_MTA_RULE", &|p| mailer(p).consumers[0].mail = None),
+            ("E_MTA_STEPS", &|p| {
+                mailer(p).consumers[0].steps.push(Step::Log {
+                    id: "x".into(),
+                    level: LogLevel::Info,
+                    message: "m".into(),
+                })
+            }),
+            ("E_MTA_STEPS", &|p| {
+                mailer(p).consumers[0].idempotent_on = Some("user_id".into())
+            }),
+            // The fields the rule reads are texts of the message.
+            ("E_MTA_FIELD", &|p| {
+                mailer(p).consumers[0].mail.as_mut().unwrap().recipient = "nope".into()
+            }),
+            ("E_MTA_FIELD", &|p| {
+                mailer(p).consumers[0].mail.as_mut().unwrap().dedup_field = "nope".into()
+            }),
+            ("E_MTA_FIELD", &|p| {
+                mailer(p).consumers[0].mail.as_mut().unwrap().reply_to = Some("nope".into())
+            }),
+            ("E_MTA_FIELD_TYPE", &|p| {
+                p.messages
+                    .iter_mut()
+                    .find(|m| m.name == "AccountRegistered")
+                    .unwrap()
+                    .fields[1]
+                    .repeated = true
+            }),
+            ("E_MTA_EVENT_FIELD", &|p| {
+                p.messages
+                    .iter_mut()
+                    .find(|m| m.name == "AccountRegistered")
+                    .unwrap()
+                    .fields
+                    .push(Field::new("at", FieldType::Timestamp))
+            }),
+            // Each event has one mail, and each mail one event.
+            ("E_MTA_TEMPLATE_MISSING", &|p| mailer(p).templates.clear()),
+            ("E_MTA_TEMPLATE_UNKNOWN", &|p| {
+                mailer(p).templates[0].event_type = "other.topic".into()
+            }),
+            ("E_MTA_TEMPLATE_DUPLICATE", &|p| {
+                let t = mailer(p).templates[0].clone();
+                mailer(p).templates.push(t)
+            }),
+            ("E_MTA_TEMPLATE_SUBJECT", &|p| {
+                mailer(p).templates[0].subject = " ".into()
+            }),
+            ("E_MTA_TEMPLATE_BODY", &|p| {
+                mailer(p).templates[0].html.clear();
+                mailer(p).templates[0].text.clear()
+            }),
+            ("E_MTA_DUPLICATE_EVENT", &|p| {
+                let c = mailer(p).consumers[0].clone();
+                mailer(p).consumers.push(Consumer {
+                    name: "again".into(),
+                    ..c
+                })
+            }),
+        ];
+        for (code, break_it) in cases {
+            let mut p = with_mailer();
+            break_it(&mut p);
+            assert!(
+                errors(&p).contains(&code.to_string()),
+                "{code}: {:?}",
+                errors(&p)
+            );
+        }
+    }
+
+    #[test]
+    fn mail_rules_and_templates_belong_to_a_mail_service() {
+        let mut p = with_mailer();
+        mailer(&mut p).kind = ServiceKind::Standard;
+        let found = errors(&p);
+        assert!(
+            found.contains(&"E_MAIL_OUTSIDE_MTA".to_string()),
+            "{found:?}"
+        );
+        assert!(
+            found.contains(&"E_TEMPLATE_OUTSIDE_MTA".to_string()),
+            "{found:?}"
+        );
     }
 
     fn with_seal() -> Project {

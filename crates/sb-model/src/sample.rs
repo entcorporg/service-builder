@@ -184,6 +184,8 @@ pub fn orders() -> Project {
         name: "Orders".into(),
         port: 50051,
         position: Position { x: 0.0, y: 120.0 },
+        kind: ServiceKind::Standard,
+        templates: vec![],
         rpcs: vec![
             Rpc {
                 name: "CreateOrder".into(),
@@ -386,6 +388,8 @@ pub fn orders() -> Project {
         port: 50052,
         jobs: vec![],
         position: Position { x: 460.0, y: 120.0 },
+        kind: ServiceKind::Standard,
+        templates: vec![],
         rpcs: vec![],
         http_port: None,
         routes: vec![],
@@ -396,6 +400,7 @@ pub fn orders() -> Project {
             group_id: None,
             // Kafka delivers at least once: an order is approved once, however many times it arrives.
             idempotent_on: Some("order_id".into()),
+            mail: None,
             steps: vec![
                 Step::Let {
                     id: "p1".into(),
@@ -438,6 +443,8 @@ pub fn orders() -> Project {
         port: 50053,
         jobs: vec![],
         position: Position { x: 920.0, y: 120.0 },
+        kind: ServiceKind::Standard,
+        templates: vec![],
         rpcs: vec![],
         http_port: None,
         routes: vec![],
@@ -448,6 +455,7 @@ pub fn orders() -> Project {
                 topic: "payments.completed".into(),
                 group_id: None,
                 idempotent_on: None,
+                mail: None,
                 steps: vec![Step::Log {
                     id: "n1".into(),
                     level: LogLevel::Info,
@@ -459,6 +467,7 @@ pub fn orders() -> Project {
                 topic: "payments.failed".into(),
                 group_id: None,
                 idempotent_on: None,
+                mail: None,
                 steps: vec![
                     Step::CallRpc {
                         id: "n2".into(),
@@ -814,6 +823,7 @@ pub fn showcase() -> Project {
     add_passkeys(&mut p);
     add_avatars(&mut p);
     add_notes(&mut p);
+    add_mailer(&mut p);
     p
 }
 
@@ -1738,4 +1748,89 @@ pub fn add_notes(p: &mut Project) {
         "NoteDone",
         steps,
     ));
+}
+
+/// Adds a mail service, `Mailer`, and what feeds it: `signup` (see [`add_signup`]) now publishes `accounts.registered`, and
+/// `Mailer` mails each of those events with a welcome. The service is a ready-made one (`kind: mta`): its consumer has a
+/// mail rule instead of steps, and the mail is a template of the service. It needs [`add_signup`].
+pub fn add_mailer(p: &mut Project) {
+    let string = || FieldType::String;
+    p.messages.push(event(
+        "AccountRegistered",
+        vec![
+            field("user_id", string()),
+            field("email", string()),
+            field("name", string()),
+        ],
+    ));
+    p.topics.push(topic(
+        "accounts.registered",
+        "AccountRegistered",
+        "user_id",
+        "Orders",
+        460.0,
+        460.0,
+    ));
+    let signup = p.services[0]
+        .routes
+        .iter_mut()
+        .find(|r| r.name == "signup")
+        .expect("add_signup first");
+    // Before the answer: the event is queued with the transaction, and goes out once the account is.
+    signup.steps.insert(
+        1,
+        Step::Let {
+            id: "m1".into(),
+            name: "user_id".into(),
+            value_type: FieldType::String,
+            optional: false,
+            repeated: false,
+            value: raw("eda_runtime::new_id()"),
+        },
+    );
+    signup.steps.insert(
+        2,
+        Step::Publish {
+            id: "m2".into(),
+            topic: "accounts.registered".into(),
+            payload: vec![
+                set("user_id", path("user_id")),
+                set("email", path("input.email")),
+                set("name", path("input.company.name")),
+            ],
+        },
+    );
+    p.services.push(Service {
+        name: "Mailer".into(),
+        port: 50054,
+        rpcs: vec![],
+        http_port: Some(8084),
+        routes: vec![],
+        tables: vec![],
+        consumers: vec![Consumer {
+            name: "welcome".into(),
+            topic: "accounts.registered".into(),
+            group_id: None,
+            idempotent_on: None,
+            mail: Some(MailRule {
+                recipient: "email".into(),
+                optional_recipient: false,
+                dedup_field: "user_id".into(),
+                dedup_fallback: DedupFallback::Recipient,
+                sender_company_via: Some("name".into()),
+                reply_to: None,
+            }),
+            steps: vec![],
+        }],
+        jobs: vec![],
+        position: Position { x: 920.0, y: 460.0 },
+        kind: ServiceKind::Mta,
+        templates: vec![MailTemplate {
+            event_type: "accounts.registered".into(),
+            subject: "Welcome, {{ name }}".into(),
+            html: "<p>Hello {{ name }},</p>\n<p>Your account <b>{{ email }}</b> is ready.</p>\n"
+                .into(),
+            text: "Hello {{ name }},\n\nYour account {{ email }} is ready.\n".into(),
+        }],
+    });
 }

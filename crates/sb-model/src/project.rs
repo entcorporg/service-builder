@@ -287,6 +287,76 @@ pub struct Service {
     pub jobs: Vec<Job>,
     #[serde(default)]
     pub position: Position,
+    /// What the service is. A `mta` is a ready-made mail service: its consumers are the events it mails (each with a
+    /// `mail` rule instead of steps), and its `templates` are the mails. Everything else in it is fixed code.
+    #[serde(default, skip_serializing_if = "ServiceKind::is_standard")]
+    pub kind: ServiceKind,
+    /// The mails of a `mta`: one per event it listens to. Seeded into the database by a migration, and editable there
+    /// afterwards (the worker reads them on every cycle).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub templates: Vec<MailTemplate>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ServiceKind {
+    /// Built from the rpcs, routes, consumers and jobs the author draws.
+    #[default]
+    Standard,
+    /// A ready-made mail transfer agent: queue, worker, DKIM, SMTP delivery, bounces, health and metrics.
+    Mta,
+}
+
+impl ServiceKind {
+    pub fn is_standard(&self) -> bool {
+        *self == ServiceKind::Standard
+    }
+}
+
+/// One mail of a `mta`, rendered with [Tera](https://keats.github.io/tera/) from the fields of the event (their names
+/// as declared in the schema): `{{ name }}`. The HTML is escaped, the subject and the text are not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MailTemplate {
+    /// The topic it is the mail of.
+    pub event_type: String,
+    pub subject: String,
+    pub html: String,
+    pub text: String,
+}
+
+/// What a `mta` does with an event it listens to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MailRule {
+    /// The text field of the event that holds the recipient's address.
+    pub recipient: String,
+    /// An event without an address is skipped instead of being an error.
+    #[serde(default)]
+    pub optional_recipient: bool,
+    /// The text field that identifies the event: the same value is mailed once, whatever Kafka redelivers.
+    pub dedup_field: String,
+    /// What identifies it when that field is empty.
+    #[serde(default)]
+    pub dedup_fallback: DedupFallback,
+    /// A text field with a company name: the sender shows as `<company> via <SMTP_FROM_NAME>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_company_via: Option<String>,
+    /// A text field with the address replies go to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum DedupFallback {
+    /// One mail per address.
+    Recipient,
+    /// One mail per topic and address.
+    #[default]
+    TopicAndRecipient,
+    /// The event is refused: no mail without an identity.
+    Reject,
 }
 
 /// A task a service runs every `every_secs` seconds, from its start-up and in the transaction of its steps. It has
@@ -628,6 +698,9 @@ pub struct Consumer {
     /// are in the same transaction.
     #[serde(default)]
     pub idempotent_on: Option<String>,
+    /// In a `mta`: the mail this event sends, instead of steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mail: Option<MailRule>,
     #[serde(default)]
     pub steps: Vec<Step>,
 }
