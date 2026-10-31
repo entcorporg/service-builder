@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { exampleJson, exampleQuery } from '../json'
-import { addColumn, addForeignKey, addJob, ensureJwksSchemas, eventKeys, addIndex, addTable, addUnique, makeStep, retargetForeignKey, renameColumn, renameTable, selectionForPath, addMessage, addRoute, addRpc, defaultStatus, pathParams, addTopic, autoMap, canConsume, canProduce, connectConsumer, consumersOf, declareProducer, removeService, renameService, renameField, renameMessage, renameTopic, nestable } from '../model'
+import { addColumn, addForeignKey, addJob, ensureJwksSchemas, ensureTotpSchema, eventKeys, addIndex, addTable, addUnique, makeStep, retargetForeignKey, renameColumn, renameTable, selectionForPath, addMessage, addRoute, addRpc, defaultStatus, pathParams, addTopic, autoMap, canConsume, canProduce, connectConsumer, consumersOf, declareProducer, removeService, renameService, renameField, renameMessage, renameTopic, nestable } from '../model'
 import { sqlPreview } from '../components/SqlStep'
 import { everyLabel } from '../components/Inspector'
 import { createTableSql } from '../components/TablesView'
@@ -702,5 +702,42 @@ describe('JWT steps', () => {
     expect(p.messages.find((m) => m.name === 'Jwks')!.fields[0]).toMatchObject({ name: 'keys', repeated: true, type: { kind: 'message', name: 'Jwk' } })
     const step = makeStep('jwks', p, inputScope('Order'), ctx)
     expect(scopeAfter(p, inputScope('Order'), step).published).toMatchObject({ type: { kind: 'message', name: 'Jwks' } })
+  })
+})
+
+describe('second factor steps', () => {
+  const ctx = { service: 'Orders', response: 'Placed', http: true }
+  const text = (name: string) => ({ name, type: { kind: 'string' as const }, repeated: false, optional: false })
+
+  it('enrol on the account of the request, and bind the schema that holds the secret', () => {
+    const p = project()
+    p.messages.push({ name: 'Enrol', kind: 'api', fields: [text('email')] })
+    ensureTotpSchema(p)
+    ensureTotpSchema(p)
+    expect(p.messages.filter((m) => m.name === 'TotpSetup')).toHaveLength(1)
+    expect(p.messages.find((m) => m.name === 'TotpSetup')!.fields.map((f) => f.name)).toEqual(['sealed', 'otpauth_url', 'secret'])
+    const step = makeStep('totpGenerate', p, inputScope('Enrol'), ctx)
+    expect(step).toMatchObject({ keyEnv: 'TOTP_ENCRYPTION_KEY', issuer: 'Orders', account: { kind: 'path', path: 'input.email' }, bind: 'setup' })
+    expect(scopeAfter(p, inputScope('Enrol'), step).setup).toEqual({ type: { kind: 'message', name: 'TotpSetup' }, repeated: false, optional: false })
+  })
+
+  it('verify the code of the request against a sealed secret', () => {
+    const p = project()
+    p.messages.push({ name: 'Check', kind: 'api', fields: [text('account'), text('code')] })
+    expect(makeStep('totpVerify', p, inputScope('Check'), ctx)).toMatchObject({
+      type: 'totpVerify',
+      keyEnv: 'TOTP_ENCRYPTION_KEY',
+      code: { kind: 'path', path: 'input.code' },
+      account: { kind: 'path', path: 'input.account' },
+    })
+  })
+
+  it('issue a list of texts, and spend the code of the request', () => {
+    const p = project()
+    p.messages.push({ name: 'Check', kind: 'api', fields: [text('account'), text('code')] })
+    const issue = makeStep('recoveryCodes', p, inputScope('Check'), ctx)
+    expect(issue).toMatchObject({ type: 'recoveryCodes', count: 8, bind: 'recovery_codes' })
+    expect(scopeAfter(p, inputScope('Check'), issue).recovery_codes).toEqual({ type: { kind: 'string' }, repeated: true, optional: false })
+    expect(makeStep('recoveryCodeUse', p, inputScope('Check'), ctx)).toMatchObject({ type: 'recoveryCodeUse', code: { kind: 'path', path: 'input.code' } })
   })
 })

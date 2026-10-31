@@ -805,6 +805,53 @@ pub enum Step {
         input: Expr,
         bind: String,
     },
+    /// Starts the enrolment of an authenticator app (TOTP, RFC 6238: SHA-1, 6 digits, 30 seconds): a random secret,
+    /// sealed with AES-256-GCM under `key_env` for storage (it must be readable again to check a code, so it is
+    /// encrypted, never hashed). `bind` receives the API schema `TotpSetup`: `sealed` (what to store), `otpauth_url`
+    /// (the client draws the QR code from it) and `secret` (base32, to type by hand). Neither the URL nor the secret
+    /// is stored: they are shown once.
+    #[serde(rename_all = "camelCase")]
+    TotpGenerate {
+        id: String,
+        key_env: String,
+        /// Shown by the authenticator app next to the account.
+        issuer: String,
+        /// The account label in the app, usually the e-mail address.
+        account: Expr,
+        bind: String,
+    },
+    /// Checks a TOTP code against the sealed secret. The code of the previous, current or next 30 seconds is
+    /// accepted (clock drift), every one is compared in constant time, and a code is **accepted once**: it must be for
+    /// a time step newer than the last one accepted for `account`, recorded atomically, so a replay (or two requests
+    /// racing with the same code) is refused. A wrong, replayed or malformed code is the same `401 invalid code`.
+    /// Routes only. Limit the attempts with a `rateLimit` before it.
+    #[serde(rename_all = "camelCase")]
+    TotpVerify {
+        id: String,
+        key_env: String,
+        /// The text a `totpGenerate` step sealed.
+        sealed: Expr,
+        code: Expr,
+        /// Whose last accepted time step is kept: an id, not an e-mail that can change.
+        account: Expr,
+    },
+    /// Issues `count` recovery codes (`XXXXX-XXXXX`, 40 random bits each) for `account`, replacing the ones it had. Only
+    /// their hashes are stored; `bind` receives the codes, a list of texts, to show once.
+    #[serde(rename_all = "camelCase")]
+    RecoveryCodes {
+        id: String,
+        account: Expr,
+        count: u32,
+        bind: String,
+    },
+    /// Spends a recovery code of `account`, entered with or without the dash, in any case: it works once. Anything
+    /// else is a `401 invalid code`. Routes only.
+    #[serde(rename_all = "camelCase")]
+    RecoveryCodeUse {
+        id: String,
+        account: Expr,
+        code: Expr,
+    },
     /// Authenticates a webhook by its signature, before the body is read as JSON: an HMAC-SHA256 of
     /// `"{timestamp}.{raw body}"`, sent in `header` as `t=<unix seconds>,v1=<hex>` (Stripe's scheme). A
     /// wrong, missing or stale signature (past `tolerance_secs`, which stops a replay) is a 401. It has
@@ -949,6 +996,10 @@ impl Step {
             | Step::SignJwt { id, .. }
             | Step::VerifyJwt { id, .. }
             | Step::Jwks { id, .. }
+            | Step::TotpGenerate { id, .. }
+            | Step::TotpVerify { id, .. }
+            | Step::RecoveryCodes { id, .. }
+            | Step::RecoveryCodeUse { id, .. }
             | Step::Decrypt { id, .. }
             | Step::HashPassword { id, .. }
             | Step::VerifyPassword { id, .. }

@@ -174,6 +174,8 @@ export function scopeAfter(project: Project, scope: Scope, step: Step): Scope {
   // A select, or a step that gives back the rows it wrote (`RETURNING`).
   if (step.type === 'signJwt' && step.bind) return { ...scope, [step.bind]: scalar('string') }
   if (step.type === 'verifyJwt' && step.bind) return { ...scope, [step.bind]: { type: { kind: 'message', name: step.schema }, repeated: false, optional: false } }
+  if (step.type === 'totpGenerate' && step.bind) return { ...scope, [step.bind]: { type: { kind: 'message', name: 'TotpSetup' }, repeated: false, optional: false } }
+  if (step.type === 'recoveryCodes' && step.bind) return { ...scope, [step.bind]: { type: { kind: 'string' }, repeated: true, optional: false } }
   if (step.type === 'jwks' && step.bind) return { ...scope, [step.bind]: { type: { kind: 'message', name: 'Jwks' }, repeated: false, optional: false } }
   if (step.type === 'sql' && step.columns.length > 0 && step.bind) {
     const message = step.into ?? sqlRowName(step.table, step.id)

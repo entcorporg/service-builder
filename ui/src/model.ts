@@ -376,6 +376,13 @@ export function ensureJwksSchemas(p: Project) {
   }
 }
 
+/** The API schema a `totpGenerate` step fills, added when it is missing: what to store, and what the client shows once. */
+export function ensureTotpSchema(p: Project) {
+  if (p.messages.some((m) => m.name === 'TotpSetup')) return
+  const text = (name: string) => ({ name, type: { kind: 'string' as const }, repeated: false, optional: false })
+  p.messages.push({ name: 'TotpSetup', kind: 'api', fields: ['sealed', 'otpauth_url', 'secret'].map(text) })
+}
+
 /** The fields of a message that can tell its events apart: a single string, uuid, int32 or int64 (mirrors the validator). */
 export function eventKeys(p: Project, message: string): string[] {
   const msg = p.messages.find((m) => m.name === message)
@@ -471,6 +478,10 @@ export const STEP_LABELS: Record<StepType, { label: string; hint: string }> = {
   signJwt: { label: 'Signer un jeton', hint: 'Access token Ed25519 (EdDSA) : vos claims, plus émetteur, émission et expiration' },
   verifyJwt: { label: 'Vérifier un jeton', hint: 'Signature, émetteur et expiration ; les claims lus comme un schéma. Sinon 401' },
   jwks: { label: 'Publier les clés', hint: 'Le JWKS : les clés publiques qui permettent de vérifier un jeton, jamais la graine' },
+  totpGenerate: { label: 'Activer le 2FA', hint: 'Secret TOTP chiffré à stocker, URI otpauth:// pour le QR code' },
+  totpVerify: { label: 'Vérifier un code 2FA', hint: 'Fenêtre ±30 s, un code ne sert qu’une fois (anti-rejeu). Sinon 401' },
+  recoveryCodes: { label: 'Codes de récupération', hint: 'XXXXX-XXXXX, à montrer une fois ; seules leurs empreintes sont stockées' },
+  recoveryCodeUse: { label: 'Utiliser un code de récupération', hint: 'Valable une seule fois, avec ou sans tiret. Sinon 401' },
   encrypt: { label: 'Chiffrer', hint: 'AES-256-GCM, pour ce qui est stocké (un secret TOTP, un jeton)' },
   decrypt: { label: 'Déchiffrer', hint: 'Le texte qu’un bloc « Chiffrer » a scellé' },
   verifyHmac: { label: 'Vérifier une signature', hint: 'Webhook signé (HMAC-SHA256 du corps brut), sans session : toujours la première étape' },
@@ -580,6 +591,33 @@ export function makeStep(type: StepType, p: Project, scope: Scope, ctx: { servic
     }
     case 'jwks':
       return { type, id, keyEnvs: ['JWT_SIGNING_KEY'], bind: uniqueName('published', Object.keys(scope)) }
+    case 'totpGenerate':
+      return {
+        type,
+        id,
+        keyEnv: 'TOTP_ENCRYPTION_KEY',
+        issuer: ctx.service,
+        account: firstText(p, scope, ['email', 'account', 'user', 'id']),
+        bind: uniqueName('setup', Object.keys(scope)),
+      }
+    case 'totpVerify':
+      return {
+        type,
+        id,
+        keyEnv: 'TOTP_ENCRYPTION_KEY',
+        sealed: firstText(p, scope, ['sealed', 'secret']),
+        code: firstText(p, scope, ['code', 'otp']),
+        account: firstText(p, scope, ['account', 'user', 'id', 'email']),
+      }
+    case 'recoveryCodes':
+      return { type, id, account: firstText(p, scope, ['account', 'user', 'id', 'email']), count: 8, bind: uniqueName('recovery_codes', Object.keys(scope)) }
+    case 'recoveryCodeUse':
+      return {
+        type,
+        id,
+        account: firstText(p, scope, ['account', 'user', 'id', 'email']),
+        code: firstText(p, scope, ['recovery', 'code']),
+      }
     case 'encrypt':
       return { type, id, keyEnv: 'ENCRYPTION_KEY', input: firstText(p, scope, ['secret', 'text']), bind: uniqueName('sealed', Object.keys(scope)) }
     case 'decrypt':
