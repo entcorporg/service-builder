@@ -158,6 +158,14 @@ export type Step =
   | { type: 'recoveryCodes'; id: string; account: Expr; count: number; bind: string }
   /** Spends a recovery code of the account, once. A refused code is a 401. */
   | { type: 'recoveryCodeUse'; id: string; account: Expr; code: Expr }
+  /** First request of registering a passkey: a challenge for the browser, into a variable of the schema `PasskeyChallenge`. */
+  | { type: 'passkeyRegisterStart'; id: string; account: Expr; name: Expr; bind: string }
+  /** Second request: checks the browser's answer against the challenge and stores the passkey. A refusal is a 400. */
+  | { type: 'passkeyRegisterFinish'; id: string; stateId: Expr; credential: Expr; account: Expr }
+  /** First request of a login with a passkey: a challenge for the passkeys of the account. */
+  | { type: 'passkeyLoginStart'; id: string; account: Expr; bind: string }
+  /** Second request: checks the answer and binds the account (a text) the challenge was started for. A refusal is a 401. */
+  | { type: 'passkeyLoginFinish'; id: string; stateId: Expr; credential: Expr; bind: string }
   /** AES-256-GCM of `input`, with the key of the environment variable `keyEnv`: `hex(nonce || ciphertext)`. */
   | { type: 'encrypt'; id: string; keyEnv: string; input: Expr; bind: string }
   /** The text `encrypt` sealed; a wrong key or an altered value is an internal error. */

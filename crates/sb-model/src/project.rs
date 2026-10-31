@@ -852,6 +852,48 @@ pub enum Step {
         account: Expr,
         code: Expr,
     },
+    /// First request of registering a passkey (WebAuthn) for `account`, who is already authenticated: a challenge for the
+    /// browser. `bind` receives the API schema `PasskeyChallenge`: `state_id` (given back to `passkeyRegisterFinish`) and
+    /// `options` (JSON for `navigator.credentials.create`). A device the account already has is excluded. The site
+    /// address, which is the relying party, is read from the environment variable `APP_URL`. Routes only.
+    #[serde(rename_all = "camelCase")]
+    PasskeyRegisterStart {
+        id: String,
+        /// A stable id of the account, not something that can change like an e-mail address.
+        account: Expr,
+        /// What the device shows for the account: an e-mail address or a user name.
+        name: Expr,
+        bind: String,
+    },
+    /// Second request: checks the answer of the browser (`credential`, the JSON it produced, as a text) against the
+    /// challenge `state_id`, which must have been started for `account`, and stores the passkey. A challenge works once
+    /// and for five minutes. Anything wrong, or a device already registered, is a `400 invalid passkey`. Routes only.
+    #[serde(rename_all = "camelCase")]
+    PasskeyRegisterFinish {
+        id: String,
+        state_id: Expr,
+        credential: Expr,
+        account: Expr,
+    },
+    /// First request of logging in with a passkey: a challenge for the passkeys of `account`, into a variable of the
+    /// schema `PasskeyChallenge` (`options` is for `navigator.credentials.get`). An account without any passkey is a
+    /// `401 invalid passkey`, which tells whether it has one: limit the attempts with a `rateLimit` before it. Routes only.
+    #[serde(rename_all = "camelCase")]
+    PasskeyLoginStart {
+        id: String,
+        account: Expr,
+        bind: String,
+    },
+    /// Second request: checks the answer of the browser against the challenge `state_id` (once, within five minutes)
+    /// and gives back, as a text, the account the challenge was started for; the signature counter of the passkey is
+    /// kept up to date. Anything wrong is the same `401 invalid passkey`. Routes only.
+    #[serde(rename_all = "camelCase")]
+    PasskeyLoginFinish {
+        id: String,
+        state_id: Expr,
+        credential: Expr,
+        bind: String,
+    },
     /// Authenticates a webhook by its signature, before the body is read as JSON: an HMAC-SHA256 of
     /// `"{timestamp}.{raw body}"`, sent in `header` as `t=<unix seconds>,v1=<hex>` (Stripe's scheme). A
     /// wrong, missing or stale signature (past `tolerance_secs`, which stops a replay) is a 401. It has
@@ -1000,6 +1042,10 @@ impl Step {
             | Step::TotpVerify { id, .. }
             | Step::RecoveryCodes { id, .. }
             | Step::RecoveryCodeUse { id, .. }
+            | Step::PasskeyRegisterStart { id, .. }
+            | Step::PasskeyRegisterFinish { id, .. }
+            | Step::PasskeyLoginStart { id, .. }
+            | Step::PasskeyLoginFinish { id, .. }
             | Step::Decrypt { id, .. }
             | Step::HashPassword { id, .. }
             | Step::VerifyPassword { id, .. }

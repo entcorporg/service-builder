@@ -383,6 +383,13 @@ export function ensureTotpSchema(p: Project) {
   p.messages.push({ name: 'TotpSetup', kind: 'api', fields: ['sealed', 'otpauth_url', 'secret'].map(text) })
 }
 
+/** The API schema the `start` passkey steps fill, added when it is missing: the state to give back, and the browser's options. */
+export function ensurePasskeySchema(p: Project) {
+  if (p.messages.some((m) => m.name === 'PasskeyChallenge')) return
+  const text = (name: string) => ({ name, type: { kind: 'string' as const }, repeated: false, optional: false })
+  p.messages.push({ name: 'PasskeyChallenge', kind: 'api', fields: ['state_id', 'options'].map(text) })
+}
+
 /** The fields of a message that can tell its events apart: a single string, uuid, int32 or int64 (mirrors the validator). */
 export function eventKeys(p: Project, message: string): string[] {
   const msg = p.messages.find((m) => m.name === message)
@@ -482,6 +489,10 @@ export const STEP_LABELS: Record<StepType, { label: string; hint: string }> = {
   totpVerify: { label: 'Vérifier un code 2FA', hint: 'Fenêtre ±30 s, un code ne sert qu’une fois (anti-rejeu). Sinon 401' },
   recoveryCodes: { label: 'Codes de récupération', hint: 'XXXXX-XXXXX, à montrer une fois ; seules leurs empreintes sont stockées' },
   recoveryCodeUse: { label: 'Utiliser un code de récupération', hint: 'Valable une seule fois, avec ou sans tiret. Sinon 401' },
+  passkeyRegisterStart: { label: 'Passkey : début d’enregistrement', hint: 'Un défi pour le navigateur (WebAuthn) ; le compte est déjà authentifié' },
+  passkeyRegisterFinish: { label: 'Passkey : fin d’enregistrement', hint: 'Vérifie la réponse de l’appareil, une seule fois, et stocke la passkey. Sinon 400' },
+  passkeyLoginStart: { label: 'Passkey : début de connexion', hint: 'Un défi pour les passkeys du compte. Sans passkey : 401' },
+  passkeyLoginFinish: { label: 'Passkey : fin de connexion', hint: 'Vérifie la réponse et donne le compte. Sinon 401' },
   encrypt: { label: 'Chiffrer', hint: 'AES-256-GCM, pour ce qui est stocké (un secret TOTP, un jeton)' },
   decrypt: { label: 'Déchiffrer', hint: 'Le texte qu’un bloc « Chiffrer » a scellé' },
   verifyHmac: { label: 'Vérifier une signature', hint: 'Webhook signé (HMAC-SHA256 du corps brut), sans session : toujours la première étape' },
@@ -617,6 +628,32 @@ export function makeStep(type: StepType, p: Project, scope: Scope, ctx: { servic
         id,
         account: firstText(p, scope, ['account', 'user', 'id', 'email']),
         code: firstText(p, scope, ['recovery', 'code']),
+      }
+    case 'passkeyRegisterStart':
+      return {
+        type,
+        id,
+        account: firstText(p, scope, ['sub', 'account', 'user', 'id']),
+        name: firstText(p, scope, ['name', 'email']),
+        bind: uniqueName('challenge', Object.keys(scope)),
+      }
+    case 'passkeyRegisterFinish':
+      return {
+        type,
+        id,
+        stateId: firstText(p, scope, ['state']),
+        credential: firstText(p, scope, ['credential', 'answer']),
+        account: firstText(p, scope, ['sub', 'account', 'user', 'id']),
+      }
+    case 'passkeyLoginStart':
+      return { type, id, account: firstText(p, scope, ['account', 'email', 'user']), bind: uniqueName('challenge', Object.keys(scope)) }
+    case 'passkeyLoginFinish':
+      return {
+        type,
+        id,
+        stateId: firstText(p, scope, ['state']),
+        credential: firstText(p, scope, ['credential', 'answer']),
+        bind: uniqueName('account', Object.keys(scope)),
       }
     case 'encrypt':
       return { type, id, keyEnv: 'ENCRYPTION_KEY', input: firstText(p, scope, ['secret', 'text']), bind: uniqueName('sealed', Object.keys(scope)) }

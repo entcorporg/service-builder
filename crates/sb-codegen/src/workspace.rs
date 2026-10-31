@@ -17,6 +17,7 @@ const RUNTIME_JOBS: &str = include_str!("../templates/runtime/jobs.rs");
 const RUNTIME_CRYPTO: &str = include_str!("../templates/runtime/crypto.rs");
 const RUNTIME_VALIDATION: &str = include_str!("../templates/runtime/validation.rs");
 const RUNTIME_TOTP: &str = include_str!("../templates/runtime/totp.rs");
+const RUNTIME_WEBAUTHN: &str = include_str!("../templates/runtime/webauthn.rs");
 const RUNTIME_WEBHOOK: &str = include_str!("../templates/runtime/webhook.rs");
 const RUNTIME_RATE_LIMIT: &str = include_str!("../templates/runtime/rate_limit.rs");
 const RUNTIME_CARGO: &str = include_str!("../templates/runtime/Cargo.toml");
@@ -46,6 +47,7 @@ pub fn files(project: &Project) -> Vec<GeneratedFile> {
         GeneratedFile::new("runtime/src/rate_limit.rs", RUNTIME_RATE_LIMIT),
         GeneratedFile::new("runtime/src/totp.rs", RUNTIME_TOTP),
         GeneratedFile::new("runtime/src/validation.rs", RUNTIME_VALIDATION),
+        GeneratedFile::new("runtime/src/webauthn.rs", RUNTIME_WEBAUTHN),
         GeneratedFile::new("runtime/src/webhook.rs", RUNTIME_WEBHOOK),
     ]
 }
@@ -98,6 +100,8 @@ rand = "0.10"
 hex = "0.4"
 hmac = "0.13"
 sha1 = "0.11"
+webauthn-rs = {{ version = "0.5", features = ["danger-allow-state-serialisation"] }}
+webauthn-authenticator-rs = {{ version = "0.5", default-features = false, features = ["softtoken"] }}
 "#,
         members.join(", ")
     )

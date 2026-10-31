@@ -811,6 +811,7 @@ pub fn showcase() -> Project {
     add_jwt(&mut p);
     add_shipments(&mut p);
     add_totp(&mut p);
+    add_passkeys(&mut p);
     p
 }
 
@@ -1230,6 +1231,164 @@ pub fn add_totp(p: &mut Project) {
                 code: path("input.code"),
             },
             ack("f11"),
+        ],
+    ));
+}
+
+/// Adds to the first service the four requests of passkeys: registering a device (the account is the one of the verified
+/// access token, read from the `Authorization` header) and logging in with it, which gives the access token. It needs
+/// [`add_jwt`], whose `AccessClaims` and signing key it uses.
+pub fn add_passkeys(p: &mut Project) {
+    let string = || FieldType::String;
+    let bearer = || {
+        let mut token = field("token", string());
+        token.source = Some(RequestSource::Header {
+            name: "Authorization".into(),
+        });
+        token
+    };
+    p.messages.push(api(
+        "PasskeyChallenge",
+        vec![field("state_id", string()), field("options", string())],
+    ));
+    p.messages
+        .push(api("PasskeyEnrol", vec![bearer(), field("name", string())]));
+    p.messages.push(api(
+        "PasskeyEnrolAnswer",
+        vec![
+            bearer(),
+            field("state_id", string()),
+            field("credential", string()),
+        ],
+    ));
+    p.messages
+        .push(api("PasskeyAck", vec![field("ok", FieldType::Bool)]));
+    p.messages
+        .push(api("PasskeyLoginBody", vec![field("account", string())]));
+    p.messages.push(api(
+        "PasskeyLoginAnswer",
+        vec![field("state_id", string()), field("credential", string())],
+    ));
+    p.messages
+        .push(api("PasskeySession", vec![field("access_token", string())]));
+
+    let who = |id: &str| Step::VerifyJwt {
+        id: id.into(),
+        token: path("input.token"),
+        bearer: true,
+        source: JwksSource::Keys {
+            key_envs: vec!["JWT_SIGNING_KEY".into()],
+        },
+        issuer: "orders".into(),
+        schema: "AccessClaims".into(),
+        bind: "claims".into(),
+    };
+    let route = |name: &str, route: &str, request: &str, response: &str, steps| Route {
+        name: name.into(),
+        method: HttpMethod::Post,
+        path: route.into(),
+        request: request.into(),
+        response: response.into(),
+        status: 200,
+        steps,
+    };
+    let challenge_back = |id: &str| Step::Respond {
+        id: id.into(),
+        fields: vec![
+            set("state_id", path("challenge.state_id")),
+            set("options", path("challenge.options")),
+        ],
+        status: None,
+        cookies: vec![],
+    };
+    let routes = &mut p.services[0].routes;
+    routes.push(route(
+        "passkey_register_start",
+        "/passkeys/register/start",
+        "PasskeyEnrol",
+        "PasskeyChallenge",
+        vec![
+            who("p1"),
+            Step::PasskeyRegisterStart {
+                id: "p2".into(),
+                account: path("claims.sub"),
+                name: path("input.name"),
+                bind: "challenge".into(),
+            },
+            challenge_back("p3"),
+        ],
+    ));
+    routes.push(route(
+        "passkey_register_finish",
+        "/passkeys/register/finish",
+        "PasskeyEnrolAnswer",
+        "PasskeyAck",
+        vec![
+            who("p4"),
+            Step::PasskeyRegisterFinish {
+                id: "p5".into(),
+                state_id: path("input.state_id"),
+                credential: path("input.credential"),
+                account: path("claims.sub"),
+            },
+            Step::Respond {
+                id: "p6".into(),
+                fields: vec![set("ok", lit(true))],
+                status: None,
+                cookies: vec![],
+            },
+        ],
+    ));
+    routes.push(route(
+        "passkey_login_start",
+        "/passkeys/login/start",
+        "PasskeyLoginBody",
+        "PasskeyChallenge",
+        vec![
+            // An account without a passkey is refused: that tells it has none, so the attempts are counted.
+            Step::RateLimit {
+                id: "p7".into(),
+                key: path("input.account"),
+                max: 10,
+                window_secs: 900,
+            },
+            Step::PasskeyLoginStart {
+                id: "p8".into(),
+                account: path("input.account"),
+                bind: "challenge".into(),
+            },
+            challenge_back("p9"),
+        ],
+    ));
+    routes.push(route(
+        "passkey_login_finish",
+        "/passkeys/login/finish",
+        "PasskeyLoginAnswer",
+        "PasskeySession",
+        vec![
+            Step::PasskeyLoginFinish {
+                id: "p10".into(),
+                state_id: path("input.state_id"),
+                credential: path("input.credential"),
+                bind: "account".into(),
+            },
+            Step::SignJwt {
+                id: "p11".into(),
+                key_env: "JWT_SIGNING_KEY".into(),
+                issuer: "orders".into(),
+                ttl_secs: 300,
+                claims: vec![
+                    set("sub", path("account")),
+                    set("roles", lit(serde_json::json!(["member"]))),
+                ],
+                bind: "access_token".into(),
+            },
+            Step::Respond {
+                id: "p12".into(),
+                fields: vec![set("access_token", path("access_token"))],
+                status: None,
+                cookies: vec![],
+            },
         ],
     ));
 }

@@ -799,6 +799,47 @@ describe('editor', () => {
     await page.close()
   })
 
+  it('registers a passkey in two requests and logs in with it, in routes only', async () => {
+    const { page } = await open()
+    await page.locator('.tree button.sub', { hasText: '/orders/{order_id}' }).click()
+    await page.locator('.endpoint').waitFor()
+    const add = async (name) => {
+      await page.locator('.add-step-btn').last().click()
+      await page.getByRole('menuitem', { name }).click()
+    }
+    // The first request creates the schema that carries the challenge to the browser.
+    assert.equal(await page.locator('.tree').innerText().then((t) => t.includes('PasskeyChallenge')), false)
+    await add(/^Passkey : début d’enregistrement/)
+    await settle(page)
+    assert.ok((await page.locator('.tree').innerText()).includes('PasskeyChallenge'))
+    await add(/^Passkey : fin d’enregistrement/)
+    await add(/^Passkey : début de connexion/)
+    await add(/^Passkey : fin de connexion/)
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/flows/api.rs"]').click()
+    const code = (await page.locator('.code-main pre').innerText()).replace(/\s+/g, ' ')
+    assert.match(code, /eda_runtime::webauthn::register_start\(\s*&mut tx, &input\.order_id\.clone\(\), /)
+    assert.match(code, /eda_runtime::webauthn::register_finish\(\s*&mut tx/)
+    assert.match(code, /eda_runtime::webauthn::login_start\(\s*&mut tx/)
+    assert.match(code, /let account: String = eda_runtime::webauthn::login_finish\(/)
+    // The runtime builds the feature only for the service that uses it, and the site address is checked at start-up.
+    await page.locator('[role="treeitem"][data-path="services/orders/Cargo.toml"]').click()
+    assert.match(await page.locator('.code-main pre').innerText(), /features = \["webauthn"\]/)
+    await page.locator('[role="treeitem"][data-path="services/orders/src/app/config.rs"]').click()
+    assert.match(await page.locator('.code-main pre').innerText(), /eda_runtime::webauthn::check_config\(\)\?;/)
+
+    // The browser's answers are HTTP requests: not offered in an RPC.
+    await page.getByRole('tab', { name: /Architecture/ }).click()
+    await page.locator('.node.service', { hasText: 'Orders' }).click()
+    await page.locator('.card.rpc .card-toggle', { hasText: 'CreateOrder' }).click()
+    await page.locator('.add-step-btn').first().click()
+    assert.equal(await page.getByRole('menuitem', { name: /^Passkey/ }).count(), 0)
+    await page.close()
+  })
+
   it('reads a field of the request from a header or a cookie', async () => {
     const { page } = await open()
     await page.locator('.tree button.sub', { hasText: '/orders' }).first().click()

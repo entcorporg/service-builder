@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { exampleJson, exampleQuery } from '../json'
-import { addColumn, addForeignKey, addJob, ensureJwksSchemas, ensureTotpSchema, eventKeys, addIndex, addTable, addUnique, makeStep, retargetForeignKey, renameColumn, renameTable, selectionForPath, addMessage, addRoute, addRpc, defaultStatus, pathParams, addTopic, autoMap, canConsume, canProduce, connectConsumer, consumersOf, declareProducer, removeService, renameService, renameField, renameMessage, renameTopic, nestable } from '../model'
+import { addColumn, addForeignKey, addJob, ensureJwksSchemas, ensurePasskeySchema, ensureTotpSchema, eventKeys, addIndex, addTable, addUnique, makeStep, retargetForeignKey, renameColumn, renameTable, selectionForPath, addMessage, addRoute, addRpc, defaultStatus, pathParams, addTopic, autoMap, canConsume, canProduce, connectConsumer, consumersOf, declareProducer, removeService, renameService, renameField, renameMessage, renameTopic, nestable } from '../model'
 import { sqlPreview } from '../components/SqlStep'
 import { everyLabel } from '../components/Inspector'
 import { createTableSql } from '../components/TablesView'
@@ -739,5 +739,32 @@ describe('second factor steps', () => {
     expect(issue).toMatchObject({ type: 'recoveryCodes', count: 8, bind: 'recovery_codes' })
     expect(scopeAfter(p, inputScope('Check'), issue).recovery_codes).toEqual({ type: { kind: 'string' }, repeated: true, optional: false })
     expect(makeStep('recoveryCodeUse', p, inputScope('Check'), ctx)).toMatchObject({ type: 'recoveryCodeUse', code: { kind: 'path', path: 'input.code' } })
+  })
+})
+
+describe('passkey steps', () => {
+  const ctx = { service: 'Orders', response: 'Placed', http: true }
+  const text = (name: string) => ({ name, type: { kind: 'string' as const }, repeated: false, optional: false })
+
+  it('start a registration on the verified account, into a schema created once', () => {
+    const p = project()
+    p.messages.push({ name: 'Claims', kind: 'api', fields: [text('sub')] }, { name: 'Enrol', kind: 'api', fields: [text('name')] })
+    ensurePasskeySchema(p)
+    ensurePasskeySchema(p)
+    expect(p.messages.filter((m) => m.name === 'PasskeyChallenge')).toHaveLength(1)
+    expect(p.messages.find((m) => m.name === 'PasskeyChallenge')!.fields.map((f) => f.name)).toEqual(['state_id', 'options'])
+    const scope = { ...inputScope('Enrol'), claims: { type: { kind: 'message' as const, name: 'Claims' }, repeated: false, optional: false } }
+    const step = makeStep('passkeyRegisterStart', p, scope, ctx)
+    expect(step).toMatchObject({ account: { kind: 'path', path: 'claims.sub' }, name: { kind: 'path', path: 'input.name' }, bind: 'challenge' })
+    expect(scopeAfter(p, scope, step).challenge).toEqual({ type: { kind: 'message', name: 'PasskeyChallenge' }, repeated: false, optional: false })
+  })
+
+  it('finish a login on the answer of the request, and bind the account', () => {
+    const p = project()
+    p.messages.push({ name: 'Answer', kind: 'api', fields: [text('state_id'), text('credential')] })
+    const step = makeStep('passkeyLoginFinish', p, inputScope('Answer'), ctx)
+    expect(step).toMatchObject({ stateId: { kind: 'path', path: 'input.state_id' }, credential: { kind: 'path', path: 'input.credential' }, bind: 'account' })
+    expect(scopeAfter(p, inputScope('Answer'), step).account).toEqual(scalar('string'))
+    expect(makeStep('passkeyRegisterFinish', p, inputScope('Answer'), ctx)).toMatchObject({ type: 'passkeyRegisterFinish', credential: { kind: 'path', path: 'input.credential' } })
   })
 })

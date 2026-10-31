@@ -8,7 +8,7 @@ import { Icon } from './Icon'
 function CopyBlock({ title, text }: { title: string; text: string }) {
   const notify = useStore((s) => s.notify)
   return (
-    <div className="mb-[10px] overflow-hidden rounded-xl border border-line bg-panel">
+    <div className="mb-2.5 overflow-hidden rounded-xl border border-line bg-panel">
       <div className="flex items-center justify-between border-b border-line py-1 pr-1.5 pl-3">
         <strong>{title}</strong>
         <button
@@ -20,7 +20,7 @@ function CopyBlock({ title, text }: { title: string; text: string }) {
           <Icon name="copy" size={14} /> Copier
         </button>
       </div>
-      <pre data-testid="copy-text" className="m-0 overflow-x-auto px-3 py-[10px] font-mono text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">{text}</pre>
+      <pre data-testid="copy-text" className="m-0 overflow-x-auto px-3 py-2.5 font-mono text-sm whitespace-pre-wrap wrap-anywhere">{text}</pre>
     </div>
   )
 }
@@ -109,19 +109,19 @@ export function McpView() {
 
   return (
     <div data-testid="mcp-view" className="absolute inset-0 overflow-y-auto bg-bg">
-      <div className="mx-auto grid max-w-[860px] gap-4 px-6 pt-[22px] pb-12">
+      <div className="mx-auto grid max-w-215 gap-4 px-6 pt-5.5 pb-12">
         <header>
           <h2 className="mb-1 text-xl">Serveur MCP</h2>
-          <p className="leading-[1.5] text-muted">
+          <p className="leading-normal text-muted">
             Un client IA (Claude Code, Claude Desktop…) lance Service Builder en mode <span className="font-mono text-sm">mcp</span> et lit,
             modifie, valide et exporte ce projet par le protocole MCP, sur stdio. Le serveur travaille sur le fichier du projet.
           </p>
         </header>
 
         <section className={CARD} aria-label="Activation">
-          <div className="flex items-center justify-between gap-[18px]">
+          <div className="flex items-center justify-between gap-4.5">
             <div>
-              <div className="flex items-center gap-[10px]">
+              <div className="flex items-center gap-2.5">
                 <strong>Activation</strong>
                 {state && <span data-testid="mcp-state" data-state={state} className={`${PILL} ${PILL_TONE[state]}`}>{STATE_LABEL[state]}</span>}
               </div>
@@ -164,7 +164,7 @@ export function McpView() {
               </li>
             ))}
           </ul>
-          <p className="text-sm leading-[1.5] text-muted">
+          <p className="text-sm leading-normal text-muted">
             Les modifications d’un client sont écrites dans le fichier du projet. L’application le recharge quand la fenêtre
             reprend le focus, sauf si des modifications non enregistrées sont en cours.
           </p>
@@ -182,21 +182,21 @@ export function McpView() {
                 />
                 Demander un rapport à l’agent tous les 50 appels
               </label>
-              <small className="leading-[1.5] text-muted">
+              <small className="leading-normal text-muted">
                 Un agent peut aussi en déposer un de lui-même. Rien n’est envoyé sans votre clic : « Envoyer sur GitHub » ouvre une
                 issue pré-remplie dans votre navigateur, que vous relisez avant de la publier.
               </small>
             </div>
             {feedback.reports.length === 0 ? (
-              <p className="text-sm leading-[1.5] text-muted">Aucun rapport pour l’instant.</p>
+              <p className="text-sm leading-normal text-muted">Aucun rapport pour l’instant.</p>
             ) : (
               feedback.reports.map((r) => (
                 <article key={r.id} className={`${CARD} grid gap-2`} aria-label={`Rapport ${r.id}`}>
-                  <div className="flex items-center gap-[10px] text-muted">
+                  <div className="flex items-center gap-2.5 text-muted">
                     <small>{new Date(r.createdAt * 1000).toLocaleString('fr-FR')}</small>
                     {r.status === 'opened' && <span className={`${PILL} ${PILL_TONE.on}`}>Ouvert sur GitHub</span>}
                   </div>
-                  {r.summary && <p className="leading-[1.5] text-muted">{r.summary}</p>}
+                  {r.summary && <p className="leading-normal text-muted">{r.summary}</p>}
                   <ol className="m-0 grid gap-1.5 pl-5">
                     {r.suggestions.map((s, i) => (
                       <li key={i}>

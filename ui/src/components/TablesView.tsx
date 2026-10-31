@@ -100,7 +100,7 @@ export function TablesView() {
               <button
                 key={t.name}
                 type="button"
-                className={`flex w-full cursor-pointer items-center gap-[7px] rounded-md border-0 py-[5px] pr-[10px] pl-[18px] text-left ${
+                className={`flex w-full cursor-pointer items-center gap-1.75 rounded-md border-0 py-1.25 pr-2.5 pl-4.5 text-left ${
                   current?.service === s.name && current.table === t.name ? 'bg-service/18 text-white' : 'bg-transparent text-text hover:bg-raised'
                 }`}
                 onClick={() => setSel({ service: s.name, table: t.name })}
@@ -113,7 +113,7 @@ export function TablesView() {
       </nav>
 
       {service && table ? (
-        <main className="grid min-w-0 auto-rows-max content-start gap-[14px] overflow-y-auto px-[22px] pt-[18px] pb-10" aria-label={`Table ${table.name}`}>
+        <main className="grid min-w-0 auto-rows-max content-start gap-3.5 overflow-y-auto px-5.5 pt-4.5 pb-10" aria-label={`Table ${table.name}`}>
           <header className="flex items-center gap-3">
             <Icon name="table" size={18} />
             <span className="text-muted">{service.name} ·</span>
@@ -121,7 +121,7 @@ export function TablesView() {
               value={table.name}
               mono
               label="Nom de la table"
-              className="w-[260px] text-lg font-semibold"
+              className="w-65 text-lg font-semibold"
               onCommit={(v) => {
                 edit((p) => renameTable(p, service.name, table.name, v))
                 setSel({ service: service.name, table: v })
@@ -192,7 +192,7 @@ export function TablesView() {
           <pre className="sql-preview mono" aria-label="SQL de la table">{createTableSql(table)}</pre>
         </main>
       ) : (
-        <div className="grid h-full place-content-center justify-items-center gap-[10px] p-6 text-center text-faint">
+        <div className="grid h-full place-content-center justify-items-center gap-2.5 p-6 text-center text-faint">
           <Icon name="table" size={32} />
           <p>Chaque service a sa propre base. Créez une table pour concevoir ses colonnes ; les blocs SQL des routes pourront la lire.</p>
           {project.services.length > 0 && (
