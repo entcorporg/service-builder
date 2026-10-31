@@ -94,6 +94,9 @@ fn is_env_name(name: &str) -> bool {
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
 }
 
+/// The largest object that goes through a step: 10 MiB, which is also the runtime's hard limit.
+const MAX_OBJECT_BYTES: u32 = 10 * 1024 * 1024;
+
 /// Recovery codes issued at once: a sheet to print, not a stock.
 const MAX_RECOVERY_CODES: u32 = 20;
 
@@ -2089,6 +2092,93 @@ impl<'a> Checker<'a> {
                 scope.bind(bind.clone(), text);
                 false
             }
+            Step::ImageSniff {
+                input,
+                allow,
+                max_bytes,
+                bind,
+                ..
+            } => {
+                if !matches!(env.handler, Handler::Route { .. }) {
+                    self.error(
+                        "E_IMAGE_OUTSIDE_ROUTE",
+                        path,
+                        "a refused image is a 400: checking one only makes sense in an HTTP route",
+                    );
+                }
+                self.check_var_name(bind, &format!("{path}/bind"));
+                if allow.is_empty() {
+                    self.error(
+                        "E_IMAGE_ALLOW",
+                        format!("{path}/allow"),
+                        "accept at least one image type (png, jpeg)",
+                    );
+                }
+                let mut seen = HashSet::new();
+                for (i, kind) in allow.iter().enumerate() {
+                    if !seen.insert(*kind) {
+                        self.error(
+                            "E_IMAGE_ALLOW",
+                            format!("{path}/allow/{i}"),
+                            format!("`{}` is listed twice", kind.as_str()),
+                        );
+                    }
+                }
+                if !(1..=MAX_OBJECT_BYTES).contains(max_bytes) {
+                    self.error(
+                        "E_IMAGE_SIZE",
+                        format!("{path}/maxBytes"),
+                        format!(
+                            "the largest image is between 1 byte and {MAX_OBJECT_BYTES} (10 MiB)"
+                        ),
+                    );
+                }
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, input, Some(&text), &format!("{path}/input"));
+                scope.bind(bind.clone(), text);
+                false
+            }
+            Step::ObjectPut {
+                bucket_env,
+                key,
+                body,
+                content_type,
+                ..
+            } => {
+                self.bucket_env(&format!("{path}/bucketEnv"), bucket_env);
+                let text = TypeRef::scalar(FieldType::String);
+                for (name, e) in [("key", key), ("body", body), ("contentType", content_type)] {
+                    self.check_expr(scope, e, Some(&text), &format!("{path}/{name}"));
+                }
+                false
+            }
+            Step::ObjectGet {
+                bucket_env,
+                key,
+                bind,
+                ..
+            } => {
+                self.bucket_env(&format!("{path}/bucketEnv"), bucket_env);
+                self.check_var_name(bind, &format!("{path}/bind"));
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, key, Some(&text), &format!("{path}/key"));
+                scope.bind(
+                    bind.clone(),
+                    TypeRef {
+                        optional: true,
+                        ..text
+                    },
+                );
+                false
+            }
+            Step::ObjectDelete {
+                bucket_env, key, ..
+            } => {
+                self.bucket_env(&format!("{path}/bucketEnv"), bucket_env);
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, key, Some(&text), &format!("{path}/key"));
+                false
+            }
             Step::Encrypt {
                 key_env,
                 input,
@@ -2273,6 +2363,17 @@ impl<'a> Checker<'a> {
     }
 
     /// The name of an environment variable.
+    /// The environment variable that holds the name of a bucket.
+    fn bucket_env(&mut self, path: &str, name: &str) {
+        if !is_env_name(name) {
+            self.error(
+                "E_BUCKET_ENV",
+                path,
+                format!("`{name}` is not an environment variable name (e.g. `AVATAR_BUCKET`)"),
+            );
+        }
+    }
+
     /// A refused code is a 401: only an HTTP route answers one.
     fn totp_in_route(&mut self, env: &Env, path: &str, what: &str) {
         if !matches!(env.handler, Handler::Route { .. }) {
@@ -4485,6 +4586,115 @@ mod tests {
                 errors(&p)
             );
         }
+    }
+
+    fn with_avatars() -> Project {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_avatars(&mut p);
+        p
+    }
+
+    /// The three routes of `add_avatars` come after the five of the orders and the JWT.
+    fn avatar_step(p: &mut Project, route: usize, at: usize) -> &mut Step {
+        &mut p.services[0].routes[5 + route].steps[at]
+    }
+
+    #[test]
+    fn an_image_is_checked_stored_read_and_deleted() {
+        let p = with_avatars();
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+        // What is read back may be absent: the answer has to allow it.
+        let mut p = with_avatars();
+        p.messages
+            .iter_mut()
+            .find(|m| m.name == "AvatarView")
+            .unwrap()
+            .fields[0]
+            .optional = false;
+        assert!(
+            errors(&p).contains(&"E_TYPE_MISMATCH".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+    }
+
+    #[test]
+    fn the_steps_of_the_object_storage_are_checked() {
+        type Case<'a> = (&'a str, &'a dyn Fn(&mut Project));
+        let cases: [Case; 9] = [
+            ("E_IMAGE_ALLOW", &|p| {
+                if let Step::ImageSniff { allow, .. } = avatar_step(p, 0, 1) {
+                    allow.clear();
+                }
+            }),
+            ("E_IMAGE_ALLOW", &|p| {
+                if let Step::ImageSniff { allow, .. } = avatar_step(p, 0, 1) {
+                    allow.push(ImageKind::Png);
+                }
+            }),
+            ("E_IMAGE_SIZE", &|p| {
+                if let Step::ImageSniff { max_bytes, .. } = avatar_step(p, 0, 1) {
+                    *max_bytes = 0;
+                }
+            }),
+            ("E_IMAGE_SIZE", &|p| {
+                if let Step::ImageSniff { max_bytes, .. } = avatar_step(p, 0, 1) {
+                    *max_bytes = 10 * 1024 * 1024 + 1;
+                }
+            }),
+            ("E_BUCKET_ENV", &|p| {
+                if let Step::ObjectPut { bucket_env, .. } = avatar_step(p, 0, 2) {
+                    *bucket_env = "avatar-bucket".into();
+                }
+            }),
+            ("E_BUCKET_ENV", &|p| {
+                if let Step::ObjectGet { bucket_env, .. } = avatar_step(p, 1, 1) {
+                    *bucket_env = String::new();
+                }
+            }),
+            ("E_UNKNOWN_PATH", &|p| {
+                if let Step::ObjectPut { content_type, .. } = avatar_step(p, 0, 2) {
+                    *content_type = Expr::Path {
+                        path: "nope".into(),
+                    };
+                }
+            }),
+            ("E_UNKNOWN_PATH", &|p| {
+                if let Step::ObjectDelete { key, .. } = avatar_step(p, 2, 1) {
+                    *key = Expr::Path {
+                        path: "claims.nope".into(),
+                    };
+                }
+            }),
+            ("E_RESERVED_NAME", &|p| {
+                if let Step::ImageSniff { bind, .. } = avatar_step(p, 0, 1) {
+                    *bind = "tx".into();
+                }
+            }),
+        ];
+        for (code, break_it) in cases {
+            let mut p = with_avatars();
+            break_it(&mut p);
+            assert!(
+                errors(&p).contains(&code.to_string()),
+                "{code}: {:?}",
+                errors(&p)
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_image_is_a_400_so_only_routes_check_one() {
+        let mut p = with_avatars();
+        let step = avatar_step(&mut p, 0, 1).clone();
+        p.services[0].rpcs[0].steps.insert(0, step);
+        assert!(errors(&p).contains(&"E_IMAGE_OUTSIDE_ROUTE".to_string()));
+        // Storing, reading and deleting work anywhere: a consumer can clean up after an event.
+        let mut p = with_avatars();
+        let step = avatar_step(&mut p, 2, 1).clone();
+        p.services[0].rpcs[0].steps.insert(0, step);
+        assert!(!errors(&p).iter().any(|c| c.starts_with("E_IMAGE")));
     }
 
     fn with_seal() -> Project {

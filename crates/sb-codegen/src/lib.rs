@@ -162,6 +162,7 @@ mod tests {
                 "runtime/src/lib.rs",
                 "runtime/src/outbox.rs",
                 "runtime/src/rate_limit.rs",
+                "runtime/src/s3.rs",
                 "runtime/src/totp.rs",
                 "runtime/src/validation.rs",
                 "runtime/src/webauthn.rs",
@@ -1093,6 +1094,55 @@ mod tests {
         assert!(!file(&plain, "services/orders/Cargo.toml").contains("webauthn"));
         assert!(!file(&plain, "services/orders/src/app/schema.rs").contains("webauthn"));
         assert!(!file(&plain, "services/orders/src/app/config.rs").contains("webauthn"));
+    }
+
+    #[test]
+    fn objects_are_stored_in_a_bucket_of_the_environment_and_images_get_room_in_the_body() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_avatars(&mut p);
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&p)),
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        let flat = api.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.contains("let content_type: String = eda_runtime::s3::sniff_image(&input.image.clone(), &[\"png\", \"jpeg\"], 2097152)?.to_string();"), "{flat}");
+        assert!(flat.contains("eda_runtime::s3::put(\"AVATAR_BUCKET\", &claims.sub.clone(), &input.image.clone(), &content_type.clone()"), "{flat}");
+        assert!(flat.contains("let avatar: Option<String> = eda_runtime::s3::get(\"AVATAR_BUCKET\", &claims.sub.clone()).await?;"), "{flat}");
+        assert!(
+            flat.contains(
+                "eda_runtime::s3::delete(\"AVATAR_BUCKET\", &claims.sub.clone()).await?;"
+            ),
+            "{flat}"
+        );
+        // The SDK is built only for the service that stores objects, and a missing bucket stops it at start-up.
+        assert!(file(&files, "services/orders/Cargo.toml").contains("features = [\"s3\"]"));
+        assert!(
+            file(&files, "services/orders/src/app/config.rs")
+                .contains("eda_runtime::s3::check_config(&[\"AVATAR_BUCKET\"])?;")
+        );
+        // A 2 MiB image is 2.8 MB of base64 in the JSON: the route takes a bigger body than axum's 2 MB, and only that route.
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        let limit = (2 * 1024 * 1024usize).div_ceil(3) * 4 + 16 * 1024;
+        assert!(
+            http.contains(&format!(".layer(DefaultBodyLimit::max({limit}))")),
+            "{http}"
+        );
+        assert_eq!(http.matches("DefaultBodyLimit::max").count(), 1);
+        assert!(http.contains("DefaultBodyLimit"));
+        // Nothing of it elsewhere.
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/Cargo.toml").contains("s3"));
+        assert!(
+            !file(&plain, "services/orders/src/transport/http.rs").contains("DefaultBodyLimit")
+        );
+        assert!(!file(&plain, "services/orders/src/app/config.rs").contains("s3::"));
+        assert!(
+            file(&files, "runtime/src/lib.rs").contains("#[cfg(feature = \"s3\")]\npub mod s3;")
+        );
     }
 
     #[test]

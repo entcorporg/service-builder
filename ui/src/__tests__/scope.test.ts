@@ -768,3 +768,38 @@ describe('passkey steps', () => {
     expect(makeStep('passkeyRegisterFinish', p, inputScope('Answer'), ctx)).toMatchObject({ type: 'passkeyRegisterFinish', credential: { kind: 'path', path: 'input.credential' } })
   })
 })
+
+describe('object storage steps', () => {
+  const ctx = { service: 'Orders', response: 'Placed', http: true }
+  const text = (name: string) => ({ name, type: { kind: 'string' as const }, repeated: false, optional: false })
+
+  it('recognise the image of the request, PNG and JPEG up to 2 MiB, and bind its type', () => {
+    const p = project()
+    p.messages.push({ name: 'Upload', kind: 'api', fields: [text('image')] })
+    const step = makeStep('imageSniff', p, inputScope('Upload'), ctx)
+    expect(step).toMatchObject({ input: { kind: 'path', path: 'input.image' }, allow: ['png', 'jpeg'], maxBytes: 2097152, bind: 'content_type' })
+    expect(scopeAfter(p, inputScope('Upload'), step).content_type).toEqual(scalar('string'))
+  })
+
+  it('store under the account, with the type that was found', () => {
+    const p = project()
+    p.messages.push({ name: 'Upload', kind: 'api', fields: [text('image')] })
+    const scope = { ...inputScope('Upload'), content_type: scalar('string'), claims: { type: { kind: 'message' as const, name: 'Claims' }, repeated: false, optional: false } }
+    p.messages.push({ name: 'Claims', kind: 'api', fields: [text('sub')] })
+    expect(makeStep('objectPut', p, scope, ctx)).toMatchObject({
+      bucketEnv: 'AVATAR_BUCKET',
+      key: { kind: 'path', path: 'claims.sub' },
+      body: { kind: 'path', path: 'input.image' },
+      contentType: { kind: 'path', path: 'content_type' },
+    })
+  })
+
+  it('read an object that may be absent', () => {
+    const p = project()
+    p.messages.push({ name: 'Who', kind: 'api', fields: [text('account')] })
+    const step = makeStep('objectGet', p, inputScope('Who'), ctx)
+    expect(step).toMatchObject({ type: 'objectGet', key: { kind: 'path', path: 'input.account' }, bind: 'object' })
+    expect(scopeAfter(p, inputScope('Who'), step).object).toEqual({ type: { kind: 'string' }, repeated: false, optional: true })
+    expect(makeStep('objectDelete', p, inputScope('Who'), ctx)).toMatchObject({ type: 'objectDelete', bucketEnv: 'AVATAR_BUCKET' })
+  })
+})

@@ -493,6 +493,10 @@ export const STEP_LABELS: Record<StepType, { label: string; hint: string }> = {
   passkeyRegisterFinish: { label: 'Passkey : fin d’enregistrement', hint: 'Vérifie la réponse de l’appareil, une seule fois, et stocke la passkey. Sinon 400' },
   passkeyLoginStart: { label: 'Passkey : début de connexion', hint: 'Un défi pour les passkeys du compte. Sans passkey : 401' },
   passkeyLoginFinish: { label: 'Passkey : fin de connexion', hint: 'Vérifie la réponse et donne le compte. Sinon 401' },
+  imageSniff: { label: 'Reconnaître une image', hint: 'PNG ou JPEG d’après les premiers octets, jamais le Content-Type du client ; pas de SVG. Sinon 400' },
+  objectPut: { label: 'Stocker un objet', hint: 'Dans un bucket privé (S3 : Garage, MinIO ou AWS). L’objet d’abord, la base ensuite' },
+  objectGet: { label: 'Lire un objet', hint: 'En base64 ; rien s’il n’existe pas. Stockage injoignable : 503' },
+  objectDelete: { label: 'Supprimer un objet', hint: 'La base d’abord, l’objet ensuite. Un objet absent n’est pas une erreur' },
   encrypt: { label: 'Chiffrer', hint: 'AES-256-GCM, pour ce qui est stocké (un secret TOTP, un jeton)' },
   decrypt: { label: 'Déchiffrer', hint: 'Le texte qu’un bloc « Chiffrer » a scellé' },
   verifyHmac: { label: 'Vérifier une signature', hint: 'Webhook signé (HMAC-SHA256 du corps brut), sans session : toujours la première étape' },
@@ -655,6 +659,21 @@ export function makeStep(type: StepType, p: Project, scope: Scope, ctx: { servic
         credential: firstText(p, scope, ['credential', 'answer']),
         bind: uniqueName('account', Object.keys(scope)),
       }
+    case 'imageSniff':
+      return { type, id, input: firstText(p, scope, ['image', 'photo', 'avatar', 'file']), allow: ['png', 'jpeg'], maxBytes: 2 * 1024 * 1024, bind: uniqueName('content_type', Object.keys(scope)) }
+    case 'objectPut':
+      return {
+        type,
+        id,
+        bucketEnv: 'AVATAR_BUCKET',
+        key: firstText(p, scope, ['sub', 'account', 'user', 'id']),
+        body: firstText(p, scope, ['image', 'photo', 'avatar', 'file']),
+        contentType: firstText(p, scope, ['content_type', 'mime']),
+      }
+    case 'objectGet':
+      return { type, id, bucketEnv: 'AVATAR_BUCKET', key: firstText(p, scope, ['sub', 'account', 'user', 'id']), bind: uniqueName('object', Object.keys(scope)) }
+    case 'objectDelete':
+      return { type, id, bucketEnv: 'AVATAR_BUCKET', key: firstText(p, scope, ['sub', 'account', 'user', 'id']) }
     case 'encrypt':
       return { type, id, keyEnv: 'ENCRYPTION_KEY', input: firstText(p, scope, ['secret', 'text']), bind: uniqueName('sealed', Object.keys(scope)) }
     case 'decrypt':

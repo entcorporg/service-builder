@@ -178,6 +178,8 @@ export function scopeAfter(project: Project, scope: Scope, step: Step): Scope {
   if (step.type === 'recoveryCodes' && step.bind) return { ...scope, [step.bind]: { type: { kind: 'string' }, repeated: true, optional: false } }
   if ((step.type === 'passkeyRegisterStart' || step.type === 'passkeyLoginStart') && step.bind) return { ...scope, [step.bind]: { type: { kind: 'message', name: 'PasskeyChallenge' }, repeated: false, optional: false } }
   if (step.type === 'passkeyLoginFinish' && step.bind) return { ...scope, [step.bind]: scalar('string') }
+  if (step.type === 'imageSniff' && step.bind) return { ...scope, [step.bind]: scalar('string') }
+  if (step.type === 'objectGet' && step.bind) return { ...scope, [step.bind]: { type: { kind: 'string' }, repeated: false, optional: true } }
   if (step.type === 'jwks' && step.bind) return { ...scope, [step.bind]: { type: { kind: 'message', name: 'Jwks' }, repeated: false, optional: false } }
   if (step.type === 'sql' && step.columns.length > 0 && step.bind) {
     const message = step.into ?? sqlRowName(step.table, step.id)

@@ -64,6 +64,9 @@ export interface Assignment {
   value: Expr
 }
 
+/** An image type `imageSniff` accepts. There is no SVG: it can carry a script. */
+export type ImageKind = 'png' | 'jpeg'
+
 /** Where the public keys that check a token come from: seeds of this service, or the JWKS of the one that signs. */
 export type JwksSource = { kind: 'keys'; keyEnvs: string[] } | { kind: 'url'; urlEnv: string }
 
@@ -166,6 +169,13 @@ export type Step =
   | { type: 'passkeyLoginStart'; id: string; account: Expr; bind: string }
   /** Second request: checks the answer and binds the account (a text) the challenge was started for. A refusal is a 401. */
   | { type: 'passkeyLoginFinish'; id: string; stateId: Expr; credential: Expr; bind: string }
+  /** Recognises an image (base64) from its first bytes, within a size; binds its media type. A refusal is a 400. */
+  | { type: 'imageSniff'; id: string; input: Expr; allow: ImageKind[]; maxBytes: number; bind: string }
+  /** Stores an object (base64) in the bucket named by an environment variable. */
+  | { type: 'objectPut'; id: string; bucketEnv: string; key: Expr; body: Expr; contentType: Expr }
+  /** Reads an object (base64); nothing when there is none. */
+  | { type: 'objectGet'; id: string; bucketEnv: string; key: Expr; bind: string }
+  | { type: 'objectDelete'; id: string; bucketEnv: string; key: Expr }
   /** AES-256-GCM of `input`, with the key of the environment variable `keyEnv`: `hex(nonce || ciphertext)`. */
   | { type: 'encrypt'; id: string; keyEnv: string; input: Expr; bind: string }
   /** The text `encrypt` sealed; a wrong key or an altered value is an internal error. */
