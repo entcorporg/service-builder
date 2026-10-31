@@ -89,6 +89,20 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                 expr(state_id, &format!("{path}/stateId"), out);
                 expr(credential, &format!("{path}/credential"), out);
             }
+            Step::ImageSniff { input, .. } => expr(input, &format!("{path}/input"), out),
+            Step::ObjectPut {
+                key,
+                body,
+                content_type,
+                ..
+            } => {
+                expr(key, &format!("{path}/key"), out);
+                expr(body, &format!("{path}/body"), out);
+                expr(content_type, &format!("{path}/contentType"), out);
+            }
+            Step::ObjectGet { key, .. } | Step::ObjectDelete { key, .. } => {
+                expr(key, &format!("{path}/key"), out)
+            }
             Step::RecoveryCodes { account, .. } => expr(account, &format!("{path}/account"), out),
             Step::RecoveryCodeUse { account, code, .. } => {
                 expr(account, &format!("{path}/account"), out);

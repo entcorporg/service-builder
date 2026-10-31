@@ -840,6 +840,71 @@ describe('editor', () => {
     await page.close()
   })
 
+  it('checks an image, stores it in a bucket of the environment, and reads and deletes it', async () => {
+    const { page } = await open()
+    await page.locator('.tree button.sub', { hasText: '/orders/{order_id}' }).click()
+    await page.locator('.endpoint').waitFor()
+    const add = async (name) => {
+      await page.locator('.add-step-btn').last().click()
+      await page.getByRole('menuitem', { name }).click()
+    }
+    const step = (label) => page.locator('.card.step').filter({ has: page.locator('strong', { hasText: new RegExp(`^${label}$`) }) })
+
+    await add(/^Reconnaître une image/)
+    const sniff = step('Reconnaître une image')
+    // PNG and JPEG, 2 MiB: there is no SVG to allow.
+    assert.equal(await sniff.getByLabel('Accepter PNG').isChecked(), true)
+    assert.equal(await sniff.getByLabel('Accepter JPEG').isChecked(), true)
+    assert.equal(await sniff.getByLabel('Taille maximale de l’image (octets)').inputValue(), '2097152')
+    assert.equal(await sniff.getByText('SVG', { exact: true }).count(), 0)
+    // Accepting nothing, or more than the runtime carries, is reported.
+    await sniff.getByLabel('Accepter PNG').uncheck()
+    await sniff.getByLabel('Accepter JPEG').uncheck()
+    await settle(page)
+    assert.ok((await page.locator('.problems li').allInnerTexts()).some((t) => t.includes('E_IMAGE_ALLOW')))
+    await sniff.getByLabel('Accepter PNG').check()
+    await sniff.getByLabel('Taille maximale de l’image (octets)').fill('20000000')
+    await settle(page)
+    assert.ok((await page.locator('.problems li').allInnerTexts()).some((t) => t.includes('E_IMAGE_SIZE')))
+    await sniff.getByLabel('Taille maximale de l’image (octets)').fill('1048576')
+
+    await add(/^Stocker un objet/)
+    const put = step('Stocker un objet')
+    assert.equal(await put.getByLabel('Variable d’environnement du bucket').inputValue(), 'AVATAR_BUCKET')
+    await put.getByLabel('Variable d’environnement du bucket').fill('avatar-bucket')
+    await settle(page)
+    assert.ok((await page.locator('.problems li').allInnerTexts()).some((t) => t.includes('E_BUCKET_ENV')))
+    await put.getByLabel('Variable d’environnement du bucket').fill('AVATAR_BUCKET')
+    await add(/^Lire un objet/)
+    await add(/^Supprimer un objet/)
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/flows/api.rs"]').click()
+    const code = (await page.locator('.code-main pre').innerText()).replace(/\s+/g, ' ')
+    assert.match(code, /eda_runtime::s3::sniff_image\(&input\.order_id\.clone\(\), &\["png"\], 1048576\)\?/)
+    assert.match(code, /eda_runtime::s3::put\(\s*"AVATAR_BUCKET"/)
+    assert.match(code, /let object: Option<String> = eda_runtime::s3::get\(/)
+    assert.match(code, /eda_runtime::s3::delete\(\s*"AVATAR_BUCKET"/)
+    // The SDK is built for this service only, the bucket is checked at start-up, and the route takes the image.
+    await page.locator('[role="treeitem"][data-path="services/orders/Cargo.toml"]').click()
+    assert.match(await page.locator('.code-main pre').innerText(), /features = \["s3"\]/)
+    await page.locator('[role="treeitem"][data-path="services/orders/src/app/config.rs"]').click()
+    assert.match(await page.locator('.code-main pre').innerText(), /eda_runtime::s3::check_config\(&\["AVATAR_BUCKET"\]\)\?;/)
+    await page.locator('[role="treeitem"][data-path="services/orders/src/transport/http.rs"]').click()
+    assert.match(await page.locator('.code-main pre').innerText(), /DefaultBodyLimit::max\(1\d{6}\)/)
+
+    // A refused image is a 400: only a route checks one.
+    await page.getByRole('tab', { name: /Architecture/ }).click()
+    await page.locator('.node.service', { hasText: 'Orders' }).click()
+    await page.locator('.card.rpc .card-toggle', { hasText: 'CreateOrder' }).click()
+    await page.locator('.add-step-btn').first().click()
+    assert.equal(await page.getByRole('menuitem', { name: /^Reconnaître une image/ }).count(), 0)
+    assert.equal(await page.getByRole('menuitem', { name: /^Stocker un objet/ }).count(), 1)
+    await page.close()
+  })
+
   it('reads a field of the request from a header or a cookie', async () => {
     const { page } = await open()
     await page.locator('.tree button.sub', { hasText: '/orders' }).first().click()

@@ -254,6 +254,7 @@ textarea { resize: vertical; line-height: 1.5; }
 .step-icon.signJwt, .step-icon.verifyJwt, .step-icon.jwks { background: rgba(255, 196, 77, 0.15); color: #ffc44d; }
 .step-icon.totpGenerate, .step-icon.totpVerify, .step-icon.recoveryCodes, .step-icon.recoveryCodeUse { background: rgba(255, 196, 77, 0.15); color: #ffc44d; }
 .step-icon.passkeyRegisterStart, .step-icon.passkeyRegisterFinish, .step-icon.passkeyLoginStart, .step-icon.passkeyLoginFinish { background: rgba(255, 196, 77, 0.15); color: #ffc44d; }
+.step-icon.imageSniff, .step-icon.objectPut, .step-icon.objectGet, .step-icon.objectDelete { background: rgba(78, 205, 196, 0.15); color: #4ecdc4; }
 .step-icon.encrypt, .step-icon.decrypt { background: rgba(255, 196, 77, 0.15); color: #ffc44d; }
 .step-icon.verifyHmac { background: rgba(255, 196, 77, 0.15); color: #ffc44d; }
 .step-icon.rateLimit { background: rgba(255, 140, 90, 0.16); color: #ff9c6e; }
@@ -306,6 +307,7 @@ textarea { resize: vertical; line-height: 1.5; }
 .widget.signJwt svg, .widget.verifyJwt svg, .widget.jwks svg { color: #ffc44d; }
 .widget.totpGenerate svg, .widget.totpVerify svg, .widget.recoveryCodes svg, .widget.recoveryCodeUse svg { color: #ffc44d; }
 .widget.passkeyRegisterStart svg, .widget.passkeyRegisterFinish svg, .widget.passkeyLoginStart svg, .widget.passkeyLoginFinish svg { color: #ffc44d; }
+.widget.imageSniff svg, .widget.objectPut svg, .widget.objectGet svg, .widget.objectDelete svg { color: #4ecdc4; }
 .widget.encrypt svg, .widget.decrypt svg { color: #ffc44d; }
 .widget.verifyHmac svg { color: #ffc44d; }
 .widget.rateLimit svg { color: #ff9c6e; }

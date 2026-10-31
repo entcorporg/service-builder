@@ -812,6 +812,7 @@ pub fn showcase() -> Project {
     add_shipments(&mut p);
     add_totp(&mut p);
     add_passkeys(&mut p);
+    add_avatars(&mut p);
     p
 }
 
@@ -1386,6 +1387,125 @@ pub fn add_passkeys(p: &mut Project) {
             Step::Respond {
                 id: "p12".into(),
                 fields: vec![set("access_token", path("access_token"))],
+                status: None,
+                cookies: vec![],
+            },
+        ],
+    ));
+}
+
+/// Adds to the first service the profile picture of an account, in a private bucket: sent as base64 in a JSON request,
+/// recognised by its first bytes (PNG or JPEG, 2 MiB at most, never SVG), stored under the id of the verified account,
+/// read back and deleted. It needs [`add_jwt`], whose `AccessClaims` and signing key it uses.
+pub fn add_avatars(p: &mut Project) {
+    let string = || FieldType::String;
+    let bearer = || {
+        let mut token = field("token", string());
+        token.source = Some(RequestSource::Header {
+            name: "Authorization".into(),
+        });
+        token
+    };
+    let mut image = field("image", string());
+    image.optional = true;
+    p.messages.push(api(
+        "AvatarUpload",
+        vec![bearer(), field("image", string())],
+    ));
+    p.messages.push(api("AvatarRequest", vec![bearer()]));
+    p.messages.push(api("AvatarView", vec![image]));
+    p.messages
+        .push(api("AvatarAck", vec![field("content_type", string())]));
+    p.messages
+        .push(api("AvatarDone", vec![field("ok", FieldType::Bool)]));
+
+    let who = |id: &str| Step::VerifyJwt {
+        id: id.into(),
+        token: path("input.token"),
+        bearer: true,
+        source: JwksSource::Keys {
+            key_envs: vec!["JWT_SIGNING_KEY".into()],
+        },
+        issuer: "orders".into(),
+        schema: "AccessClaims".into(),
+        bind: "claims".into(),
+    };
+    let route = |name: &str, method, request: &str, response: &str, steps| Route {
+        name: name.into(),
+        method,
+        path: "/avatar".into(),
+        request: request.into(),
+        response: response.into(),
+        status: 200,
+        steps,
+    };
+    let routes = &mut p.services[0].routes;
+    routes.push(route(
+        "put_avatar",
+        HttpMethod::Put,
+        "AvatarUpload",
+        "AvatarAck",
+        vec![
+            who("v1"),
+            // The type comes from the bytes, never from what the client says.
+            Step::ImageSniff {
+                id: "v2".into(),
+                input: path("input.image"),
+                allow: vec![ImageKind::Png, ImageKind::Jpeg],
+                max_bytes: 2 * 1024 * 1024,
+                bind: "content_type".into(),
+            },
+            Step::ObjectPut {
+                id: "v3".into(),
+                bucket_env: "AVATAR_BUCKET".into(),
+                key: path("claims.sub"),
+                body: path("input.image"),
+                content_type: path("content_type"),
+            },
+            Step::Respond {
+                id: "v4".into(),
+                fields: vec![set("content_type", path("content_type"))],
+                status: None,
+                cookies: vec![],
+            },
+        ],
+    ));
+    routes.push(route(
+        "get_avatar",
+        HttpMethod::Get,
+        "AvatarRequest",
+        "AvatarView",
+        vec![
+            who("v5"),
+            Step::ObjectGet {
+                id: "v6".into(),
+                bucket_env: "AVATAR_BUCKET".into(),
+                key: path("claims.sub"),
+                bind: "avatar".into(),
+            },
+            Step::Respond {
+                id: "v7".into(),
+                fields: vec![set("image", path("avatar"))],
+                status: None,
+                cookies: vec![],
+            },
+        ],
+    ));
+    routes.push(route(
+        "delete_avatar",
+        HttpMethod::Delete,
+        "AvatarRequest",
+        "AvatarDone",
+        vec![
+            who("v8"),
+            Step::ObjectDelete {
+                id: "v9".into(),
+                bucket_env: "AVATAR_BUCKET".into(),
+                key: path("claims.sub"),
+            },
+            Step::Respond {
+                id: "v10".into(),
+                fields: vec![set("ok", lit(true))],
                 status: None,
                 cookies: vec![],
             },

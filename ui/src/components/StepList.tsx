@@ -7,6 +7,7 @@ import { AssignmentsEditor } from './AssignmentsEditor'
 import { ExprEditor } from './ExprEditor'
 import { Icon } from './Icon'
 import { JwksBody, SignJwtBody, VerifyJwtBody } from './JwtSteps'
+import { ImageSniffBody, ObjectDeleteBody, ObjectGetBody, ObjectPutBody } from './ObjectSteps'
 import { PasskeyLoginFinishBody, PasskeyLoginStartBody, PasskeyRegisterFinishBody, PasskeyRegisterStartBody } from './PasskeySteps'
 import { RecoveryCodesBody, RecoveryCodeUseBody, TotpGenerateBody, TotpVerifyBody } from './TotpSteps'
 import { OP_LABELS, SqlBody } from './SqlStep'
@@ -41,7 +42,7 @@ function literalDefault(kind: string, repeated: boolean): string | number | bool
 }
 
 
-const STEP_ORDER: StepType[] = ['publish', 'sql', 'callRpc', 'branch', 'let', 'log', 'respond', 'fail', 'rateLimit', 'verifyHmac', 'signJwt', 'verifyJwt', 'jwks', 'totpGenerate', 'totpVerify', 'recoveryCodes', 'recoveryCodeUse', 'passkeyRegisterStart', 'passkeyRegisterFinish', 'passkeyLoginStart', 'passkeyLoginFinish', 'encrypt', 'decrypt', 'hashPassword', 'verifyPassword', 'randomToken', 'sha256', 'code']
+const STEP_ORDER: StepType[] = ['publish', 'sql', 'callRpc', 'branch', 'let', 'log', 'respond', 'fail', 'rateLimit', 'verifyHmac', 'signJwt', 'verifyJwt', 'jwks', 'totpGenerate', 'totpVerify', 'recoveryCodes', 'recoveryCodeUse', 'passkeyRegisterStart', 'passkeyRegisterFinish', 'passkeyLoginStart', 'passkeyLoginFinish', 'imageSniff', 'objectPut', 'objectGet', 'objectDelete', 'encrypt', 'decrypt', 'hashPassword', 'verifyPassword', 'randomToken', 'sha256', 'code']
 
 export function StepList({ steps, base, scope, ctx, locate }: ListProps) {
   const project = useStore((s) => s.project)
@@ -100,7 +101,7 @@ function AddStep(props: { allowRespond: boolean; allowFail: boolean; allowSignat
       </button>
       {open && (
         <div className="widget-grid" role="menu">
-          {STEP_ORDER.filter((t) => (t !== 'respond' || props.allowRespond) && ((t !== 'fail' && t !== 'rateLimit') || props.allowFail) && (t !== 'verifyHmac' || props.allowSignature) && (t !== 'verifyJwt' || props.allowFail) && ((t !== 'totpVerify' && t !== 'recoveryCodeUse' && !t.startsWith('passkey')) || props.allowFail)).map((t) => (
+          {STEP_ORDER.filter((t) => (t !== 'respond' || props.allowRespond) && ((t !== 'fail' && t !== 'rateLimit') || props.allowFail) && (t !== 'verifyHmac' || props.allowSignature) && (t !== 'verifyJwt' || props.allowFail) && ((t !== 'totpVerify' && t !== 'recoveryCodeUse' && !t.startsWith('passkey')) || props.allowFail) && (t !== 'imageSniff' || props.allowFail)).map((t) => (
             <button
               key={t}
               type="button"
@@ -181,7 +182,12 @@ function summary(step: Step): string {
     case 'totpVerify':
     case 'recoveryCodeUse':
     case 'passkeyRegisterFinish':
+    case 'objectPut':
+    case 'objectDelete':
       return ''
+    case 'imageSniff':
+    case 'objectGet':
+      return `→ ${step.bind}`
     case 'passkeyRegisterStart':
     case 'passkeyLoginStart':
     case 'passkeyLoginFinish':
@@ -551,6 +557,14 @@ function StepBody(props: {
       return <PasskeyLoginStartBody step={step} update={as<'passkeyLoginStart'>(props.update)} scope={scope} />
     case 'passkeyLoginFinish':
       return <PasskeyLoginFinishBody step={step} update={as<'passkeyLoginFinish'>(props.update)} scope={scope} />
+    case 'imageSniff':
+      return <ImageSniffBody step={step} update={as<'imageSniff'>(props.update)} scope={scope} />
+    case 'objectPut':
+      return <ObjectPutBody step={step} update={as<'objectPut'>(props.update)} scope={scope} />
+    case 'objectGet':
+      return <ObjectGetBody step={step} update={as<'objectGet'>(props.update)} scope={scope} />
+    case 'objectDelete':
+      return <ObjectDeleteBody step={step} update={as<'objectDelete'>(props.update)} scope={scope} />
     case 'totpGenerate':
       return <TotpGenerateBody step={step} update={as<'totpGenerate'>(props.update)} scope={scope} />
     case 'totpVerify':

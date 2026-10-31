@@ -155,6 +155,23 @@ pub enum RequestSource {
     Cookie { name: String },
 }
 
+/// An image type `imageSniff` accepts. There is no SVG: it can carry a script.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ImageKind {
+    Png,
+    Jpeg,
+}
+
+impl ImageKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ImageKind::Png => "png",
+            ImageKind::Jpeg => "jpeg",
+        }
+    }
+}
+
 /// A rule on a text field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "rule", rename_all = "camelCase")]
@@ -894,6 +911,49 @@ pub enum Step {
         credential: Expr,
         bind: String,
     },
+    /// Recognises an image from its first bytes (never from the `Content-Type` a client sends, which decides what is
+    /// served later). `input` is the image in base64, as a client sends a file in JSON; it must not be empty or above
+    /// `max_bytes` once decoded, and must be one of `allow`: there is no SVG, which can carry a script. `bind` receives
+    /// the media type (`image/png`, `image/jpeg`). Anything else is a `400`. Routes only; the body limit of the route is
+    /// raised to fit.
+    #[serde(rename_all = "camelCase")]
+    ImageSniff {
+        id: String,
+        input: Expr,
+        allow: Vec<ImageKind>,
+        max_bytes: u32,
+        bind: String,
+    },
+    /// Stores an object (`body`, in base64, at most 10 MiB) under `key` in a private bucket, named by the environment
+    /// variable `bucket_env`. Garage, MinIO or AWS: with the environment variable `S3_ENDPOINT` it is a compatible store
+    /// addressed by path, without it AWS; the credentials are the standard `AWS_*` ones. A store that cannot be reached
+    /// is a `503`. Put the object first and the database row after (at worst an object the next write replaces).
+    #[serde(rename_all = "camelCase")]
+    ObjectPut {
+        id: String,
+        bucket_env: String,
+        key: Expr,
+        body: Expr,
+        /// `type/subtype`, usually what `imageSniff` found.
+        content_type: Expr,
+    },
+    /// Reads an object: `bind` receives it in base64, or nothing when there is none (an optional text). A store that cannot
+    /// be reached is a `503`.
+    #[serde(rename_all = "camelCase")]
+    ObjectGet {
+        id: String,
+        bucket_env: String,
+        key: Expr,
+        bind: String,
+    },
+    /// Deletes an object; one that is not there is not an error. Delete the database row first and the object after (an
+    /// object nobody points to is unreadable, a row that points to nothing is not).
+    #[serde(rename_all = "camelCase")]
+    ObjectDelete {
+        id: String,
+        bucket_env: String,
+        key: Expr,
+    },
     /// Authenticates a webhook by its signature, before the body is read as JSON: an HMAC-SHA256 of
     /// `"{timestamp}.{raw body}"`, sent in `header` as `t=<unix seconds>,v1=<hex>` (Stripe's scheme). A
     /// wrong, missing or stale signature (past `tolerance_secs`, which stops a replay) is a 401. It has
@@ -1046,6 +1106,10 @@ impl Step {
             | Step::PasskeyRegisterFinish { id, .. }
             | Step::PasskeyLoginStart { id, .. }
             | Step::PasskeyLoginFinish { id, .. }
+            | Step::ImageSniff { id, .. }
+            | Step::ObjectPut { id, .. }
+            | Step::ObjectGet { id, .. }
+            | Step::ObjectDelete { id, .. }
             | Step::Decrypt { id, .. }
             | Step::HashPassword { id, .. }
             | Step::VerifyPassword { id, .. }
