@@ -464,6 +464,59 @@ s'arrête : l'événement est ignoré.
 - Les tests d'intégration du module `eda_runtime::dedup` sont livrés dans le workspace généré ; ils demandent une base :
   `EDA_TEST_DATABASE_URL=postgres://… cargo test -p eda-runtime -- --ignored`.
 
+### Service mail (MTA)
+
+Un service peut être **prêt à l'emploi** (`kind: "mta"`, tuile « Service mail » de la palette) : un agent de transfert de
+courrier qui transforme des événements Kafka en e-mails. Ce n'est pas du code qu'on dessine : c'est du **code fixe**
+(`crates/sb-codegen/templates/mta`, repris tel quel dans le service généré) avec **deux entrées de données** :
+
+1. les **événements envoyés** : ce sont ses `consumers`, chacun avec une règle `mail` à la place des étapes ;
+2. les **mails** : `templates`, un par événement (`eventType` = topic), des modèles [Tera](https://keats.github.io/tera/)
+   rendus avec les champs de l'événement, tels que déclarés dans son schéma (`{{ name }}`).
+
+Le fixe : file `mail_queue` (verrouillage `FOR UPDATE SKIP LOCKED`, reprises à délai croissant plafonné à 24 h, abandon après
+5 essais), worker en parallèle, MIME multipart texte + HTML, **signature DKIM** RSA-SHA256, livraison **SMTP** directe vers le
+MX du destinataire ou par un relais (`SMTP_HOST`), serveur SMTP entrant qui reçoit les **rebonds** (DSN) et les rattache au
+message par son `Message-ID`, `/health` `/livez` `/readyz`, `/metrics` Prometheus (jeton `METRICS_TOKEN`). Les secrets (clé DKIM,
+relais) sont dans l'environnement, jamais dans le projet ; le README généré liste les variables, et `docker-compose.yml` ajoute
+Mailpit (SMTP sur 1025, interface sur 8025) pour voir les mails en développement.
+
+**La règle d'un événement** (`MailRule`) : le champ qui porte l'**adresse** (facultatif : sans adresse l'événement est ignoré
+au lieu d'être une erreur), le champ qui **identifie** l'événement, et quoi faire sans identité (`recipient`,
+`topicAndRecipient`, `reject`), éventuellement un champ « entreprise » (l'expéditeur s'affiche `entreprise via <nom>`) et un
+champ `Reply-To`. La clé de déduplication est `topic:identité` ; elle est **unique** dans la file : un événement redélivré par
+Kafka (au moins une fois) ne part qu'une fois, un autre événement du même topic part. Un événement sans adresse ou sans
+identité exigée échoue, est retenté puis **parqué sur `<topic>.dlq`** au lieu de bloquer la partition. L'événement est lu
+comme le JSON de son schéma (les contrats dérivent `serde` pour ces messages), donc un champ `timestamp` n'y est pas encore
+permis (`E_MTA_EVENT_FIELD`).
+
+**Les mails** sont copiés dans la table `mail_templates` **au démarrage** s'ils n'y sont pas encore (`ON CONFLICT DO NOTHING`) :
+le worker les relit à chaque cycle, donc un mail modifié **en base** s'applique sans redémarrage et n'est jamais écrasé par
+un redéploiement ; un mail ajouté au projet arrive au démarrage suivant. C'est du code et non une migration `sqlx` : un fichier
+de migration déjà appliqué ne peut plus changer (son empreinte est vérifiée), alors que les mails du projet changent. Le HTML est
+échappé, le sujet et le texte ne le sont pas (`| safe` sur un lien du HTML). Un modèle qui ne compile pas est refusé à la
+génération (`E_MTA_TEMPLATE_SYNTAX`), pas au premier envoi.
+
+Validation : un service mail n'a ni RPC, ni route, ni table, ni tâche (`E_MTA_CONTENT`) et un port HTTP (`E_HTTP_PORT`) ; chaque
+événement a une règle et pas d'étapes (`E_MTA_RULE`, `E_MTA_STEPS`) dont les champs existent et sont du texte
+(`E_MTA_FIELD`, `E_MTA_FIELD_TYPE`) ; un topic n'a qu'un mail (`E_MTA_DUPLICATE_EVENT`) ; chaque événement a son mail et chaque mail son
+événement (`E_MTA_TEMPLATE_MISSING`, `E_MTA_TEMPLATE_UNKNOWN`, `E_MTA_TEMPLATE_DUPLICATE`), avec un sujet et un corps. Une règle ou un
+mail hors d'un service mail est refusé (`E_MAIL_OUTSIDE_MTA`, `E_TEMPLATE_OUTSIDE_MTA`).
+
+Ce code vient d'un service en production (`SERVICE_BUILDER_MTA.md`), débarrassé de tout ce qui le rattachait à un projet. Deux défauts y
+ont été **corrigés** : (1) `dot_stuff` ajoutait un `\n` après le dernier segment, d'où un LF seul avant le point final des données
+SMTP (RFC 5321 §2.3.8 exige des CRLF ; Postfix et d'autres refusent un LF seul depuis les attaques de « SMTP smuggling ») ;
+(2) la clé DKIM n'était lue qu'en PKCS#1 (`BEGIN RSA PRIVATE KEY`), alors que `openssl genrsa` écrit du PKCS#8 (`BEGIN PRIVATE KEY`)
+depuis OpenSSL 3 : le service démarrait puis échouait à **chaque envoi** ; les deux formats sont acceptés. Le nom d'affichage du
+destinataire (`To`) vient des champs `firstname` et `name` de l'événement, ou `clientName`. Le code fixe est resté en français,
+comme il a été écrit.
+
+Vérifié sur le service généré, avec PostgreSQL : les 43 tests (SMTP contre un faux serveur, signature DKIM **vérifiée par un récepteur
+indépendant** avec la clé publiée, rebonds sur une vraie session SMTP, déduplication, mise en file, semis des mails) ; et le binaire
+lancé pour de bon : un message inséré dans la file est livré à un serveur SMTP, signé DKIM, rendu depuis le mail du projet (HTML
+échappé), la ligne quitte la file, les métriques comptent la livraison. **Non vérifié** : une livraison vers un vrai MX sur Internet,
+le STARTTLS contre un vrai serveur, le débit sous charge, la lecture de Kafka (les consommateurs sont ceux des autres services).
+
 ### Persistance et outbox
 
 Chaque service possède **sa propre base PostgreSQL** (`<SERVICE>_DATABASE_URL`, créée au démarrage si elle

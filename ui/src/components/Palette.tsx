@@ -1,20 +1,21 @@
-import { addMessage, addService, addTopic, KIND_LABELS, KINDS } from '../model'
+import { addMessage, addMtaService, addService, addTopic, KIND_LABELS, KINDS } from '../model'
 import { useStore } from '../store'
 import { DND_TYPE } from './Canvas'
 import { Icon, type IconName } from './Icon'
 import { IconButton } from './ui'
 
-function Tile(props: { kind: 'service' | 'topic'; icon: IconName; label: string; hint: string; onAdd: () => void }) {
+function Tile(props: { kind: 'service' | 'topic'; icon: IconName; label: string; hint: string; onAdd: () => void; draggable?: boolean }) {
+  const draggable = props.draggable !== false
   return (
     <div
       className={`tile ${props.kind}`}
-      draggable
+      draggable={draggable}
       onDragStart={(e) => {
         e.dataTransfer.setData(DND_TYPE, props.kind)
         e.dataTransfer.effectAllowed = 'copy'
       }}
       onDoubleClick={props.onAdd}
-      title="Glisser sur le canvas, ou double-clic pour ajouter"
+      title={draggable ? 'Glisser sur le canvas, ou double-clic pour ajouter' : 'Double-clic pour ajouter'}
     >
       <Icon name="grip" size={14} />
       <span className="tile-icon"><Icon name={props.icon} size={18} /></span>
@@ -44,12 +45,21 @@ export function Palette() {
     select({ kind, name })
   }
 
+  const addMta = () => {
+    let name = ''
+    edit((p) => {
+      name = addMtaService(p, spot()).name
+    })
+    select({ kind: 'service', name })
+  }
+
   return (
     <aside className="palette" aria-label="Éléments">
       {!apiMode && (
         <>
           <h2>Éléments</h2>
           <Tile kind="service" icon="service" label="Service" hint="gRPC, HTTP + consumers Kafka" onAdd={() => add('service')} />
+          <Tile kind="service" icon="publish" label="Service mail" hint="MTA prêt à l’emploi : événements → mails" onAdd={addMta} draggable={false} />
           <Tile kind="topic" icon="topic" label="Topic" hint="Flux d’événements Kafka" onAdd={() => add('topic')} />
         </>
       )}

@@ -1,7 +1,7 @@
 // Editing helpers on the project document: factories and rename cascades.
 // All mutate a draft (immer), never the live state.
 import { candidates, columnType, fits, type Scope, type TypeRef, typeOfField } from './scope'
-import type { Assignment, Column, Expr, ForeignKey, HttpMethod, Index, Job, Message, MessageKind, Project, Route, Service, Step, StepType, Table, UniqueConstraint } from './types'
+import type { Assignment, Column, Consumer, MailRule, MailTemplate, Expr, ForeignKey, HttpMethod, Index, Job, Message, MessageKind, Project, Route, Service, Step, StepType, Table, UniqueConstraint } from './types'
 
 export function newId(): string {
   return crypto.randomUUID().slice(0, 8)
@@ -87,6 +87,7 @@ export function renameMessage(p: Project, from: string, to: string) {
 export function renameTopic(p: Project, from: string, to: string) {
   for (const t of p.topics) if (t.name === from) t.name = to
   for (const s of p.services) for (const c of s.consumers) if (c.topic === from) c.topic = to
+  for (const s of p.services) for (const t of s.templates ?? []) if (t.eventType === from) t.eventType = to
   for (const h of allHandlers(p))
     walkSteps(h.steps, (st) => {
       if (st.type === 'publish' && st.topic === from) st.topic = to
@@ -139,6 +140,14 @@ export function renameField(p: Project, message: string, from: string, to: strin
       visit(c.steps, null)
       // The field that identifies the events of a consumer is one of the message of its topic.
       if (c.idempotentOn === from && p.topics.find((t) => t.name === c.topic)?.message === message) c.idempotentOn = to
+      // The fields a mail reads are fields of the message of its topic too.
+      if (c.mail && p.topics.find((t) => t.name === c.topic)?.message === message) {
+        const m = c.mail
+        if (m.recipient === from) m.recipient = to
+        if (m.dedupField === from) m.dedupField = to
+        if (m.senderCompanyVia === from) m.senderCompanyVia = to
+        if (m.replyTo === from) m.replyTo = to
+      }
     }
     for (const j of s.jobs) visit(j.steps, null)
   }
@@ -191,6 +200,73 @@ export function addService(p: Project, position: { x: number; y: number }): Serv
   }
   p.services.push(svc)
   return svc
+}
+
+/** A ready-made mail service: it has no port of its own to draw, and starts with no event to mail. */
+export function addMtaService(p: Project, position: { x: number; y: number }): Service {
+  const svc = addService(p, position)
+  svc.name = uniqueName('Mailer', p.services.filter((s) => s !== svc).map((s) => s.name))
+  svc.httpPort = Math.max(8080, ...p.services.map((s) => s.httpPort ?? 0)) + 1
+  svc.kind = 'mta'
+  svc.templates = []
+  return svc
+}
+
+/** The text fields of the event of a topic: where a mail reads the address, the identity and the sender from. */
+export function mailFields(p: Project, topic: string): string[] {
+  const message = p.topics.find((t) => t.name === topic)?.message
+  const msg = p.messages.find((m) => m.name === message)
+  return (msg?.fields ?? []).filter((f) => !f.repeated && (f.type.kind === 'string' || f.type.kind === 'uuid')).map((f) => f.name)
+}
+
+/** A first mail rule for a topic: the field that looks like an address, and one that looks like an identity. */
+function defaultMailRule(p: Project, topic: string): MailRule {
+  const fields = mailFields(p, topic)
+  const recipient = fields.find((f) => /mail/i.test(f)) ?? fields.find((f) => /address|recipient/i.test(f)) ?? fields[0] ?? ''
+  const dedupField = fields.find((f) => /^event_?id$/i.test(f)) ?? fields.find((f) => /(^|_)id$/i.test(f)) ?? fields.find((f) => f !== recipient) ?? recipient
+  return { recipient, optionalRecipient: false, dedupField, dedupFallback: 'topicAndRecipient' }
+}
+
+/** The mail a mail service starts with for a topic; the author rewrites it. */
+function starterTemplate(p: Project, topic: string, rule: MailRule): MailTemplate {
+  const shown = mailFields(p, topic).find((f) => f !== rule.recipient && f !== rule.dedupField)
+  const line = shown ? `{{ ${shown} }}` : topic
+  return { eventType: topic, subject: `Notification : ${topic}`, html: `<p>Bonjour,</p>\n<p>${line}</p>\n`, text: `Bonjour,\n\n${line}\n` }
+}
+
+/** A mail for an event that no mail of the service covers yet (the first, when `topic` is not given). */
+export function addMailEvent(p: Project, service: Service, topic?: string): Consumer | null {
+  const taken = new Set(service.consumers.map((c) => c.topic))
+  const chosen = topic ?? p.topics.find((t) => !taken.has(t.name))?.name
+  if (!chosen || taken.has(chosen)) return null
+  const rule = defaultMailRule(p, chosen)
+  const consumer: Consumer = {
+    name: uniqueName(consumerNameFor(chosen), service.consumers.map((c) => c.name)),
+    topic: chosen,
+    groupId: null,
+    idempotentOn: null,
+    mail: rule,
+    steps: [],
+  }
+  service.consumers.push(consumer)
+  ;(service.templates ??= []).push(starterTemplate(p, chosen, rule))
+  return consumer
+}
+
+/** The event of a mail changes: its mail follows it, and the fields it reads are chosen again in the new message. */
+export function setMailTopic(p: Project, service: Service, index: number, topic: string) {
+  const c = service.consumers[index]
+  if (!c || c.topic === topic || service.consumers.some((x) => x.topic === topic)) return
+  const template = service.templates?.find((t) => t.eventType === c.topic)
+  if (template) template.eventType = topic
+  c.topic = topic
+  c.mail = defaultMailRule(p, topic)
+}
+
+/** Removing an event removes its mail. */
+export function removeMailEvent(service: Service, index: number) {
+  const [gone] = service.consumers.splice(index, 1)
+  if (gone) service.templates = (service.templates ?? []).filter((t) => t.eventType !== gone.topic)
 }
 
 export function addTopic(p: Project, position: { x: number; y: number }) {
@@ -447,6 +523,8 @@ export function canConsume(p: Project, service: string, topic: string): boolean 
 /** Drawing an edge topic → service creates a consumer on that service. */
 export function connectConsumer(p: Project, service: string, topic: string) {
   if (!canConsume(p, service, topic)) return null
+  const target = p.services.find((s) => s.name === service)!
+  if (target.kind === 'mta') return addMailEvent(p, target, topic)
   return addConsumer(p, p.services.find((s) => s.name === service)!, p.topics.find((t) => t.name === topic), consumerNameFor(topic))
 }
 

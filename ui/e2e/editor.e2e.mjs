@@ -1013,6 +1013,51 @@ describe('editor', () => {
     await page.close()
   })
 
+  it('adds a ready-made mail service, mails an event and checks the mail as a template', async () => {
+    const { page } = await open()
+    await page.locator('.tile.service', { hasText: 'Service mail' }).dblclick()
+    await page.getByLabel('Nom du service').waitFor()
+    assert.equal(await page.getByLabel('Nom du service').inputValue(), 'Mailer')
+    // Nothing to draw but the events: no RPC, route, table or job.
+    assert.equal(await page.getByRole('heading', { name: /RPC \(gRPC\)/ }).count(), 0)
+    assert.equal(await page.getByText('Événements et mails').count() > 0, true)
+
+    await page.getByRole('button', { name: 'Ajouter un mail' }).click()
+    await page.getByLabel('Sujet du mail').fill('Votre commande')
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+    // The fields of the event are what the address and the identity are chosen among.
+    const options = await page.getByLabel('Champ de l’adresse').locator('option').allTextContents()
+    assert.ok(options.includes('order_id'), options.join(','))
+
+    // A template that does not compile is refused before the worker meets it.
+    await page.getByLabel('Corps HTML du mail').fill('<p>Bonjour {{ order_id </p>')
+    await settle(page)
+    assert.ok((await page.locator('.problems li').allInnerTexts()).some((t) => t.includes('E_MTA_TEMPLATE_SYNTAX')))
+    await page.getByLabel('Corps HTML du mail').fill('<p>Commande {{ order_id }}</p>')
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/mailer/src/seed.rs"]').click()
+    const seed = await page.locator('.code-main pre').innerText()
+    assert.match(seed, /"Votre commande"/)
+    assert.match(seed, /Commande \{\{ order_id \}\}/)
+    await page.locator('[role="treeitem"][data-path="services/mailer/src/mta_rules.rs"]').click()
+    assert.match(await page.locator('.code-main pre').innerText(), /topic: "orders\.created"/)
+    await page.locator('[role="treeitem"][data-path="services/mailer/src/mta/queue_worker.rs"]').waitFor()
+
+    // Removing the event removes its mail.
+    await page.getByRole('tab', { name: /Architecture/ }).click()
+    await page.locator('.node.service', { hasText: 'Mailer' }).click()
+    await page.getByRole('button', { name: /Supprimer le mail de orders\.created/ }).click()
+    await settle(page)
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/mailer/src/seed.rs"]').click()
+    assert.doesNotMatch(await page.locator('.code-main pre').innerText(), /Votre commande/)
+    await page.close()
+  })
+
   it('scopes a table to its tenant and keeps what is deleted', async () => {
     const { page } = await open()
     await page.getByRole('tab', { name: /Tables/ }).click()

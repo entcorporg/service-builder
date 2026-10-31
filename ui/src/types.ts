@@ -250,7 +250,30 @@ export interface Consumer {
   groupId: string | null
   /** The field of the event that identifies it: an event already handled is skipped. */
   idempotentOn: string | null
+  /** In a mail service: the mail this event sends, instead of steps. */
+  mail?: MailRule
   steps: Step[]
+}
+
+export type ServiceKind = 'standard' | 'mta'
+export type DedupFallback = 'recipient' | 'topicAndRecipient' | 'reject'
+
+/** What a mail service does with an event: the fields of the event it reads the address, the identity, the sender from. */
+export interface MailRule {
+  recipient: string
+  optionalRecipient: boolean
+  dedupField: string
+  dedupFallback: DedupFallback
+  senderCompanyVia?: string
+  replyTo?: string
+}
+
+/** The mail of an event, a Tera template rendered with the fields of the event. The HTML is escaped, the rest is not. */
+export interface MailTemplate {
+  eventType: string
+  subject: string
+  html: string
+  text: string
 }
 
 /** A task a service runs every `everySecs` seconds, from its start-up, on every instance. */
@@ -272,6 +295,9 @@ export interface Service {
   /** Tasks run on a schedule: no request, no event, no input. */
   jobs: Job[]
   position: Position
+  /** A `mta` is a ready-made mail service: its consumers carry a mail rule and its `templates` are the mails. */
+  kind?: ServiceKind
+  templates?: MailTemplate[]
 }
 
 export interface Project {
