@@ -53,6 +53,22 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
             Step::SignJwt { claims, .. } => assignments(claims, &format!("{path}/claims"), out),
             Step::VerifyJwt { token, .. } => expr(token, &format!("{path}/token"), out),
             Step::Jwks { .. } => {}
+            Step::TotpGenerate { account, .. } => expr(account, &format!("{path}/account"), out),
+            Step::TotpVerify {
+                sealed,
+                code,
+                account,
+                ..
+            } => {
+                expr(sealed, &format!("{path}/sealed"), out);
+                expr(code, &format!("{path}/code"), out);
+                expr(account, &format!("{path}/account"), out);
+            }
+            Step::RecoveryCodes { account, .. } => expr(account, &format!("{path}/account"), out),
+            Step::RecoveryCodeUse { account, code, .. } => {
+                expr(account, &format!("{path}/account"), out);
+                expr(code, &format!("{path}/code"), out);
+            }
             Step::HashPassword { input, .. }
             | Step::Sha256 { input, .. }
             | Step::Encrypt { input, .. }

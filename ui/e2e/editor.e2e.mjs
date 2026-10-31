@@ -732,6 +732,73 @@ describe('editor', () => {
     await page.close()
   })
 
+  it('enrols an authenticator app, checks a code once, and issues recovery codes', async () => {
+    const { page } = await open()
+    await page.locator('.tree button.sub', { hasText: '/orders/{order_id}' }).click()
+    await page.locator('.endpoint').waitFor()
+    const add = async (name) => {
+      await page.locator('.add-step-btn').last().click()
+      await page.getByRole('menuitem', { name }).click()
+    }
+    const step = (label) => page.locator('.card.step').filter({ has: page.locator('strong', { hasText: new RegExp(`^${label}$`) }) })
+
+    // Enrolling creates the schema that holds the secret to store and the URI to show.
+    assert.equal(await page.locator('.tree').innerText().then((t) => t.includes('TotpSetup')), false)
+    await add(/^Activer le 2FA/)
+    await settle(page)
+    assert.ok((await page.locator('.tree').innerText()).includes('TotpSetup'))
+    const enrol = step('Activer le 2FA')
+    assert.equal(await enrol.getByLabel('Variable d’environnement de la clé').inputValue(), 'TOTP_ENCRYPTION_KEY')
+    assert.equal(await enrol.getByLabel('Émetteur affiché par l’application').inputValue(), 'Orders')
+
+    // The key is an environment variable, written like one.
+    await enrol.getByLabel('Variable d’environnement de la clé').fill('totp-key')
+    await settle(page)
+    assert.ok((await page.locator('.problems li').allInnerTexts()).some((t) => t.includes('E_KEY_ENV')))
+    await enrol.getByLabel('Variable d’environnement de la clé').fill('TOTP_ENCRYPTION_KEY')
+    // The issuer is shown by the app: no colon, which would split the label.
+    await enrol.getByLabel('Émetteur affiché par l’application').fill('Acme: Pro')
+    await settle(page)
+    assert.ok((await page.locator('.problems li').allInnerTexts()).some((t) => t.includes('E_TOTP_ISSUER')))
+    await enrol.getByLabel('Émetteur affiché par l’application').fill('Acme')
+
+    await add(/^Codes de récupération/)
+    const codes = step('Codes de récupération')
+    await codes.getByLabel('Nombre de codes de récupération').fill('0')
+    await settle(page)
+    assert.ok((await page.locator('.problems li').allInnerTexts()).some((t) => t.includes('E_RECOVERY_COUNT')))
+    await codes.getByLabel('Nombre de codes de récupération').fill('10')
+
+    await add(/^Vérifier un code 2FA/)
+    await add(/^Utiliser un code de récupération/)
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/flows/api.rs"]').click()
+    const code = (await page.locator('.code-main pre').innerText()).replace(/\s+/g, ' ')
+    assert.match(code, /eda_runtime::totp::generate\("TOTP_ENCRYPTION_KEY", "Acme", &input\.order_id\.clone\(\)\)\?/)
+    assert.match(code, /eda_runtime::totp::issue_recovery_codes\(&mut tx, &input\.order_id\.clone\(\), 10\)/)
+    assert.match(code, /eda_runtime::totp::verify\(\s*&mut tx, "TOTP_ENCRYPTION_KEY"/)
+    assert.match(code, /eda_runtime::totp::use_recovery_code\(\s*&mut tx/)
+    await page.locator('[role="treeitem"][data-path="services/orders/src/app/schema.rs"]').click()
+    const schema = await page.locator('.code-main pre').innerText()
+    assert.match(schema, /eda_runtime::totp::CREATE_STEPS_TABLE,/)
+    assert.match(schema, /eda_runtime::totp::CREATE_RECOVERY_TABLE,/)
+    await page.locator('[role="treeitem"][data-path="services/orders/src/app/config.rs"]').click()
+    assert.match(await page.locator('.code-main pre').innerText(), /eda_runtime::crypto::key\("TOTP_ENCRYPTION_KEY"\)\?;/)
+
+    // A refused code is a 401: the steps that check one are not offered outside a route.
+    await page.getByRole('tab', { name: /Architecture/ }).click()
+    await page.locator('.node.service', { hasText: 'Orders' }).click()
+    await page.locator('.card.rpc .card-toggle', { hasText: 'CreateOrder' }).click()
+    await page.locator('.add-step-btn').first().click()
+    assert.equal(await page.getByRole('menuitem', { name: /^Vérifier un code 2FA/ }).count(), 0)
+    assert.equal(await page.getByRole('menuitem', { name: /^Utiliser un code de récupération/ }).count(), 0)
+    assert.equal(await page.getByRole('menuitem', { name: /^Activer le 2FA/ }).count(), 1)
+    await page.close()
+  })
+
   it('reads a field of the request from a header or a cookie', async () => {
     const { page } = await open()
     await page.locator('.tree button.sub', { hasText: '/orders' }).first().click()

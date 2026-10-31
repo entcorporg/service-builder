@@ -62,7 +62,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "get_example_project",
-        description: "A complete, valid example project (Orders, Payments, Notifications) to copy the JSON structure from. It shows every kind of step and the features around them: HTTP routes with a rate limit, a status and cookies, a signed webhook (verifyHmac), a single-use token consumed by UPDATE ... RETURNING, password hashing, encryption, field rules, an idempotent consumer, a scheduled job and composite foreign keys. Does not touch the project file.",
+        description: "A complete, valid example project (Orders, Payments, Notifications) to copy the JSON structure from. It shows every kind of step and the features around them: HTTP routes with a rate limit, a status and cookies, a signed webhook (verifyHmac), a single-use token consumed by UPDATE ... RETURNING, password hashing, encryption, field rules, access tokens (signJwt, verifyJwt, jwks), request fields read from a header or a cookie, a TOTP second factor with recovery codes, an idempotent consumer, a scheduled job and composite foreign keys. Does not touch the project file.",
         properties: no_properties,
         required: &[],
     },
@@ -1052,7 +1052,16 @@ mod tests {
             sb_model::validate(&example)
         );
         // An agent can copy a step of each kind from it...
-        for kind in ["verifyHmac", "rateLimit", "encrypt", "hashPassword", "fail"] {
+        for kind in [
+            "verifyHmac",
+            "rateLimit",
+            "encrypt",
+            "hashPassword",
+            "fail",
+            "signJwt",
+            "totpVerify",
+            "recoveryCodes",
+        ] {
             assert!(text.contains(&format!("\"type\": \"{kind}\"")), "{kind}");
         }
         // ...and the features around them.
@@ -1061,6 +1070,7 @@ mod tests {
                 && text.contains("\"idempotentOn\"")
                 && text.contains("\"foreignKeys\"")
                 && text.contains("\"rules\"")
+                && text.contains("\"source\"")
         );
         // It does not touch the project file.
         assert_eq!(load_project(&f.file).unwrap(), sb_model::sample::orders());

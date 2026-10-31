@@ -150,6 +150,14 @@ export type Step =
   | { type: 'verifyJwt'; id: string; token: Expr; bearer: boolean; source: JwksSource; issuer: string; schema: string; bind: string }
   /** Publishes the public keys of the seeds as a JWKS, into a variable of the schema `Jwks`. */
   | { type: 'jwks'; id: string; keyEnvs: string[]; bind: string }
+  /** Starts the enrolment of an authenticator app: a secret sealed for storage, into a variable of the schema `TotpSetup`. */
+  | { type: 'totpGenerate'; id: string; keyEnv: string; issuer: string; account: Expr; bind: string }
+  /** Checks a TOTP code against the sealed secret, once per time step. A refused code is a 401. */
+  | { type: 'totpVerify'; id: string; keyEnv: string; sealed: Expr; code: Expr; account: Expr }
+  /** Issues recovery codes (a list of texts, shown once); only their hashes are stored. */
+  | { type: 'recoveryCodes'; id: string; account: Expr; count: number; bind: string }
+  /** Spends a recovery code of the account, once. A refused code is a 401. */
+  | { type: 'recoveryCodeUse'; id: string; account: Expr; code: Expr }
   /** AES-256-GCM of `input`, with the key of the environment variable `keyEnv`: `hex(nonce || ciphertext)`. */
   | { type: 'encrypt'; id: string; keyEnv: string; input: Expr; bind: string }
   /** The text `encrypt` sealed; a wrong key or an altered value is an internal error. */

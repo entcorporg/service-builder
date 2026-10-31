@@ -94,6 +94,9 @@ fn is_env_name(name: &str) -> bool {
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
 }
 
+/// Recovery codes issued at once: a sheet to print, not a stock.
+const MAX_RECOVERY_CODES: u32 = 20;
+
 /// The longest period of a job: 30 days.
 const MAX_JOB_INTERVAL_SECS: u32 = 2_592_000;
 
@@ -1952,6 +1955,80 @@ impl<'a> Checker<'a> {
                 scope.bind(bind.clone(), TypeRef::message("Jwks"));
                 false
             }
+            Step::TotpGenerate {
+                key_env,
+                issuer,
+                account,
+                bind,
+                ..
+            } => {
+                self.check_var_name(bind, &format!("{path}/bind"));
+                self.jwt_key_env(&format!("{path}/keyEnv"), key_env);
+                // The issuer is a part of the label of the `otpauth://` URI, which a colon would split.
+                if issuer.trim().is_empty()
+                    || issuer.chars().count() > 64
+                    || issuer.contains(':')
+                    || issuer.chars().any(char::is_control)
+                {
+                    self.error(
+                        "E_TOTP_ISSUER",
+                        format!("{path}/issuer"),
+                        "the issuer is the name the authenticator app shows: 1 to 64 characters, no colon",
+                    );
+                }
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, account, Some(&text), &format!("{path}/account"));
+                self.totp_schema(path);
+                scope.bind(bind.clone(), TypeRef::message("TotpSetup"));
+                false
+            }
+            Step::TotpVerify {
+                key_env,
+                sealed,
+                code,
+                account,
+                ..
+            } => {
+                self.totp_in_route(env, path, "a refused code");
+                self.jwt_key_env(&format!("{path}/keyEnv"), key_env);
+                let text = TypeRef::scalar(FieldType::String);
+                for (name, e) in [("sealed", sealed), ("code", code), ("account", account)] {
+                    self.check_expr(scope, e, Some(&text), &format!("{path}/{name}"));
+                }
+                false
+            }
+            Step::RecoveryCodes {
+                account,
+                count,
+                bind,
+                ..
+            } => {
+                self.check_var_name(bind, &format!("{path}/bind"));
+                if !(1..=MAX_RECOVERY_CODES).contains(count) {
+                    self.error(
+                        "E_RECOVERY_COUNT",
+                        format!("{path}/count"),
+                        format!("issue 1 to {MAX_RECOVERY_CODES} recovery codes"),
+                    );
+                }
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, account, Some(&text), &format!("{path}/account"));
+                scope.bind(
+                    bind.clone(),
+                    TypeRef {
+                        repeated: true,
+                        ..text
+                    },
+                );
+                false
+            }
+            Step::RecoveryCodeUse { account, code, .. } => {
+                self.totp_in_route(env, path, "a refused recovery code");
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, account, Some(&text), &format!("{path}/account"));
+                self.check_expr(scope, code, Some(&text), &format!("{path}/code"));
+                false
+            }
             Step::Encrypt {
                 key_env,
                 input,
@@ -2136,6 +2213,35 @@ impl<'a> Checker<'a> {
     }
 
     /// The name of an environment variable.
+    /// A refused code is a 401: only an HTTP route answers one.
+    fn totp_in_route(&mut self, env: &Env, path: &str, what: &str) {
+        if !matches!(env.handler, Handler::Route { .. }) {
+            self.error(
+                "E_TOTP_OUTSIDE_ROUTE",
+                path,
+                format!("{what} is a 401: this step only makes sense in an HTTP route"),
+            );
+        }
+    }
+
+    /// What `totpGenerate` hands over: the API schema `TotpSetup`, three required texts.
+    fn totp_schema(&mut self, path: &str) {
+        let ok = self.project.message("TotpSetup").is_some_and(|m| {
+            m.kind == MessageKind::Api
+                && ["sealed", "otpauth_url", "secret"].iter().all(|n| {
+                    m.field(n)
+                        .is_some_and(|f| f.ty == FieldType::String && !f.repeated && !f.optional)
+                })
+        });
+        if !ok {
+            self.error(
+                "E_TOTP_SCHEMA",
+                path,
+                "enrolling a TOTP needs the API schema `TotpSetup` (`sealed`, `otpauth_url`, `secret`: texts)",
+            );
+        }
+    }
+
     fn jwt_key_env(&mut self, path: &str, name: &str) {
         if !is_env_name(name) {
             self.error(
@@ -4075,6 +4181,125 @@ mod tests {
         // The route is gone: nothing fills the header any more.
         p.services[0].routes.retain(|r| r.name != "session");
         assert_eq!(warned(&p), 1);
+    }
+
+    fn with_totp() -> Project {
+        let mut p = sample::orders();
+        sample::add_totp(&mut p);
+        p
+    }
+
+    /// The routes of `add_totp` follow the two of the orders: enrolment, verification, recovery.
+    fn totp_step(p: &mut Project, route: usize, at: usize) -> &mut Step {
+        &mut p.services[0].routes[route].steps[at]
+    }
+
+    #[test]
+    fn a_second_factor_can_be_enrolled_checked_and_recovered() {
+        let p = with_totp();
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+        // The codes are a list of texts the response can carry.
+        let mut p = with_totp();
+        if let Step::Respond { fields, .. } = totp_step(&mut p, 2, 3) {
+            fields[2].value = Expr::Path {
+                path: "setup.secret".into(),
+            };
+        }
+        assert!(
+            errors(&p).contains(&"E_TYPE_MISMATCH".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+    }
+
+    #[test]
+    fn the_steps_of_a_second_factor_are_checked() {
+        // (expected code, how to break it)
+        type Case<'a> = (&'a str, &'a dyn Fn(&mut Project));
+        let cases: [Case; 9] = [
+            ("E_KEY_ENV", &|p| {
+                if let Step::TotpGenerate { key_env, .. } = totp_step(p, 2, 0) {
+                    *key_env = "totp-key".into();
+                }
+            }),
+            ("E_KEY_ENV", &|p| {
+                if let Step::TotpVerify { key_env, .. } = totp_step(p, 3, 2) {
+                    *key_env = String::new();
+                }
+            }),
+            ("E_TOTP_ISSUER", &|p| {
+                if let Step::TotpGenerate { issuer, .. } = totp_step(p, 2, 0) {
+                    *issuer = "Acme: Pro".into();
+                }
+            }),
+            ("E_TOTP_ISSUER", &|p| {
+                if let Step::TotpGenerate { issuer, .. } = totp_step(p, 2, 0) {
+                    *issuer = " ".into();
+                }
+            }),
+            ("E_RECOVERY_COUNT", &|p| {
+                if let Step::RecoveryCodes { count, .. } = totp_step(p, 2, 2) {
+                    *count = 0;
+                }
+            }),
+            ("E_RECOVERY_COUNT", &|p| {
+                if let Step::RecoveryCodes { count, .. } = totp_step(p, 2, 2) {
+                    *count = 21;
+                }
+            }),
+            ("E_TOTP_SCHEMA", &|p| {
+                p.messages.retain(|m| m.name != "TotpSetup");
+            }),
+            ("E_UNKNOWN_PATH", &|p| {
+                if let Step::TotpVerify { sealed, .. } = totp_step(p, 3, 2) {
+                    *sealed = Expr::Path {
+                        path: "factor.nope".into(),
+                    };
+                }
+            }),
+            ("E_RESERVED_NAME", &|p| {
+                if let Step::RecoveryCodes { bind, .. } = totp_step(p, 2, 2) {
+                    *bind = "tx".into();
+                }
+            }),
+        ];
+        for (code, break_it) in cases {
+            let mut p = with_totp();
+            break_it(&mut p);
+            assert!(
+                errors(&p).contains(&code.to_string()),
+                "{code}: {:?}",
+                errors(&p)
+            );
+        }
+        // The schema must hold texts, not any shape.
+        let mut p = with_totp();
+        p.messages
+            .iter_mut()
+            .find(|m| m.name == "TotpSetup")
+            .unwrap()
+            .fields[0]
+            .repeated = true;
+        assert!(errors(&p).contains(&"E_TOTP_SCHEMA".to_string()));
+    }
+
+    #[test]
+    fn a_refused_code_is_a_401_so_only_routes_check_one() {
+        for (route, at) in [(3, 2), (4, 1)] {
+            let mut p = with_totp();
+            let step = totp_step(&mut p, route, at).clone();
+            p.services[0].rpcs[0].steps.insert(0, step);
+            assert!(
+                errors(&p).contains(&"E_TOTP_OUTSIDE_ROUTE".to_string()),
+                "{route}: {:?}",
+                errors(&p)
+            );
+        }
+        // Enrolling and issuing codes answer nothing: they work anywhere.
+        let mut p = with_totp();
+        let step = totp_step(&mut p, 2, 2).clone();
+        p.services[0].rpcs[0].steps.insert(0, step);
+        assert!(!errors(&p).contains(&"E_TOTP_OUTSIDE_ROUTE".to_string()));
     }
 
     fn with_seal() -> Project {

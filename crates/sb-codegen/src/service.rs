@@ -556,6 +556,21 @@ fn schema_rs(service: &Service) -> String {
     if service.has_idempotent_consumers() {
         c.line("eda_runtime::dedup::CREATE_TABLE,");
     }
+    // The tables the two-factor steps keep their state in.
+    let (mut replay, mut recovery) = (false, false);
+    for step in service.handler_steps() {
+        step.walk(&mut |s| match s {
+            Step::TotpVerify { .. } => replay = true,
+            Step::RecoveryCodes { .. } | Step::RecoveryCodeUse { .. } => recovery = true,
+            _ => {}
+        });
+    }
+    if replay {
+        c.line("eda_runtime::totp::CREATE_STEPS_TABLE,");
+    }
+    if recovery {
+        c.line("eda_runtime::totp::CREATE_RECOVERY_TABLE,");
+    }
     c.dedent();
     c.line("];");
     c.blank();
@@ -1276,7 +1291,11 @@ fn encryption_keys(service: &Service) -> BTreeSet<&str> {
     let mut keys = BTreeSet::new();
     for step in service.handler_steps() {
         step.walk(&mut |s| {
-            if let Step::Encrypt { key_env, .. } | Step::Decrypt { key_env, .. } = s {
+            if let Step::Encrypt { key_env, .. }
+            | Step::Decrypt { key_env, .. }
+            | Step::TotpGenerate { key_env, .. }
+            | Step::TotpVerify { key_env, .. } = s
+            {
                 keys.insert(key_env.as_str());
             }
         });
@@ -1749,6 +1768,62 @@ fn steps(
                 c.line("};");
                 scope.bind(bind.clone(), TypeRef::message("Jwks"));
             }
+            Step::TotpGenerate {
+                key_env,
+                issuer,
+                account,
+                bind,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let account = lower(project, scope, account, &text)?;
+                c.line(format!(
+                    "let {bind}: pb::TotpSetup = {{ let setup = eda_runtime::totp::generate({key_env:?}, {issuer:?}, &{account})?; pb::TotpSetup {{ sealed: setup.sealed, otpauth_url: setup.otpauth_url, secret: setup.secret, ..Default::default() }} }};"
+                ));
+                scope.bind(bind.clone(), TypeRef::message("TotpSetup"));
+            }
+            Step::TotpVerify {
+                key_env,
+                sealed,
+                code,
+                account,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let sealed = lower(project, scope, sealed, &text)?;
+                let code = lower(project, scope, code, &text)?;
+                let account = lower(project, scope, account, &text)?;
+                c.line(format!(
+                    "eda_runtime::totp::verify(&mut tx, {key_env:?}, &{sealed}, &{code}, &{account}).await?;"
+                ));
+            }
+            Step::RecoveryCodes {
+                account,
+                count,
+                bind,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let account = lower(project, scope, account, &text)?;
+                c.line(format!(
+                    "let {bind}: Vec<String> = eda_runtime::totp::issue_recovery_codes(&mut tx, &{account}, {count}).await?;"
+                ));
+                scope.bind(
+                    bind.clone(),
+                    TypeRef {
+                        repeated: true,
+                        ..text
+                    },
+                );
+            }
+            Step::RecoveryCodeUse { account, code, .. } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let account = lower(project, scope, account, &text)?;
+                let code = lower(project, scope, code, &text)?;
+                c.line(format!(
+                    "eda_runtime::totp::use_recovery_code(&mut tx, &{account}, &{code}).await?;"
+                ));
+            }
             Step::RandomToken { bind, .. } => {
                 c.line(format!(
                     "let {bind}: String = eda_runtime::crypto::random_token();"
@@ -2127,6 +2202,10 @@ fn describe(step: &Step) -> String {
         Step::SignJwt { bind, .. } => format!("sign a token into {bind}"),
         Step::VerifyJwt { bind, .. } => format!("verify a token into {bind}"),
         Step::Jwks { bind, .. } => format!("publish the public keys into {bind}"),
+        Step::TotpGenerate { bind, .. } => format!("enrol an authenticator app into {bind}"),
+        Step::TotpVerify { .. } => "verify a TOTP code".into(),
+        Step::RecoveryCodes { bind, .. } => format!("issue recovery codes into {bind}"),
+        Step::RecoveryCodeUse { .. } => "spend a recovery code".into(),
         Step::Decrypt { bind, .. } => format!("decrypt into {bind}"),
         Step::Sql { op, table, .. } => format!(
             "sql {} {table}",

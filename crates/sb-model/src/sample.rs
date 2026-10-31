@@ -810,6 +810,7 @@ pub fn showcase() -> Project {
     add_login(&mut p);
     add_jwt(&mut p);
     add_shipments(&mut p);
+    add_totp(&mut p);
     p
 }
 
@@ -1060,4 +1061,175 @@ pub fn add_jwt(p: &mut Project) {
             },
         ],
     });
+}
+
+/// Adds to the first service a second factor: enrolling an authenticator app (the sealed secret is stored, the `otpauth://`
+/// URI and the recovery codes are shown once), checking a code (after a rate limit, the same `401` whatever is wrong), and
+/// spending a recovery code when the phone is lost.
+pub fn add_totp(p: &mut Project) {
+    let string = || FieldType::String;
+    let mut codes = field("recovery_codes", string());
+    codes.repeated = true;
+    p.messages.push(api(
+        "TotpSetup",
+        vec![
+            field("sealed", string()),
+            field("otpauth_url", string()),
+            field("secret", string()),
+        ],
+    ));
+    p.messages
+        .push(api("EnrolBody", vec![field("account", string())]));
+    p.messages.push(api(
+        "EnrolView",
+        vec![
+            field("otpauth_url", string()),
+            field("secret", string()),
+            codes,
+        ],
+    ));
+    p.messages.push(api(
+        "CodeBody",
+        vec![field("account", string()), field("code", string())],
+    ));
+    p.messages
+        .push(api("CodeAck", vec![field("ok", FieldType::Bool)]));
+
+    let mut account = Column::new("account", ColumnType::String);
+    account.primary_key = true;
+    p.services[0].tables.push(Table::new(
+        "two_factor",
+        vec![account, Column::new("secret_sealed", ColumnType::String)],
+    ));
+    let sql = |id: &str, op: SqlOp, columns: &[&str], values: Vec<Assignment>, missing| Step::Sql {
+        id: id.into(),
+        op,
+        table: "two_factor".into(),
+        bind: (op == SqlOp::Select).then(|| "factor".to_string()),
+        columns: columns.iter().map(|c| c.to_string()).collect(),
+        many: false,
+        into: None,
+        conditions: if op == SqlOp::Select {
+            vec![SqlCondition {
+                column: "account".into(),
+                op: CmpOp::Eq,
+                value: path("input.account"),
+            }]
+        } else {
+            vec![]
+        },
+        values,
+        order_by: None,
+        descending: false,
+        limit: None,
+        missing,
+    };
+    let ack = |id: &str| Step::Respond {
+        id: id.into(),
+        fields: vec![set("ok", lit(true))],
+        status: None,
+        cookies: vec![],
+    };
+    let route = |name: &str, path: &str, request: &str, response: &str, steps| Route {
+        name: name.into(),
+        method: HttpMethod::Post,
+        path: path.into(),
+        request: request.into(),
+        response: response.into(),
+        status: 200,
+        steps,
+    };
+    p.services[0].routes.push(route(
+        "enrol_totp",
+        "/2fa/enrol",
+        "EnrolBody",
+        "EnrolView",
+        vec![
+            Step::TotpGenerate {
+                id: "f1".into(),
+                key_env: "TOTP_ENCRYPTION_KEY".into(),
+                issuer: "Orders".into(),
+                account: path("input.account"),
+                bind: "setup".into(),
+            },
+            // Only the sealed secret is kept: the URI and the base32 text are shown once.
+            sql(
+                "f2",
+                SqlOp::Insert,
+                &[],
+                vec![
+                    set("account", path("input.account")),
+                    set("secret_sealed", path("setup.sealed")),
+                ],
+                None,
+            ),
+            Step::RecoveryCodes {
+                id: "f3".into(),
+                account: path("input.account"),
+                count: 8,
+                bind: "codes".into(),
+            },
+            Step::Respond {
+                id: "f4".into(),
+                fields: vec![
+                    set("otpauth_url", path("setup.otpauth_url")),
+                    set("secret", path("setup.secret")),
+                    set("recovery_codes", path("codes")),
+                ],
+                status: None,
+                cookies: vec![],
+            },
+        ],
+    ));
+    let refused = || {
+        Some(SqlMissing {
+            status: 401,
+            message: "invalid code".into(),
+        })
+    };
+    p.services[0].routes.push(route(
+        "verify_totp",
+        "/2fa/verify",
+        "CodeBody",
+        "CodeAck",
+        vec![
+            // Five tries by account every 15 minutes, before the code is looked at.
+            Step::RateLimit {
+                id: "f5".into(),
+                key: path("input.account"),
+                max: 5,
+                window_secs: 900,
+            },
+            // An account that never enrolled gets the answer of a wrong code.
+            sql("f6", SqlOp::Select, &["secret_sealed"], vec![], refused()),
+            Step::TotpVerify {
+                id: "f7".into(),
+                key_env: "TOTP_ENCRYPTION_KEY".into(),
+                sealed: path("factor.secret_sealed"),
+                code: path("input.code"),
+                account: path("input.account"),
+            },
+            ack("f8"),
+        ],
+    ));
+    p.services[0].routes.push(route(
+        "recover_totp",
+        "/2fa/recover",
+        "CodeBody",
+        "CodeAck",
+        vec![
+            Step::RateLimit {
+                id: "f9".into(),
+                key: path("input.account"),
+                max: 5,
+                window_secs: 900,
+            },
+            Step::RecoveryCodeUse {
+                id: "f10".into(),
+                account: path("input.account"),
+                code: path("input.code"),
+            },
+            ack("f11"),
+        ],
+    ));
 }

@@ -162,6 +162,7 @@ mod tests {
                 "runtime/src/lib.rs",
                 "runtime/src/outbox.rs",
                 "runtime/src/rate_limit.rs",
+                "runtime/src/totp.rs",
                 "runtime/src/validation.rs",
                 "runtime/src/webhook.rs",
                 "services/notifications/Cargo.toml",
@@ -990,6 +991,55 @@ mod tests {
         // A route that reads nothing from the request does not take the headers.
         let jwks = &http[http.find("async fn handle_jwks(").unwrap()..];
         assert!(!jwks[..jwks.find("\n}\n").unwrap()].contains("HeaderMap"));
+    }
+
+    #[test]
+    fn a_second_factor_checks_codes_in_the_transaction_and_keeps_its_own_tables() {
+        let mut p = sample::orders();
+        sample::add_totp(&mut p);
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&p)),
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        let flat = api.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.contains("let setup: pb::TotpSetup = { let setup = eda_runtime::totp::generate(\"TOTP_ENCRYPTION_KEY\", \"Orders\", &input.account.clone())?;"), "{flat}");
+        // The check runs on the transaction of the handler: it rolls back with the rest.
+        assert!(
+            flat.contains("eda_runtime::totp::verify( &mut tx, \"TOTP_ENCRYPTION_KEY\", &factor.secret_sealed.clone(), &input.code.clone(), &input.account.clone(), ) .await?;")
+                || flat.contains("eda_runtime::totp::verify(&mut tx, \"TOTP_ENCRYPTION_KEY\""),
+            "{flat}"
+        );
+        assert!(flat.contains("let codes: Vec<String> = eda_runtime::totp::issue_recovery_codes(&mut tx, &input.account.clone(), 8).await?;"), "{flat}");
+        assert!(
+            flat.contains("eda_runtime::totp::use_recovery_code(&mut tx"),
+            "{flat}"
+        );
+        // The tables the steps keep their state in come with the schema, and the key is checked at start-up.
+        let schema = file(&files, "services/orders/src/app/schema.rs");
+        assert!(schema.contains("eda_runtime::totp::CREATE_STEPS_TABLE,"));
+        assert!(schema.contains("eda_runtime::totp::CREATE_RECOVERY_TABLE,"));
+        assert!(
+            file(&files, "services/orders/src/app/config.rs")
+                .contains("eda_runtime::crypto::key(\"TOTP_ENCRYPTION_KEY\")?;")
+        );
+        assert!(file(&files, "Cargo.toml").contains("sha1 = \"0.11\""));
+        // A service that has no second factor carries none of it.
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/src/app/schema.rs").contains("totp::"));
+        // Only enrolling and verifying need the table of steps; recovery codes have their own.
+        let mut only_recovery = p.clone();
+        only_recovery.services[0]
+            .routes
+            .retain(|r| r.name != "verify_totp");
+        let schema = file(
+            &generate(&only_recovery).unwrap(),
+            "services/orders/src/app/schema.rs",
+        )
+        .to_string();
+        assert!(!schema.contains("CREATE_STEPS_TABLE") && schema.contains("CREATE_RECOVERY_TABLE"));
     }
 
     #[test]

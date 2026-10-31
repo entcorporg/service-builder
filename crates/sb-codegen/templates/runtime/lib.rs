@@ -11,6 +11,7 @@ pub mod jobs;
 pub mod jwt;
 pub mod outbox;
 pub mod rate_limit;
+pub mod totp;
 pub mod validation;
 pub mod webhook;
 
