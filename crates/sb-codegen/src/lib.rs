@@ -3,6 +3,7 @@
 //! docker-compose for Kafka.
 
 mod expr;
+mod mta;
 mod proto;
 pub mod rawcheck;
 mod service;
@@ -58,7 +59,10 @@ pub fn generate(project: &Project) -> Result<Vec<GeneratedFile>, CodegenError> {
     let project = &typed;
     let mut files = workspace::files(project);
     for svc in &project.services {
-        files.extend(service::generate(project, svc)?);
+        files.extend(match svc.kind {
+            sb_model::ServiceKind::Standard => service::generate(project, svc)?,
+            sb_model::ServiceKind::Mta => mta::generate(project, svc)?,
+        });
     }
     // Safety net: a generator bug must surface here, not as a cryptic compiler error later.
     for f in files.iter().filter(|f| f.path.ends_with(".rs")) {
@@ -1179,6 +1183,168 @@ mod tests {
         let plain = generate(&sample::orders()).unwrap();
         let plain = file(&plain, "services/orders/src/flows/api.rs");
         assert!(!plain.contains("IS NULL") && !plain.contains("tenant"));
+    }
+
+    fn with_mailer() -> sb_model::Project {
+        let mut p = sample::orders();
+        sample::add_signup(&mut p);
+        sample::add_mailer(&mut p);
+        p
+    }
+
+    #[test]
+    fn a_mail_service_is_fixed_code_with_the_events_and_the_mails_of_the_project() {
+        let p = with_mailer();
+        let files = generate(&p).unwrap();
+        // The fixed service, and the three files that come from the project.
+        for path in [
+            "services/mailer/Cargo.toml",
+            "services/mailer/src/main.rs",
+            "services/mailer/src/mta/queue_worker.rs",
+            "services/mailer/src/mta/smtp.rs",
+            "services/mailer/src/mta/dkim.rs",
+            "services/mailer/src/bounce/server.rs",
+            "services/mailer/migrations/20260302000001_mail_queue.sql",
+            "services/mailer/src/mta_rules.rs",
+            "services/mailer/src/core/consumer.rs",
+            "services/mailer/src/seed.rs",
+        ] {
+            assert!(files.iter().any(|f| f.path == path), "{path}");
+        }
+        // Nothing of an ordinary service in it.
+        assert!(
+            !files
+                .iter()
+                .any(|f| f.path.starts_with("services/mailer/src/flows/"))
+        );
+        let rules = file(&files, "services/mailer/src/mta_rules.rs");
+        assert!(
+            rules.contains("topic: \"accounts.registered\"")
+                && rules.contains("recipient_field: \"email\"")
+        );
+        assert!(
+            rules.contains("dedup_fallback: DedupFallback::Recipient")
+                && rules.contains("SenderName::CompanyVia(\"name\")")
+        );
+        let consumer = file(&files, "services/mailer/src/core/consumer.rs");
+        assert!(consumer.contains("pub const TOPICS: &[&str] = &[topics::ACCOUNTS_REGISTERED];"));
+        assert!(consumer.contains("eda_runtime::consume::<pb::AccountRegistered, _, _>(&brokers, \"mailer-welcome\", topics::ACCOUNTS_REGISTERED"));
+        let seed = file(&files, "services/mailer/src/seed.rs");
+        assert!(seed.contains("\"Welcome, {{ name }}\""));
+        // Its settings: the database and the port of this service.
+        let config = file(&files, "services/mailer/src/core/config.rs");
+        assert!(
+            config.contains("\"MAILER_DATABASE_URL\"")
+                && config.contains("postgres://postgres:postgres@localhost:5432/mailer")
+                && config.contains("\"8084\"")
+        );
+        assert!(
+            !config.contains("::SERVER_PORT::") && !config.contains("::DATABASE"),
+            "a placeholder was left behind"
+        );
+        // The events it mails are read as JSON: their messages derive serde in the contracts.
+        let build = file(&files, "contracts/build.rs");
+        assert!(build.contains("\"AccountRegistered\""), "{build}");
+        // The other services are generated as before.
+        assert!(
+            files
+                .iter()
+                .any(|f| f.path == "services/orders/src/flows/api.rs")
+        );
+    }
+
+    #[test]
+    fn a_mail_service_comes_with_a_mail_catcher_and_its_instructions() {
+        let files = generate(&with_mailer()).unwrap();
+        let compose = file(&files, "docker-compose.yml");
+        assert!(
+            compose.contains("mailpit:")
+                && compose.contains("1025:1025")
+                && compose.contains("8025:8025")
+        );
+        serde_yaml_check(compose);
+        let readme = file(&files, "README.md");
+        assert!(readme.contains("### Mailer (mail service, HTTP port 8084)"));
+        assert!(
+            readme.contains("DKIM_PRIVATE_KEY_PATH")
+                && readme.contains("MAILER_DATABASE_URL")
+                && readme.contains("SMTP_HOST")
+        );
+        assert!(!readme.contains("DB_MAX_CONNECTIONS"));
+        // No mail catcher for a project that sends no mail.
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "docker-compose.yml").contains("mailpit"));
+    }
+
+    /// The compose file stays three top-level keys with the services indented under `services:`.
+    fn serde_yaml_check(compose: &str) {
+        let top: Vec<_> = compose
+            .lines()
+            .filter(|l| !l.starts_with([' ', '#']) && !l.is_empty())
+            .collect();
+        assert_eq!(top, ["services:", "volumes:"]);
+        let services: Vec<_> = compose
+            .lines()
+            .filter(|l| l.starts_with("  ") && !l.starts_with("   "))
+            .map(str::trim)
+            .collect();
+        assert_eq!(
+            services[..4],
+            ["kafka:", "postgres:", "mailpit:", "postgres-data:"][..4]
+        );
+    }
+
+    #[test]
+    fn the_fixed_code_of_a_mail_service_carries_the_fixes_and_none_of_its_origin() {
+        let files = generate(&with_mailer()).unwrap();
+        let mine: Vec<_> = files
+            .iter()
+            .filter(|f| f.path.starts_with("services/mailer/"))
+            .collect();
+        // A bare LF never ends a line of the DATA section, and the final dot is not preceded by an empty line.
+        let smtp = file(&files, "services/mailer/src/mta/smtp.rs");
+        assert!(smtp.contains("split_inclusive") && smtp.contains("body.ends_with(b\"\\r\\n\")"));
+        // A PKCS#8 key (what `openssl genrsa` writes) signs as well as a PKCS#1 one.
+        assert!(
+            file(&files, "services/mailer/src/mta/dkim.rs")
+                .contains("PrivateKeyDer::from_pem_slice")
+        );
+        // The service it was taken from leaves no name behind, in code, comments, migrations or defaults.
+        for f in mine {
+            let text = f.content.to_lowercase();
+            for word in ["clairtyx", "workonva", "svc-mta", "svc_mta", "chantier"] {
+                assert!(!text.contains(word), "{} mentions {word}", f.path);
+            }
+        }
+    }
+
+    #[test]
+    fn a_mail_that_is_not_a_template_is_refused_before_the_worker_loads_it() {
+        let mut p = with_mailer();
+        p.services
+            .iter_mut()
+            .find(|s| s.name == "Mailer")
+            .unwrap()
+            .templates[0]
+            .html = "<p>{{ name </p>".into();
+        let Err(CodegenError::Invalid(found)) = generate(&p) else {
+            panic!("accepted a broken template")
+        };
+        let found: Vec<_> = found
+            .iter()
+            .filter(|d| d.code == "E_MTA_TEMPLATE_SYNTAX")
+            .collect();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].path, "/services/3/templates/0/html");
+        // A template that uses the built-in filters is fine.
+        let mut p = with_mailer();
+        p.services
+            .iter_mut()
+            .find(|s| s.name == "Mailer")
+            .unwrap()
+            .templates[0]
+            .text = "{{ name | upper }} {{ email | urlencode }}".into();
+        assert!(generate(&p).is_ok());
     }
 
     #[test]

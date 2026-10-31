@@ -253,7 +253,7 @@ fn publishes(service: &Service) -> bool {
     found
 }
 
-fn group_id(service: &Service, consumer: &sb_model::Consumer) -> String {
+pub(crate) fn group_id(service: &Service, consumer: &sb_model::Consumer) -> String {
     consumer
         .group_id
         .clone()

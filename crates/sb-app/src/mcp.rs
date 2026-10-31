@@ -62,7 +62,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "get_example_project",
-        description: "A complete, valid example project (Orders, Payments, Notifications) to copy the JSON structure from. It shows every kind of step and the features around them: HTTP routes with a rate limit, a status and cookies, a signed webhook (verifyHmac), a single-use token consumed by UPDATE ... RETURNING, password hashing, encryption, field rules, access tokens (signJwt, verifyJwt, jwks), request fields read from a header or a cookie, a TOTP second factor with recovery codes, passkeys (WebAuthn), image checks and object storage (S3), an idempotent consumer, a scheduled job, composite foreign keys, and a table scoped to its tenant with a soft delete. Does not touch the project file.",
+        description: "A complete, valid example project (Orders, Payments, Notifications) to copy the JSON structure from. It shows every kind of step and the features around them: HTTP routes with a rate limit, a status and cookies, a signed webhook (verifyHmac), a single-use token consumed by UPDATE ... RETURNING, password hashing, encryption, field rules, access tokens (signJwt, verifyJwt, jwks), request fields read from a header or a cookie, a TOTP second factor with recovery codes, passkeys (WebAuthn), image checks and object storage (S3), an idempotent consumer, a scheduled job, composite foreign keys, a table scoped to its tenant with a soft delete, and a ready-made mail service (kind `mta`: its events are consumers with a `mail` rule, its mails are `templates`). Does not touch the project file.",
         properties: no_properties,
         required: &[],
     },
@@ -510,7 +510,12 @@ fn outline(project: &Project) -> Value {
             "rpcs": names(s.rpcs.iter().map(|r| format!("{}({}) -> {} [{}]", r.name, r.request, r.response, step_ids(&r.steps))).collect()),
             "routes": names(s.routes.iter().map(|r| format!("{} {} -> {} [{}]", serde_json::to_value(r.method).ok().and_then(|m| m.as_str().map(str::to_uppercase)).unwrap_or_default(), r.path, r.name, step_ids(&r.steps))).collect()),
             "tables": names(s.tables.iter().map(table_outline).collect()),
-            "consumers": names(s.consumers.iter().map(|c| format!("{} <- {}{} [{}]", c.name, c.topic, c.idempotent_on.as_ref().map(|f| format!(" (idempotent on {f})")).unwrap_or_default(), step_ids(&c.steps))).collect()),
+            "kind": s.kind,
+            "consumers": names(s.consumers.iter().map(|c| match &c.mail {
+                Some(m) => format!("{} <- {} mails {}{}", c.name, c.topic, m.recipient, m.reply_to.as_ref().map(|r| format!(" (replies to {r})")).unwrap_or_default()),
+                None => format!("{} <- {}{} [{}]", c.name, c.topic, c.idempotent_on.as_ref().map(|f| format!(" (idempotent on {f})")).unwrap_or_default(), step_ids(&c.steps)),
+            }).collect()),
+            "mails": names(s.templates.iter().map(|t| format!("{}: {}", t.event_type, t.subject)).collect()),
             "jobs": names(s.jobs.iter().map(|j| format!("{} every {} s [{}]", j.name, j.every_secs, step_ids(&j.steps))).collect()),
         })).collect::<Vec<_>>(),
     })
@@ -1082,6 +1087,8 @@ mod tests {
                 && text.contains("\"source\"")
                 && text.contains("\"tenantColumn\"")
                 && text.contains("\"softDelete\"")
+                && text.contains("\"templates\"")
+                && text.contains("\"dedupField\"")
         );
         // It does not touch the project file.
         assert_eq!(load_project(&f.file).unwrap(), sb_model::sample::orders());

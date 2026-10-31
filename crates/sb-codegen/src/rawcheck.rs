@@ -7,6 +7,7 @@ use sb_model::{Condition, Diagnostic, Expr, Project, Severity, Step};
 pub fn check(project: &Project) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for (si, s) in project.services.iter().enumerate() {
+        mail_templates(si, s, &mut out);
         for (ri, r) in s.rpcs.iter().enumerate() {
             steps(
                 &format!("/services/{si}/rpcs/{ri}/steps"),
@@ -30,6 +31,35 @@ pub fn check(project: &Project) -> Vec<Diagnostic> {
         }
     }
     out
+}
+
+/// The mails of a mail service are Tera templates: a syntax error would otherwise only show when the worker loads them, and
+/// stop every mail.
+fn mail_templates(si: usize, s: &sb_model::Service, out: &mut Vec<Diagnostic>) {
+    for (ti, t) in s.templates.iter().enumerate() {
+        for (field, source) in [
+            ("subject", &t.subject),
+            ("html", &t.html),
+            ("text", &t.text),
+        ] {
+            if let Err(e) = tera::Tera::default().add_raw_template(field, source) {
+                // Tera's message spans several lines (the cause is on the last).
+                let why = std::error::Error::source(&e)
+                    .map(|cause| cause.to_string())
+                    .unwrap_or_else(|| e.to_string());
+                out.push(Diagnostic {
+                    severity: Severity::Error,
+                    code: "E_MTA_TEMPLATE_SYNTAX".into(),
+                    message: format!(
+                        "the {field} of the mail for `{}` is not a valid template: {}",
+                        t.event_type,
+                        why.trim()
+                    ),
+                    path: format!("/services/{si}/templates/{ti}/{field}"),
+                });
+            }
+        }
+    }
 }
 
 fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
