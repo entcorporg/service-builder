@@ -1,4 +1,4 @@
-import { addForeignKey, addIndex, addUnique, retargetForeignKey } from '../model'
+import { addForeignKey, addIndex, addUnique, retargetForeignKey, setSoftDelete, tenantCandidates } from '../model'
 import { useStore } from '../store'
 import type { ForeignKey, ReferentialAction, Table } from '../types'
 import { Icon } from './Icon'
@@ -156,6 +156,35 @@ export function TableConstraints(props: { si: number; ti: number }) {
 
   return (
     <div className="grid gap-4.5">
+      <section className="grid gap-2" aria-label="Isolation et suppression">
+        <h4 className="m-0 text-xs font-semibold tracking-[0.7px] text-faint uppercase">Isolation et suppression</h4>
+        <div className={CARD}>
+          <label className="flex items-center gap-2 text-sm">
+            <span className="text-muted">Colonne tenant</span>
+            <select aria-label="Colonne tenant" value={table.tenantColumn ?? ''} onChange={(e) => edit((p) => void (at()(p).tenantColumn = e.target.value || undefined))}>
+              <option value="">aucune</option>
+              {(table.tenantColumn && !tenantCandidates(table).includes(table.tenantColumn) ? [table.tenantColumn] : []).concat(tenantCandidates(table)).map((n) => (
+                <option key={n} value={n}>{n}</option>
+              ))}
+            </select>
+          </label>
+          <small className="text-faint">
+            Chaque bloc SQL sur cette table est filtré par cette colonne et chaque insertion la renseigne, à partir de la variable du même nom que le flux a liée (par
+            exemple depuis le jeton vérifié) : on ne peut pas l’oublier, ni lire ou écrire les lignes d’un autre tenant avec ces blocs. Le code Rust libre n’est pas filtré.
+          </small>
+          <label className="flex cursor-pointer items-center gap-2 text-sm">
+            <input type="checkbox" aria-label="Suppression logique" checked={table.softDelete === true} onChange={(e) => edit((p) => setSoftDelete(at()(p), e.target.checked))} />
+            Suppression logique
+          </label>
+          <small className="text-faint">
+            Une suppression ne retire pas la ligne : elle date <code>deleted_at</code> (colonne ajoutée au besoin), et les lectures, mises à jour et suppressions ignorent les
+            lignes datées. Les contraintes UNIQUE continuent de compter les lignes supprimées.
+          </small>
+          <Problems prefix={`/services/${si}/tables/${ti}/tenantColumn`} />
+          <Problems prefix={`/services/${si}/tables/${ti}/softDelete`} />
+        </div>
+      </section>
+
       <section className="grid gap-2" aria-label="Contraintes UNIQUE">
         <Heading title="Contraintes UNIQUE" add="+ Ajouter une contrainte" onAdd={() => edit((p) => void addUnique(at()(p)))} />
         {table.uniques.map((u, i) => (

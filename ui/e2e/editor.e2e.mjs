@@ -1013,6 +1013,45 @@ describe('editor', () => {
     await page.close()
   })
 
+  it('scopes a table to its tenant and keeps what is deleted', async () => {
+    const { page } = await open()
+    await page.getByRole('tab', { name: /Tables/ }).click()
+    await page.getByTestId('tables-view').waitFor()
+    const sql = () => page.getByLabel('SQL de la table').innerText()
+    assert.doesNotMatch(await sql(), /deleted_at/)
+
+    // A soft delete adds the column it stamps, and the select of the sample skips the deleted rows.
+    await page.getByLabel('Suppression logique').check()
+    await settle(page)
+    assert.match(await sql(), /deleted_at TIMESTAMPTZ/)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+    // Only required text can scope a table.
+    const options = await page.getByLabel('Colonne tenant').locator('option').allTextContents()
+    assert.ok(options.includes('aucune') && options.includes('order_id') && !options.includes('deleted_at') && !options.includes('amount'), options.join(','))
+
+    // The generator writes and filters the tenant column: a step that writes it as well is refused.
+    await page.getByLabel('Colonne tenant').selectOption('order_id')
+    await settle(page)
+    assert.ok((await page.locator('.problems li').allInnerTexts()).some((t) => t.includes('E_TENANT_MANUAL')))
+    await page.getByLabel('Colonne tenant').selectOption('')
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/flows/api.rs"]').click()
+    const code = (await page.locator('.code-main pre').innerText()).replace(/\s+/g, ' ')
+    assert.match(code, /WHERE \\"order_id\\" = \$1 AND \\"deleted_at\\" IS NULL LIMIT 1/)
+
+    // Without it, nothing is added, and the column the soft delete needed is still there (the author's to remove).
+    await page.getByRole('tab', { name: /Tables/ }).click()
+    await page.getByLabel('Suppression logique').uncheck()
+    await settle(page)
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/flows/api.rs"]').click()
+    assert.doesNotMatch(await page.locator('.code-main pre').innerText(), /IS NULL/)
+    await page.close()
+  })
+
   it('designs jsonb columns, UNIQUE constraints, indexes and composite foreign keys', async () => {
     const { page } = await open()
     await page.getByRole('tab', { name: /Tables/ }).click()

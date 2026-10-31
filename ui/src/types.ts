@@ -129,6 +129,10 @@ export interface Table {
   uniques: UniqueConstraint[]
   indexes: Index[]
   foreignKeys: ForeignKey[]
+  /** Every SQL step on the table is filtered by it and every insert sets it, from the variable of the same name. */
+  tenantColumn?: string
+  /** A delete sets `deleted_at` instead of removing the row, and the other steps skip the rows that have it. */
+  softDelete?: boolean
 }
 
 export type SqlOp = 'select' | 'insert' | 'update' | 'delete'

@@ -1009,6 +1009,40 @@ impl<'a> Checker<'a> {
 
     // ---- tables and SQL ---------------------------------------------------------------
 
+    /// The columns the tenant filter and the soft delete lean on must exist, and be what they are used as.
+    fn tenant_and_soft_delete(&mut self, t: &Table, tp: &str) {
+        if let Some(name) = &t.tenant_column {
+            let ok = t.column(name).is_some_and(|c| {
+                !c.nullable && matches!(c.ty, ColumnType::String | ColumnType::Uuid)
+            });
+            if !ok {
+                self.error(
+                    "E_TENANT_COLUMN",
+                    format!("{tp}/tenantColumn"),
+                    format!(
+                        "`{name}` must be a column of `{}` that is required (not nullable) text or uuid: a row without a tenant would belong to nobody",
+                        t.name
+                    ),
+                );
+            }
+        }
+        if t.soft_delete {
+            let ok = t
+                .column(DELETED_AT)
+                .is_some_and(|c| c.nullable && c.ty == ColumnType::Timestamp);
+            if !ok {
+                self.error(
+                    "E_SOFT_DELETE_COLUMN",
+                    format!("{tp}/softDelete"),
+                    format!(
+                        "a soft delete needs a nullable timestamp column `{DELETED_AT}` in `{}`",
+                        t.name
+                    ),
+                );
+            }
+        }
+    }
+
     fn tables(&mut self, s: &Service, base: &str) {
         let mut names = HashSet::new();
         for (i, t) in s.tables.iter().enumerate() {
@@ -1037,6 +1071,7 @@ impl<'a> Checker<'a> {
                     format!("table `{}` is defined twice in `{}`", t.name, s.name),
                 );
             }
+            self.tenant_and_soft_delete(t, &tp);
             if t.columns.is_empty() {
                 self.error(
                     "E_TABLE_EMPTY",
@@ -1327,6 +1362,7 @@ impl<'a> Checker<'a> {
                 Some(col) => self.sql_value(scope, &c.value, col, &format!("{cp}/value")),
             }
         }
+        self.tenant_in_sql(t, scope, path, step);
         if matches!(op, SqlOp::Update | SqlOp::Delete) && conditions.is_empty() {
             self.error(
                 "E_SQL_NO_WHERE",
@@ -1386,7 +1422,10 @@ impl<'a> Checker<'a> {
                     self.sql_result(path, step, t, scope);
                 }
                 if *op == SqlOp::Insert {
-                    for col in t.columns.iter().filter(|c| c.is_required_on_insert()) {
+                    for col in t.columns.iter().filter(|c| {
+                        c.is_required_on_insert()
+                            && t.tenant_column.as_deref() != Some(c.name.as_str())
+                    }) {
                         if !values.iter().any(|a| a.field == col.name) {
                             self.error(
                                 "E_SQL_MISSING_VALUE",
@@ -1435,6 +1474,60 @@ impl<'a> Checker<'a> {
                     "say what the client is told (a 5xx answers a generic text)",
                 );
             }
+        }
+    }
+
+    /// A step on a table with a tenant: the variable of that name must be bound, as the column is, and the author does not
+    /// write the column nor `deleted_at`: the generator does.
+    fn tenant_in_sql(&mut self, t: &Table, scope: &Scope, path: &str, step: &Step) {
+        let Step::Sql {
+            op,
+            conditions,
+            values,
+            ..
+        } = step
+        else {
+            return;
+        };
+        if let Some(name) = &t.tenant_column
+            && let Some(col) = t.column(name)
+        {
+            let want = Self::column_type(col);
+            match resolve_path(self.project, scope, name) {
+                Ok(found) if found.adapt_to(&want).is_some() => {}
+                Ok(_) => self.error(
+                    "E_TENANT_SCOPE",
+                    path,
+                    format!("the variable `{name}` that scopes `{}` to its tenant is not a {}", t.name, col.ty.sql()),
+                ),
+                Err(_) => self.error(
+                    "E_TENANT_SCOPE",
+                    path,
+                    format!(
+                        "table `{}` is filtered by its tenant: bind a variable `{name}` first (a `let` from the verified token)",
+                        t.name
+                    ),
+                ),
+            }
+            let written = values.iter().any(|a| &a.field == name);
+            let compared = conditions.iter().any(|c| &c.column == name);
+            if written || compared {
+                self.error(
+                    "E_TENANT_MANUAL",
+                    format!("{path}/{}", if written { "values" } else { "where" }),
+                    format!("`{name}` is set and filtered on by the generator: leave it out"),
+                );
+            }
+        }
+        if t.soft_delete
+            && matches!(op, SqlOp::Insert | SqlOp::Update)
+            && values.iter().any(|a| a.field == DELETED_AT)
+        {
+            self.error(
+                "E_SOFT_DELETE_MANUAL",
+                format!("{path}/values"),
+                format!("`{DELETED_AT}` is set by a delete: leave it out"),
+            );
         }
     }
 
@@ -4695,6 +4788,162 @@ mod tests {
         let step = avatar_step(&mut p, 2, 1).clone();
         p.services[0].rpcs[0].steps.insert(0, step);
         assert!(!errors(&p).iter().any(|c| c.starts_with("E_IMAGE")));
+    }
+
+    fn with_notes() -> Project {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_notes(&mut p);
+        p
+    }
+
+    fn notes_table(p: &mut Project) -> &mut Table {
+        p.services[0]
+            .tables
+            .iter_mut()
+            .find(|t| t.name == "notes")
+            .unwrap()
+    }
+
+    /// `create_note`, `get_note` and `delete_note` are the routes 5, 6 and 7; the SQL step comes after the token, the
+    /// branch and the `tenant_id` variable.
+    fn note_sql(p: &mut Project, route: usize) -> &mut Step {
+        let at = if route == 5 { 4 } else { 3 };
+        &mut p.services[0].routes[route].steps[at]
+    }
+
+    #[test]
+    fn a_table_can_be_scoped_to_its_tenant_and_keep_what_is_deleted() {
+        let p = with_notes();
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+        let table = p.services[0]
+            .tables
+            .iter()
+            .find(|t| t.name == "notes")
+            .unwrap();
+        assert_eq!(table.tenant_column.as_deref(), Some("tenant_id"));
+        assert!(table.soft_delete);
+    }
+
+    #[test]
+    fn the_columns_the_tenant_and_the_soft_delete_lean_on_are_checked() {
+        type Case<'a> = (&'a str, &'a dyn Fn(&mut Table));
+        let cases: [Case; 6] = [
+            ("E_TENANT_COLUMN", &|t| {
+                t.tenant_column = Some("nope".into())
+            }),
+            ("E_TENANT_COLUMN", &|t| {
+                t.tenant_column = Some("deleted_at".into())
+            }),
+            ("E_TENANT_COLUMN", &|t| {
+                t.columns
+                    .iter_mut()
+                    .find(|c| c.name == "tenant_id")
+                    .unwrap()
+                    .nullable = true
+            }),
+            ("E_TENANT_COLUMN", &|t| {
+                t.columns
+                    .iter_mut()
+                    .find(|c| c.name == "tenant_id")
+                    .unwrap()
+                    .ty = ColumnType::Int64
+            }),
+            ("E_SOFT_DELETE_COLUMN", &|t| {
+                t.columns.retain(|c| c.name != "deleted_at")
+            }),
+            ("E_SOFT_DELETE_COLUMN", &|t| {
+                t.columns
+                    .iter_mut()
+                    .find(|c| c.name == "deleted_at")
+                    .unwrap()
+                    .nullable = false
+            }),
+        ];
+        for (code, break_it) in cases {
+            let mut p = with_notes();
+            break_it(notes_table(&mut p));
+            assert!(
+                errors(&p).contains(&code.to_string()),
+                "{code}: {:?}",
+                errors(&p)
+            );
+        }
+    }
+
+    #[test]
+    fn a_step_on_a_tenant_table_needs_the_tenant_and_leaves_the_columns_to_the_generator() {
+        // No variable `tenant_id`: the filter would have nothing to filter by.
+        let mut p = with_notes();
+        p.services[0].routes[6].steps.remove(2);
+        assert!(
+            errors(&p).contains(&"E_TENANT_SCOPE".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+        // A variable of the wrong type is no better.
+        let mut p = with_notes();
+        if let Step::Let {
+            value_type, value, ..
+        } = &mut p.services[0].routes[6].steps[2]
+        {
+            *value_type = FieldType::Int64;
+            *value = Expr::Literal { value: 1.into() };
+        }
+        assert!(
+            errors(&p).contains(&"E_TENANT_SCOPE".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+        // The author does not set the tenant, which would move a row to another, nor filter on it.
+        let mut p = with_notes();
+        if let Step::Sql { values, .. } = note_sql(&mut p, 5) {
+            values.push(Assignment {
+                field: "tenant_id".into(),
+                value: Expr::Path {
+                    path: "tenant_id".into(),
+                },
+            });
+        }
+        assert!(
+            errors(&p).contains(&"E_TENANT_MANUAL".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+        let mut p = with_notes();
+        if let Step::Sql { conditions, .. } = note_sql(&mut p, 6) {
+            conditions.push(SqlCondition {
+                column: "tenant_id".into(),
+                op: CmpOp::Eq,
+                value: Expr::Path {
+                    path: "tenant_id".into(),
+                },
+            });
+        }
+        assert!(
+            errors(&p).contains(&"E_TENANT_MANUAL".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+        // Nor does the author set `deleted_at`.
+        let mut p = with_notes();
+        if let Step::Sql { values, .. } = note_sql(&mut p, 5) {
+            values.push(Assignment {
+                field: "deleted_at".into(),
+                value: Expr::Now,
+            });
+        }
+        assert!(
+            errors(&p).contains(&"E_SOFT_DELETE_MANUAL".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+        // Reading the columns is fine.
+        let mut p = with_notes();
+        if let Step::Sql { columns, .. } = note_sql(&mut p, 6) {
+            columns.extend(["tenant_id".to_string(), "deleted_at".to_string()]);
+        }
+        assert_eq!(errors(&p), Vec::<String>::new());
     }
 
     fn with_seal() -> Project {

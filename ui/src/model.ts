@@ -264,6 +264,22 @@ export function addColumn(table: Table): Column {
   return col
 }
 
+/** The column a soft delete sets. */
+export const DELETED_AT = 'deleted_at'
+
+/** Turns the soft delete of a table on or off. Turning it on adds the nullable timestamp `deleted_at` when it is missing. */
+export function setSoftDelete(table: Table, on: boolean) {
+  table.softDelete = on || undefined
+  if (on && !table.columns.some((c) => c.name === DELETED_AT)) {
+    table.columns.push({ name: DELETED_AT, type: 'timestamp', nullable: true, primaryKey: false, default: null })
+  }
+}
+
+/** The columns that can scope a table to its tenant: required text, so that no row belongs to nobody. */
+export function tenantCandidates(table: Table): string[] {
+  return table.columns.filter((c) => !c.nullable && (c.type === 'string' || c.type === 'uuid')).map((c) => c.name)
+}
+
 /** Every top-level list of steps of the service (the SQL steps that name its tables are in there). */
 function serviceSteps(svc: Service): Step[][] {
   return [...svc.rpcs.map((r) => r.steps), ...svc.routes.map((r) => r.steps), ...svc.consumers.map((c) => c.steps), ...svc.jobs.map((j) => j.steps)]
@@ -290,6 +306,7 @@ export function renameColumn(p: Project, service: string, table: string, from: s
   for (const t of svc.tables) {
     if (t.name === table) {
       for (const c of t.columns) if (c.name === from) c.name = to
+      if (t.tenantColumn === from) t.tenantColumn = to
       for (const c of [...t.uniques, ...t.indexes, ...t.foreignKeys]) c.columns = c.columns.map(swap)
     }
     // A foreign key of any table of the service may point at the column.
