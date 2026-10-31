@@ -24,6 +24,14 @@ rand.workspace = true
 hex.workspace = true
 hmac.workspace = true
 sha1.workspace = true
+webauthn-rs = { workspace = true, optional = true }
+webauthn-authenticator-rs = { workspace = true, optional = true }
+
+[features]
+# Passkeys bring OpenSSL in: only the services that have a passkey step turn this on.
+webauthn = ["dep:webauthn-rs"]
+# The tests of the passkeys, against a software authenticator.
+webauthn-tests = ["webauthn", "dep:webauthn-authenticator-rs"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

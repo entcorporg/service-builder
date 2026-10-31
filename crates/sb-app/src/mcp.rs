@@ -62,7 +62,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "get_example_project",
-        description: "A complete, valid example project (Orders, Payments, Notifications) to copy the JSON structure from. It shows every kind of step and the features around them: HTTP routes with a rate limit, a status and cookies, a signed webhook (verifyHmac), a single-use token consumed by UPDATE ... RETURNING, password hashing, encryption, field rules, access tokens (signJwt, verifyJwt, jwks), request fields read from a header or a cookie, a TOTP second factor with recovery codes, an idempotent consumer, a scheduled job and composite foreign keys. Does not touch the project file.",
+        description: "A complete, valid example project (Orders, Payments, Notifications) to copy the JSON structure from. It shows every kind of step and the features around them: HTTP routes with a rate limit, a status and cookies, a signed webhook (verifyHmac), a single-use token consumed by UPDATE ... RETURNING, password hashing, encryption, field rules, access tokens (signJwt, verifyJwt, jwks), request fields read from a header or a cookie, a TOTP second factor with recovery codes, passkeys (WebAuthn), an idempotent consumer, a scheduled job and composite foreign keys. Does not touch the project file.",
         properties: no_properties,
         required: &[],
     },
@@ -1061,6 +1061,7 @@ mod tests {
             "signJwt",
             "totpVerify",
             "recoveryCodes",
+            "passkeyLoginFinish",
         ] {
             assert!(text.contains(&format!("\"type\": \"{kind}\"")), "{kind}");
         }

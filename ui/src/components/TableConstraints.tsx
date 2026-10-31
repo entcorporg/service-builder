@@ -87,7 +87,7 @@ function ForeignKeyCard(props: { si: number; ti: number; fi: number; fk: Foreign
   return (
     <div className={CARD} role="group" aria-label={`Clé étrangère ${fk.name}`}>
       <div className="flex items-center gap-2">
-        <CommitInput value={fk.name} mono label="Nom de la clé étrangère" className="w-[260px]" onCommit={(v) => change((f) => (f.name = v))} />
+        <CommitInput value={fk.name} mono label="Nom de la clé étrangère" className="w-65" onCommit={(v) => change((f) => (f.name = v))} />
         <span className="flex-1" />
         <IconButton icon="trash" title={`Supprimer la clé étrangère ${fk.name}`} danger onClick={() => edit((p) => void p.services[si]!.tables[ti]!.foreignKeys.splice(fi, 1))} />
       </div>
@@ -155,13 +155,13 @@ export function TableConstraints(props: { si: number; ti: number }) {
   const at = () => (p: typeof project) => p.services[si]!.tables[ti]!
 
   return (
-    <div className="grid gap-[18px]">
+    <div className="grid gap-4.5">
       <section className="grid gap-2" aria-label="Contraintes UNIQUE">
         <Heading title="Contraintes UNIQUE" add="+ Ajouter une contrainte" onAdd={() => edit((p) => void addUnique(at()(p)))} />
         {table.uniques.map((u, i) => (
           <div key={i} className={CARD} role="group" aria-label={`Contrainte UNIQUE ${u.name}`}>
             <div className="flex items-center gap-2">
-              <CommitInput value={u.name} mono label="Nom de la contrainte" className="w-[260px]" onCommit={(v) => edit((p) => (at()(p).uniques[i]!.name = v))} />
+              <CommitInput value={u.name} mono label="Nom de la contrainte" className="w-65" onCommit={(v) => edit((p) => (at()(p).uniques[i]!.name = v))} />
               <span className="flex-1" />
               <IconButton icon="trash" title={`Supprimer la contrainte ${u.name}`} danger onClick={() => edit((p) => void at()(p).uniques.splice(i, 1))} />
             </div>
@@ -176,7 +176,7 @@ export function TableConstraints(props: { si: number; ti: number }) {
         {table.indexes.map((x, i) => (
           <div key={i} className={CARD} role="group" aria-label={`Index ${x.name}`}>
             <div className="flex items-center gap-2">
-              <CommitInput value={x.name} mono label="Nom de l’index" className="w-[260px]" onCommit={(v) => edit((p) => (at()(p).indexes[i]!.name = v))} />
+              <CommitInput value={x.name} mono label="Nom de l’index" className="w-65" onCommit={(v) => edit((p) => (at()(p).indexes[i]!.name = v))} />
               <label className="flex cursor-pointer items-center gap-1.5 text-sm text-muted" title="Un index unique refuse les doublons">
                 <input type="checkbox" aria-label={`${x.name} est unique`} checked={x.unique} onChange={(e) => edit((p) => (at()(p).indexes[i]!.unique = e.target.checked))} />
                 unique

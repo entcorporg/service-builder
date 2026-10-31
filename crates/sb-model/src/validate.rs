@@ -2029,6 +2029,66 @@ impl<'a> Checker<'a> {
                 self.check_expr(scope, code, Some(&text), &format!("{path}/code"));
                 false
             }
+            Step::PasskeyRegisterStart {
+                account,
+                name,
+                bind,
+                ..
+            } => {
+                self.passkey_in_route(env, path);
+                self.check_var_name(bind, &format!("{path}/bind"));
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, account, Some(&text), &format!("{path}/account"));
+                self.check_expr(scope, name, Some(&text), &format!("{path}/name"));
+                self.passkey_schema(path);
+                scope.bind(bind.clone(), TypeRef::message("PasskeyChallenge"));
+                false
+            }
+            Step::PasskeyRegisterFinish {
+                state_id,
+                credential,
+                account,
+                ..
+            } => {
+                self.passkey_in_route(env, path);
+                let text = TypeRef::scalar(FieldType::String);
+                for (name, e) in [
+                    ("stateId", state_id),
+                    ("credential", credential),
+                    ("account", account),
+                ] {
+                    self.check_expr(scope, e, Some(&text), &format!("{path}/{name}"));
+                }
+                false
+            }
+            Step::PasskeyLoginStart { account, bind, .. } => {
+                self.passkey_in_route(env, path);
+                self.check_var_name(bind, &format!("{path}/bind"));
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, account, Some(&text), &format!("{path}/account"));
+                self.passkey_schema(path);
+                scope.bind(bind.clone(), TypeRef::message("PasskeyChallenge"));
+                false
+            }
+            Step::PasskeyLoginFinish {
+                state_id,
+                credential,
+                bind,
+                ..
+            } => {
+                self.passkey_in_route(env, path);
+                self.check_var_name(bind, &format!("{path}/bind"));
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, state_id, Some(&text), &format!("{path}/stateId"));
+                self.check_expr(
+                    scope,
+                    credential,
+                    Some(&text),
+                    &format!("{path}/credential"),
+                );
+                scope.bind(bind.clone(), text);
+                false
+            }
             Step::Encrypt {
                 key_env,
                 input,
@@ -2220,6 +2280,35 @@ impl<'a> Checker<'a> {
                 "E_TOTP_OUTSIDE_ROUTE",
                 path,
                 format!("{what} is a 401: this step only makes sense in an HTTP route"),
+            );
+        }
+    }
+
+    /// A refused passkey is a 400 or a 401, and the browser's answers are HTTP requests: routes only.
+    fn passkey_in_route(&mut self, env: &Env, path: &str) {
+        if !matches!(env.handler, Handler::Route { .. }) {
+            self.error(
+                "E_PASSKEY_OUTSIDE_ROUTE",
+                path,
+                "a passkey is registered and used by the browser, request after request: this step only makes sense in an HTTP route",
+            );
+        }
+    }
+
+    /// What the `start` steps hand over: the API schema `PasskeyChallenge`, two required texts.
+    fn passkey_schema(&mut self, path: &str) {
+        let ok = self.project.message("PasskeyChallenge").is_some_and(|m| {
+            m.kind == MessageKind::Api
+                && ["state_id", "options"].iter().all(|n| {
+                    m.field(n)
+                        .is_some_and(|f| f.ty == FieldType::String && !f.repeated && !f.optional)
+                })
+        });
+        if !ok {
+            self.error(
+                "E_PASSKEY_SCHEMA",
+                path,
+                "starting a passkey step needs the API schema `PasskeyChallenge` (`state_id`, `options`: texts)",
             );
         }
     }
@@ -4300,6 +4389,102 @@ mod tests {
         let step = totp_step(&mut p, 2, 2).clone();
         p.services[0].rpcs[0].steps.insert(0, step);
         assert!(!errors(&p).contains(&"E_TOTP_OUTSIDE_ROUTE".to_string()));
+    }
+
+    fn with_passkeys() -> Project {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_passkeys(&mut p);
+        p
+    }
+
+    /// The four requests of `add_passkeys` come after `place_order`, `get_order`, `whoami`, `jwks` and `session`.
+    fn passkey_step(p: &mut Project, route: usize, at: usize) -> &mut Step {
+        &mut p.services[0].routes[5 + route].steps[at]
+    }
+
+    #[test]
+    fn a_passkey_is_registered_and_used_in_two_requests_each() {
+        let p = with_passkeys();
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+        // The account the login gives back is a text the next steps can sign.
+        let mut p = with_passkeys();
+        if let Step::SignJwt { claims, .. } = passkey_step(&mut p, 3, 1) {
+            claims[0].value = Expr::Path {
+                path: "nope".into(),
+            };
+        }
+        assert!(errors(&p).contains(&"E_UNKNOWN_PATH".to_string()));
+    }
+
+    #[test]
+    fn the_steps_of_a_passkey_are_checked() {
+        type Case<'a> = (&'a str, &'a dyn Fn(&mut Project));
+        let cases: [Case; 6] = [
+            ("E_PASSKEY_SCHEMA", &|p| {
+                p.messages
+                    .iter_mut()
+                    .find(|m| m.name == "PasskeyChallenge")
+                    .unwrap()
+                    .fields[0]
+                    .repeated = true;
+            }),
+            ("E_PASSKEY_SCHEMA", &|p| {
+                p.messages
+                    .iter_mut()
+                    .find(|m| m.name == "PasskeyChallenge")
+                    .unwrap()
+                    .fields
+                    .retain(|f| f.name != "options");
+            }),
+            ("E_UNKNOWN_PATH", &|p| {
+                if let Step::PasskeyRegisterStart { account, .. } = passkey_step(p, 0, 1) {
+                    *account = Expr::Path {
+                        path: "claims.nope".into(),
+                    };
+                }
+            }),
+            ("E_UNKNOWN_PATH", &|p| {
+                if let Step::PasskeyRegisterFinish { credential, .. } = passkey_step(p, 1, 1) {
+                    *credential = Expr::Path {
+                        path: "input.nope".into(),
+                    };
+                }
+            }),
+            ("E_RESERVED_NAME", &|p| {
+                if let Step::PasskeyLoginFinish { bind, .. } = passkey_step(p, 3, 0) {
+                    *bind = "tx".into();
+                }
+            }),
+            ("E_RESERVED_NAME", &|p| {
+                if let Step::PasskeyLoginStart { bind, .. } = passkey_step(p, 2, 1) {
+                    *bind = "ctx".into();
+                }
+            }),
+        ];
+        for (code, break_it) in cases {
+            let mut p = with_passkeys();
+            break_it(&mut p);
+            assert!(
+                errors(&p).contains(&code.to_string()),
+                "{code}: {:?}",
+                errors(&p)
+            );
+        }
+    }
+
+    #[test]
+    fn passkeys_only_make_sense_in_a_route() {
+        for (route, at) in [(0, 1), (1, 1), (2, 1), (3, 0)] {
+            let mut p = with_passkeys();
+            let step = passkey_step(&mut p, route, at).clone();
+            p.services[0].rpcs[0].steps.insert(0, step);
+            assert!(
+                errors(&p).contains(&"E_PASSKEY_OUTSIDE_ROUTE".to_string()),
+                "{route}: {:?}",
+                errors(&p)
+            );
+        }
     }
 
     fn with_seal() -> Project {

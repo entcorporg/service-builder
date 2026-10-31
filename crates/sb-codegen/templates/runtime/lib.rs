@@ -13,6 +13,8 @@ pub mod outbox;
 pub mod rate_limit;
 pub mod totp;
 pub mod validation;
+#[cfg(feature = "webauthn")]
+pub mod webauthn;
 pub mod webhook;
 
 pub use outbox::connect as connect_database;

@@ -164,6 +164,7 @@ mod tests {
                 "runtime/src/rate_limit.rs",
                 "runtime/src/totp.rs",
                 "runtime/src/validation.rs",
+                "runtime/src/webauthn.rs",
                 "runtime/src/webhook.rs",
                 "services/notifications/Cargo.toml",
                 "services/notifications/src/app/bootstrap.rs",
@@ -1040,6 +1041,58 @@ mod tests {
         )
         .to_string();
         assert!(!schema.contains("CREATE_STEPS_TABLE") && schema.contains("CREATE_RECOVERY_TABLE"));
+    }
+
+    #[test]
+    fn passkeys_need_the_site_address_the_feature_and_their_tables() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_passkeys(&mut p);
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&p)),
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        let flat = api.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.contains("let challenge: pb::PasskeyChallenge = { let challenge = eda_runtime::webauthn::register_start(&mut tx, &claims.sub.clone(), &input.name.clone()).await?;"), "{flat}");
+        assert!(flat.contains("eda_runtime::webauthn::register_finish(&mut tx, &input.state_id.clone(), &input.credential.clone(), &claims.sub.clone()).await?;"), "{flat}");
+        assert!(
+            flat.contains("eda_runtime::webauthn::login_start(&mut tx, &input.account.clone())"),
+            "{flat}"
+        );
+        assert!(flat.contains("let account: String = eda_runtime::webauthn::login_finish(&mut tx, &input.state_id.clone(), &input.credential.clone()).await?;"), "{flat}");
+        // The runtime module is built with its feature, which only this service turns on.
+        assert!(
+            file(&files, "services/orders/Cargo.toml")
+                .contains("eda-runtime = { path = \"../../runtime\", features = [\"webauthn\"] }")
+        );
+        assert!(
+            file(&files, "runtime/src/lib.rs")
+                .contains("#[cfg(feature = \"webauthn\")]\npub mod webauthn;")
+        );
+        // Its tables come with the schema, and the site address is checked at start-up.
+        let schema = file(&files, "services/orders/src/app/schema.rs");
+        for table in [
+            "CREATE_STATES_TABLE",
+            "CREATE_CREDENTIALS_TABLE",
+            "CREATE_CREDENTIALS_INDEX",
+        ] {
+            assert!(
+                schema.contains(&format!("eda_runtime::webauthn::{table},")),
+                "{table}"
+            );
+        }
+        assert!(
+            file(&files, "services/orders/src/app/config.rs")
+                .contains("eda_runtime::webauthn::check_config()?;")
+        );
+        // Nothing of it in a service without passkeys.
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/Cargo.toml").contains("webauthn"));
+        assert!(!file(&plain, "services/orders/src/app/schema.rs").contains("webauthn"));
+        assert!(!file(&plain, "services/orders/src/app/config.rs").contains("webauthn"));
     }
 
     #[test]

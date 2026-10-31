@@ -64,6 +64,31 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                 expr(code, &format!("{path}/code"), out);
                 expr(account, &format!("{path}/account"), out);
             }
+            Step::PasskeyRegisterStart { account, name, .. } => {
+                expr(account, &format!("{path}/account"), out);
+                expr(name, &format!("{path}/name"), out);
+            }
+            Step::PasskeyRegisterFinish {
+                state_id,
+                credential,
+                account,
+                ..
+            } => {
+                expr(state_id, &format!("{path}/stateId"), out);
+                expr(credential, &format!("{path}/credential"), out);
+                expr(account, &format!("{path}/account"), out);
+            }
+            Step::PasskeyLoginStart { account, .. } => {
+                expr(account, &format!("{path}/account"), out)
+            }
+            Step::PasskeyLoginFinish {
+                state_id,
+                credential,
+                ..
+            } => {
+                expr(state_id, &format!("{path}/stateId"), out);
+                expr(credential, &format!("{path}/credential"), out);
+            }
             Step::RecoveryCodes { account, .. } => expr(account, &format!("{path}/account"), out),
             Step::RecoveryCodeUse { account, code, .. } => {
                 expr(account, &format!("{path}/account"), out);
