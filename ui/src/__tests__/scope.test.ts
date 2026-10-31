@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { exampleJson, exampleQuery } from '../json'
-import { addColumn, addForeignKey, addJob, ensureJwksSchemas, ensurePasskeySchema, ensureTotpSchema, eventKeys, addIndex, addTable, addUnique, makeStep, retargetForeignKey, renameColumn, renameTable, selectionForPath, addMessage, addRoute, addRpc, defaultStatus, pathParams, addTopic, autoMap, canConsume, canProduce, connectConsumer, consumersOf, declareProducer, removeService, renameService, renameField, renameMessage, renameTopic, nestable } from '../model'
+import { addColumn, addForeignKey, addJob, ensureJwksSchemas, ensurePasskeySchema, setSoftDelete, tenantCandidates, ensureTotpSchema, eventKeys, addIndex, addTable, addUnique, makeStep, retargetForeignKey, renameColumn, renameTable, selectionForPath, addMessage, addRoute, addRpc, defaultStatus, pathParams, addTopic, autoMap, canConsume, canProduce, connectConsumer, consumersOf, declareProducer, removeService, renameService, renameField, renameMessage, renameTopic, nestable } from '../model'
 import { sqlPreview } from '../components/SqlStep'
 import { everyLabel } from '../components/Inspector'
 import { createTableSql } from '../components/TablesView'
@@ -801,5 +801,44 @@ describe('object storage steps', () => {
     expect(step).toMatchObject({ type: 'objectGet', key: { kind: 'path', path: 'input.account' }, bind: 'object' })
     expect(scopeAfter(p, inputScope('Who'), step).object).toEqual({ type: { kind: 'string' }, repeated: false, optional: true })
     expect(makeStep('objectDelete', p, inputScope('Who'), ctx)).toMatchObject({ type: 'objectDelete', bucketEnv: 'AVATAR_BUCKET' })
+  })
+})
+
+describe('tenant and soft delete', () => {
+  const table = (): import('../types').Table => ({
+    name: 'notes',
+    columns: [
+      { name: 'tenant_id', type: 'string', nullable: false, primaryKey: false, default: null },
+      { name: 'note_id', type: 'string', nullable: false, primaryKey: true, default: null },
+      { name: 'size', type: 'int64', nullable: false, primaryKey: false, default: null },
+      { name: 'label', type: 'string', nullable: true, primaryKey: false, default: null },
+    ],
+    uniques: [],
+    indexes: [],
+    foreignKeys: [],
+  })
+
+  it('a soft delete adds the column it stamps once, and leaves it when turned off', () => {
+    const t = table()
+    setSoftDelete(t, true)
+    setSoftDelete(t, true)
+    expect(t.softDelete).toBe(true)
+    expect(t.columns.filter((c) => c.name === 'deleted_at')).toEqual([{ name: 'deleted_at', type: 'timestamp', nullable: true, primaryKey: false, default: null }])
+    setSoftDelete(t, false)
+    expect(t.softDelete).toBeUndefined()
+    expect(t.columns.some((c) => c.name === 'deleted_at')).toBe(true)
+  })
+
+  it('only required text can scope a table to its tenant', () => {
+    expect(tenantCandidates(table())).toEqual(['tenant_id', 'note_id'])
+  })
+
+  it('renaming the tenant column keeps the table scoped by it', () => {
+    const p = project()
+    const t = table()
+    t.tenantColumn = 'tenant_id'
+    p.services[0]!.tables = [t]
+    renameColumn(p, p.services[0]!.name, 'notes', 'tenant_id', 'org_id')
+    expect(p.services[0]!.tables[0]!.tenantColumn).toBe('org_id')
   })
 })

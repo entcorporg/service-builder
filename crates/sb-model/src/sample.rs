@@ -813,6 +813,7 @@ pub fn showcase() -> Project {
     add_totp(&mut p);
     add_passkeys(&mut p);
     add_avatars(&mut p);
+    add_notes(&mut p);
     p
 }
 
@@ -917,6 +918,7 @@ pub fn add_login(p: &mut Project) {
                 claims: vec![
                     set("sub", path("input.email")),
                     set("roles", lit(serde_json::json!(["member"]))),
+                    set("tid", lit("acme")),
                 ],
                 bind: "access_token".into(),
             },
@@ -941,9 +943,14 @@ pub fn add_jwt(p: &mut Project) {
     let string = || FieldType::String;
     let mut roles = field("roles", string());
     roles.repeated = true;
+    // `tid` is the tenant of the account: empty when the token has none, which a flow that uses it must refuse.
     p.messages.push(api(
         "AccessClaims",
-        vec![field("sub", string()), roles.clone()],
+        vec![
+            field("sub", string()),
+            roles.clone(),
+            field("tid", string()),
+        ],
     ));
     // The token comes from the `Authorization` header, or from the session cookie `login` sets.
     let from = |source: RequestSource| {
@@ -1510,5 +1517,225 @@ pub fn add_avatars(p: &mut Project) {
                 cookies: vec![],
             },
         ],
+    ));
+}
+
+/// Adds to the first service notes that belong to a tenant and are never really deleted: the table is filtered by its
+/// tenant column and keeps its deleted rows (`softDelete`), so the steps below name neither `tenant_id` nor `deleted_at`.
+/// The tenant is the `tid` claim of the verified token, bound to the variable `tenant_id` that the table leans on. It needs
+/// [`add_jwt`], whose `AccessClaims` and signing key it uses.
+pub fn add_notes(p: &mut Project) {
+    let string = || FieldType::String;
+    let bearer = || {
+        let mut token = field("token", string());
+        token.source = Some(RequestSource::Header {
+            name: "Authorization".into(),
+        });
+        token
+    };
+    p.messages
+        .push(api("NoteCreate", vec![bearer(), field("body", string())]));
+    p.messages.push(api(
+        "NoteRequest",
+        vec![bearer(), field("note_id", string())],
+    ));
+    p.messages.push(api(
+        "NoteView",
+        vec![field("note_id", string()), field("body", string())],
+    ));
+    p.messages
+        .push(api("NoteDone", vec![field("ok", FieldType::Bool)]));
+
+    let mut note_id = Column::new("note_id", ColumnType::String);
+    note_id.primary_key = true;
+    let mut deleted_at = Column::new(DELETED_AT, ColumnType::Timestamp);
+    deleted_at.nullable = true;
+    let mut notes = Table::new(
+        "notes",
+        vec![
+            Column::new("tenant_id", ColumnType::String),
+            note_id,
+            Column::new("body", ColumnType::String),
+            deleted_at,
+        ],
+    );
+    notes.tenant_column = Some("tenant_id".into());
+    notes.soft_delete = true;
+    p.services[0].tables.push(notes);
+
+    // A token without a tenant would write rows with none: refuse it, then bind the variable the table leans on.
+    let tenant = |id: &str, branch: &str, fail: &str| {
+        vec![
+            Step::VerifyJwt {
+                id: id.into(),
+                token: path("input.token"),
+                bearer: true,
+                source: JwksSource::Keys {
+                    key_envs: vec!["JWT_SIGNING_KEY".into()],
+                },
+                issuer: "orders".into(),
+                schema: "AccessClaims".into(),
+                bind: "claims".into(),
+            },
+            Step::Branch {
+                id: branch.into(),
+                condition: Condition::Compare {
+                    left: path("claims.tid"),
+                    op: CmpOp::Eq,
+                    right: lit(""),
+                },
+                then: vec![Step::Fail {
+                    id: fail.into(),
+                    status: 403,
+                    message: "this account has no tenant".into(),
+                    retry_after: None,
+                }],
+                otherwise: vec![],
+            },
+            Step::Let {
+                id: format!("{id}t"),
+                name: "tenant_id".into(),
+                value_type: FieldType::String,
+                optional: false,
+                repeated: false,
+                value: path("claims.tid"),
+            },
+        ]
+    };
+    let sql = |id: &str,
+               op: SqlOp,
+               columns: &[&str],
+               conditions: Vec<SqlCondition>,
+               values: Vec<Assignment>,
+               bind: Option<&str>| Step::Sql {
+        id: id.into(),
+        op,
+        table: "notes".into(),
+        bind: bind.map(String::from),
+        columns: columns.iter().map(|c| c.to_string()).collect(),
+        many: false,
+        into: None,
+        conditions,
+        values,
+        order_by: None,
+        descending: false,
+        limit: None,
+        missing: bind.map(|_| SqlMissing {
+            status: 404,
+            message: "no such note".into(),
+        }),
+    };
+    let by_id = || {
+        vec![SqlCondition {
+            column: "note_id".into(),
+            op: CmpOp::Eq,
+            value: path("input.note_id"),
+        }]
+    };
+    let route = |name: &str, method, route: &str, request: &str, response: &str, steps| Route {
+        name: name.into(),
+        method,
+        path: route.into(),
+        request: request.into(),
+        response: response.into(),
+        status: 200,
+        steps,
+    };
+    let routes = &mut p.services[0].routes;
+
+    let mut steps = tenant("n1", "n2", "n3");
+    steps.extend([
+        Step::Let {
+            id: "n4".into(),
+            name: "note_id".into(),
+            value_type: FieldType::String,
+            optional: false,
+            repeated: false,
+            value: raw("eda_runtime::new_id()"),
+        },
+        sql(
+            "n5",
+            SqlOp::Insert,
+            &[],
+            vec![],
+            vec![
+                set("note_id", path("note_id")),
+                set("body", path("input.body")),
+            ],
+            None,
+        ),
+        Step::Respond {
+            id: "n6".into(),
+            fields: vec![
+                set("note_id", path("note_id")),
+                set("body", path("input.body")),
+            ],
+            status: None,
+            cookies: vec![],
+        },
+    ]);
+    routes.push(route(
+        "create_note",
+        HttpMethod::Post,
+        "/tenant/notes",
+        "NoteCreate",
+        "NoteView",
+        steps,
+    ));
+
+    let mut steps = tenant("n7", "n8", "n9");
+    steps.extend([
+        sql(
+            "n10",
+            SqlOp::Select,
+            &["note_id", "body"],
+            by_id(),
+            vec![],
+            Some("note"),
+        ),
+        Step::Respond {
+            id: "n11".into(),
+            fields: vec![
+                set("note_id", path("note.note_id")),
+                set("body", path("note.body")),
+            ],
+            status: None,
+            cookies: vec![],
+        },
+    ]);
+    routes.push(route(
+        "get_note",
+        HttpMethod::Get,
+        "/tenant/notes/{note_id}",
+        "NoteRequest",
+        "NoteView",
+        steps,
+    ));
+
+    let mut steps = tenant("n12", "n13", "n14");
+    steps.extend([
+        // A delete only marks the row; `RETURNING` says there was one.
+        sql(
+            "n15",
+            SqlOp::Delete,
+            &["note_id"],
+            by_id(),
+            vec![],
+            Some("gone"),
+        ),
+        Step::Respond {
+            id: "n16".into(),
+            fields: vec![set("ok", lit(true))],
+            status: None,
+            cookies: vec![],
+        },
+    ]);
+    routes.push(route(
+        "delete_note",
+        HttpMethod::Delete,
+        "/tenant/notes/{note_id}",
+        "NoteRequest",
+        "NoteDone",
+        steps,
     ));
 }

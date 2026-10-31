@@ -425,7 +425,19 @@ pub struct Table {
     /// Foreign keys, composite when they name several columns.
     #[serde(default)]
     pub foreign_keys: Vec<ForeignKey>,
+    /// The column that says which tenant a row belongs to. Every SQL step on the table is filtered by it and every insert
+    /// sets it, from the variable of the same name that the handler has bound (for example from a verified token): an
+    /// author cannot forget it, and cannot read or write another tenant's rows with these steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_column: Option<String>,
+    /// Rows are never removed: a `delete` sets `deleted_at` instead, and `select`, `update` and `delete` skip the rows that
+    /// have it. The table needs a nullable timestamp column `deleted_at`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub soft_delete: bool,
 }
+
+/// The column a soft delete sets.
+pub const DELETED_AT: &str = "deleted_at";
 
 impl Table {
     pub fn new(name: impl Into<String>, columns: Vec<Column>) -> Self {
@@ -435,6 +447,8 @@ impl Table {
             uniques: vec![],
             indexes: vec![],
             foreign_keys: vec![],
+            tenant_column: None,
+            soft_delete: false,
         }
     }
 

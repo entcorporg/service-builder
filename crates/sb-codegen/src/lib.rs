@@ -1146,6 +1146,42 @@ mod tests {
     }
 
     #[test]
+    fn a_tenant_table_is_filtered_and_a_soft_delete_only_marks_the_row() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_notes(&mut p);
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&p)),
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        let flat = api.split_whitespace().collect::<Vec<_>>().join(" ");
+        // Insert: the tenant is written with the row, from the variable the handler bound. Nothing in the steps says so.
+        assert!(
+            flat.contains("INSERT INTO \\\"notes\\\" (\\\"note_id\\\", \\\"body\\\", \\\"tenant_id\\\") VALUES ($1, $2, $3)")
+                && flat.contains(".bind(note_id.clone()).bind(input.body.clone()).bind(tenant_id.clone())"),
+            "{flat}"
+        );
+        // Select: the tenant, and only the rows that were not deleted.
+        assert!(
+            flat.contains("FROM \\\"notes\\\" WHERE \\\"note_id\\\" = $1 AND \\\"tenant_id\\\" = $2 AND \\\"deleted_at\\\" IS NULL LIMIT 1"),
+            "{flat}"
+        );
+        // Delete: an update that stamps the row, for this tenant, once.
+        assert!(
+            flat.contains("UPDATE \\\"notes\\\" SET \\\"deleted_at\\\" = now() WHERE \\\"note_id\\\" = $1 AND \\\"tenant_id\\\" = $2 AND \\\"deleted_at\\\" IS NULL RETURNING \\\"note_id\\\""),
+            "{flat}"
+        );
+        assert!(!flat.contains("DELETE FROM"), "{flat}");
+        // A table without these keeps its plain statements.
+        let plain = generate(&sample::orders()).unwrap();
+        let plain = file(&plain, "services/orders/src/flows/api.rs");
+        assert!(!plain.contains("IS NULL") && !plain.contains("tenant"));
+    }
+
+    #[test]
     fn the_showcase_generates_a_workspace_of_every_feature() {
         let files = generate(&sample::showcase()).unwrap();
         for path in [

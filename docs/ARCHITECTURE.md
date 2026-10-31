@@ -243,6 +243,26 @@ index unique de la table cible, dans n'importe quel ordre (`E_FK_NOT_UNIQUE`) ; 
 (`E_FK_SET_NULL`) et `setDefault` des colonnes avec défaut (`E_FK_SET_DEFAULT`). Dans la vue Tables, ces diagnostics
 s'affichent sous la contrainte concernée, et renommer une table ou une colonne suit les contraintes qui la citent.
 
+Deux réglages de table, pour les données qui appartiennent à un tenant et qu'on ne supprime pas vraiment :
+
+- **`tenantColumn`** : une colonne obligatoire de type texte (`string` ou `uuid`, `E_TENANT_COLUMN`). Tout bloc SQL sur la table
+  est **filtré par cette colonne** (`AND tenant_id = $n`) et toute insertion la renseigne, à partir de la variable **du même nom**
+  que le flux a liée avant (`let tenant_id` depuis le jeton vérifié) : l'auteur ne peut pas l'oublier, ni lire, modifier ou
+  supprimer les lignes d'un autre tenant avec ces blocs. Sans cette variable, ou d'un autre type, c'est `E_TENANT_SCOPE` ; écrire la
+  colonne dans les valeurs (ce qui déplacerait la ligne chez un autre) ou la filtrer soi-même est refusé (`E_TENANT_MANUAL`). Elle
+  n'est pas exigée dans les valeurs d'une insertion : le générateur la pose. **Une valeur vide est une valeur** : un jeton sans tenant
+  donnerait des lignes sans tenant, à refuser avant (la vitrine : un `Fail 403` si `claims.tid` est vide).
+- **`softDelete`** : la table a une colonne `deleted_at`, timestamp nullable (`E_SOFT_DELETE_COLUMN` ; l'éditeur l'ajoute en
+  cochant la case). Une suppression devient `UPDATE … SET deleted_at = now() WHERE … AND deleted_at IS NULL` (le `RETURNING` rend
+  toujours la ligne, une seconde suppression est « introuvable » et ne déplace pas la date) ; lectures, mises à jour et suppressions
+  ignorent les lignes datées. Écrire `deleted_at` soi-même est refusé (`E_SOFT_DELETE_MANUAL`). Les contraintes `UNIQUE` et les clés
+  primaires continuent de compter les lignes supprimées : un e-mail supprimé ne peut pas être recréé tel quel.
+
+Ces filtres ne s'appliquent qu'aux blocs SQL : un bloc *Code Rust* qui écrit sa propre requête les contourne. Les clés
+étrangères composites `(tenant_id, id)` qui empêchent une ligne de viser un autre tenant s'ajoutent à la main (voir plus haut).
+Vérifié sur le code généré avec PostgreSQL : un tenant ne lit ni ne supprime la note d'un autre (404), la suppression laisse la
+ligne datée, une seconde suppression est un 404 qui ne change pas la date.
+
 Une colonne **`jsonb`** est un document JSON que les flux voient comme du texte, comme `timestamp` : lue avec
 `col::text`, écrite avec `$n::jsonb` (un texte qui n'est pas du JSON fait échouer la requête à l'exécution, Postgres le
 refuse). Postgres normalise le document (l'ordre des clés n'est pas conservé).

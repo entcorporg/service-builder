@@ -62,7 +62,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "get_example_project",
-        description: "A complete, valid example project (Orders, Payments, Notifications) to copy the JSON structure from. It shows every kind of step and the features around them: HTTP routes with a rate limit, a status and cookies, a signed webhook (verifyHmac), a single-use token consumed by UPDATE ... RETURNING, password hashing, encryption, field rules, access tokens (signJwt, verifyJwt, jwks), request fields read from a header or a cookie, a TOTP second factor with recovery codes, passkeys (WebAuthn), image checks and object storage (S3), an idempotent consumer, a scheduled job and composite foreign keys. Does not touch the project file.",
+        description: "A complete, valid example project (Orders, Payments, Notifications) to copy the JSON structure from. It shows every kind of step and the features around them: HTTP routes with a rate limit, a status and cookies, a signed webhook (verifyHmac), a single-use token consumed by UPDATE ... RETURNING, password hashing, encryption, field rules, access tokens (signJwt, verifyJwt, jwks), request fields read from a header or a cookie, a TOTP second factor with recovery codes, passkeys (WebAuthn), image checks and object storage (S3), an idempotent consumer, a scheduled job, composite foreign keys, and a table scoped to its tenant with a soft delete. Does not touch the project file.",
         properties: no_properties,
         required: &[],
     },
@@ -552,6 +552,12 @@ fn table_outline(t: &sb_model::Table) -> String {
             f.ref_table,
             list(&f.ref_columns)
         ));
+    }
+    if let Some(tenant) = &t.tenant_column {
+        out.push_str(&format!(" tenant({tenant})"));
+    }
+    if t.soft_delete {
+        out.push_str(" soft-delete");
     }
     out
 }
@@ -1074,6 +1080,8 @@ mod tests {
                 && text.contains("\"foreignKeys\"")
                 && text.contains("\"rules\"")
                 && text.contains("\"source\"")
+                && text.contains("\"tenantColumn\"")
+                && text.contains("\"softDelete\"")
         );
         // It does not touch the project file.
         assert_eq!(load_project(&f.file).unwrap(), sb_model::sample::orders());

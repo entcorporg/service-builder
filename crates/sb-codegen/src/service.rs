@@ -2162,6 +2162,39 @@ fn sql_step(
     let t = service
         .table(table)
         .ok_or_else(|| CodegenError::Internal(format!("unknown table `{table}`")))?;
+    // What the table adds on its own: the tenant of the rows, and the rows a soft delete keeps out of sight. The author
+    // writes neither (the validator refuses it).
+    let (mut op, mut conditions, mut values) = (*op, conditions.clone(), values.clone());
+    let mut live_only = false;
+    if let Some(tenant) = &t.tenant_column {
+        let own = Expr::Path {
+            path: tenant.clone(),
+        };
+        if op == SqlOp::Insert {
+            values.push(sb_model::Assignment {
+                field: tenant.clone(),
+                value: own,
+            });
+        } else {
+            conditions.push(sb_model::SqlCondition {
+                column: tenant.clone(),
+                op: sb_model::CmpOp::Eq,
+                value: own,
+            });
+        }
+    }
+    if t.soft_delete && op != SqlOp::Insert {
+        live_only = true;
+        if op == SqlOp::Delete {
+            // Nothing is removed: the row is marked, and `RETURNING` still gives it back.
+            op = SqlOp::Update;
+            values = vec![sb_model::Assignment {
+                field: sb_model::DELETED_AT.to_string(),
+                value: Expr::Now,
+            }];
+        }
+    }
+    let (op, conditions, values) = (&op, &conditions, &values);
     let col = |name: &str| {
         t.column(name).ok_or_else(|| {
             CodegenError::Internal(format!("table `{table}` has no column `{name}`"))
@@ -2200,6 +2233,9 @@ fn sql_step(
             quoted(&column.name),
             cond.sql_op()
         ));
+    }
+    if live_only {
+        where_sql.push(format!("{} IS NULL", quoted(sb_model::DELETED_AT)));
     }
     let where_clause = if where_sql.is_empty() {
         String::new()
