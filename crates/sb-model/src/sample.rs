@@ -748,3 +748,316 @@ pub fn add_signup(p: &mut Project) {
         ],
     });
 }
+
+/// Adds to the first service the tables of an order's lines and shipments: a composite primary key, a composite
+/// foreign key with a `CASCADE`, a `UNIQUE` constraint, an index and a `jsonb` column.
+pub fn add_shipments(p: &mut Project) {
+    let key = |name: &str, ty| {
+        let mut c = Column::new(name, ty);
+        c.primary_key = true;
+        c
+    };
+    let lines = Table::new(
+        "order_lines",
+        vec![
+            key("order_id", ColumnType::String),
+            key("line_no", ColumnType::Int32),
+            Column::new("sku", ColumnType::String),
+        ],
+    );
+    let mut id = key("id", ColumnType::Uuid);
+    id.default = Some("gen_random_uuid()".into());
+    let mut payload = Column::new("payload", ColumnType::Jsonb);
+    payload.default = Some("'{}'::jsonb".into());
+    let mut shipments = Table::new(
+        "shipments",
+        vec![
+            id,
+            Column::new("order_id", ColumnType::String),
+            Column::new("line_no", ColumnType::Int32),
+            payload,
+        ],
+    );
+    shipments.foreign_keys.push(ForeignKey {
+        name: "shipments_line_fk".into(),
+        columns: vec!["order_id".into(), "line_no".into()],
+        ref_table: "order_lines".into(),
+        ref_columns: vec!["order_id".into(), "line_no".into()],
+        on_delete: ReferentialAction::Cascade,
+        on_update: ReferentialAction::NoAction,
+    });
+    shipments.uniques.push(UniqueConstraint {
+        name: "shipments_line_uq".into(),
+        columns: vec!["order_id".into(), "line_no".into()],
+    });
+    shipments.indexes.push(Index {
+        name: "shipments_order_idx".into(),
+        columns: vec!["order_id".into()],
+        unique: false,
+    });
+    p.services[0].tables.extend([lines, shipments]);
+}
+
+/// The sample with every feature added by the helpers above, to copy the JSON of each from: signed webhook,
+/// single-use token, scheduled job, encryption, request rules and composite keys. Valid, with no warning.
+pub fn showcase() -> Project {
+    let mut p = orders();
+    add_single_use_token(&mut p);
+    add_cleaner_job(&mut p);
+    add_stripe_webhook(&mut p);
+    add_sealed_text(&mut p);
+    add_signup(&mut p);
+    add_login(&mut p);
+    add_jwt(&mut p);
+    add_shipments(&mut p);
+    p
+}
+
+/// Adds to the first service a login: a rate limit per e-mail, the stored hash read with a query of its own (absent
+/// for an unknown account, which is checked all the same against a dummy hash), the same `401` whichever of the
+/// e-mail or the password is wrong, then a random token and its hash, and the session cookie.
+pub fn add_login(p: &mut Project) {
+    let string = || FieldType::String;
+    let mut email = field("email", string());
+    email.rules = vec![Rule::Email];
+    p.messages.push(api(
+        "LoginBody",
+        vec![email, {
+            let mut f = field("password", string());
+            f.rules = vec![Rule::Length { min: 1, max: 128 }];
+            f
+        }],
+    ));
+    p.messages.push(api(
+        "LoginAck",
+        vec![field("email", string()), field("access_token", string())],
+    ));
+    let mut password_hash = Column::new("password_hash", ColumnType::String);
+    password_hash.nullable = false;
+    let mut email_column = Column::new("email", ColumnType::String);
+    email_column.primary_key = true;
+    p.services[0]
+        .tables
+        .push(Table::new("accounts", vec![email_column, password_hash]));
+    let mut session = Cookie::new("session", path("session_token"));
+    session.max_age_secs = Some(900);
+    // The same access token the body carries, for the browser that would rather not keep it in a script.
+    let mut access = Cookie::new("access_token", path("access_token"));
+    access.max_age_secs = Some(300);
+    p.services[0].routes.push(Route {
+        name: "login".into(),
+        method: HttpMethod::Post,
+        path: "/login".into(),
+        request: "LoginBody".into(),
+        response: "LoginAck".into(),
+        status: 200,
+        steps: vec![
+            Step::RateLimit {
+                id: "g1".into(),
+                key: path("input.email"),
+                max: 5,
+                window_secs: 900,
+            },
+            // None for an unknown account: the check below then runs against a dummy hash.
+            Step::Let {
+                id: "g2".into(),
+                name: "stored".into(),
+                value_type: FieldType::String,
+                optional: true,
+                repeated: false,
+                value: raw(
+                    "sqlx::query_scalar::<_, String>(\"SELECT password_hash FROM accounts WHERE email = $1\").bind(input.email.clone()).fetch_optional(&mut *tx).await?",
+                ),
+            },
+            Step::VerifyPassword {
+                id: "g3".into(),
+                password: path("input.password"),
+                stored: path("stored"),
+                bind: "password_ok".into(),
+            },
+            // The same answer whether the e-mail or the password was wrong.
+            Step::Branch {
+                id: "g4".into(),
+                condition: Condition::Compare {
+                    left: path("password_ok"),
+                    op: CmpOp::Eq,
+                    right: lit(false),
+                },
+                then: vec![Step::Fail {
+                    id: "g5".into(),
+                    status: 401,
+                    message: "invalid credentials".into(),
+                    retry_after: None,
+                }],
+                otherwise: vec![],
+            },
+            Step::RandomToken {
+                id: "g6".into(),
+                bind: "session_token".into(),
+            },
+            // What a session table would store: the hash of the token, never the token.
+            Step::Sha256 {
+                id: "g7".into(),
+                input: path("session_token"),
+                bind: "session_hash".into(),
+            },
+            Step::Code {
+                id: "g8".into(),
+                code: "tracing::info!(session = %session_hash, \"login\");".into(),
+            },
+            // A short access token, verifiable by anyone who has the published public key.
+            Step::SignJwt {
+                id: "g10".into(),
+                key_env: "JWT_SIGNING_KEY".into(),
+                issuer: "orders".into(),
+                ttl_secs: 300,
+                claims: vec![
+                    set("sub", path("input.email")),
+                    set("roles", lit(serde_json::json!(["member"]))),
+                ],
+                bind: "access_token".into(),
+            },
+            Step::Respond {
+                id: "g9".into(),
+                fields: vec![
+                    set("email", path("input.email")),
+                    set("access_token", path("access_token")),
+                ],
+                status: None,
+                cookies: vec![session, access],
+            },
+        ],
+    });
+}
+
+/// Adds to the first service what an access token needs besides the login that issues it: the route that checks
+/// one (`GET /whoami` with `Authorization: Bearer`, `GET /session` with the `access_token` cookie, the claims read
+/// as the schema `AccessClaims`) and the public route that publishes the key (`GET /.well-known/jwks.json`), which
+/// the services that verify on their own fetch.
+pub fn add_jwt(p: &mut Project) {
+    let string = || FieldType::String;
+    let mut roles = field("roles", string());
+    roles.repeated = true;
+    p.messages.push(api(
+        "AccessClaims",
+        vec![field("sub", string()), roles.clone()],
+    ));
+    // The token comes from the `Authorization` header, or from the session cookie `login` sets.
+    let from = |source: RequestSource| {
+        let mut token = field("token", string());
+        token.source = Some(source);
+        token
+    };
+    p.messages.push(api(
+        "WhoamiRequest",
+        vec![from(RequestSource::Header {
+            name: "Authorization".into(),
+        })],
+    ));
+    p.messages.push(api(
+        "SessionRequest",
+        vec![from(RequestSource::Cookie {
+            name: "access_token".into(),
+        })],
+    ));
+    p.messages
+        .push(api("WhoamiView", vec![field("sub", string()), roles]));
+    // The shape of a JWKS (RFC 7517), which the `jwks` step fills.
+    p.messages.push(api(
+        "Jwk",
+        vec![
+            field("kty", string()),
+            field("crv", string()),
+            field("alg", string()),
+            field("kid", string()),
+            field("x", string()),
+        ],
+    ));
+    let mut keys = msg_field("keys", "Jwk");
+    keys.repeated = true;
+    p.messages.push(api("Jwks", vec![keys]));
+    p.messages.push(api("JwksRequest", vec![]));
+    p.services[0].routes.push(Route {
+        name: "whoami".into(),
+        method: HttpMethod::Get,
+        path: "/whoami".into(),
+        request: "WhoamiRequest".into(),
+        response: "WhoamiView".into(),
+        status: 200,
+        steps: vec![
+            // The same 401 whatever is wrong with the token.
+            Step::VerifyJwt {
+                id: "k1".into(),
+                token: path("input.token"),
+                bearer: true,
+                source: JwksSource::Keys {
+                    key_envs: vec!["JWT_SIGNING_KEY".into()],
+                },
+                issuer: "orders".into(),
+                schema: "AccessClaims".into(),
+                bind: "claims".into(),
+            },
+            Step::Respond {
+                id: "k2".into(),
+                fields: vec![
+                    set("sub", path("claims.sub")),
+                    set("roles", path("claims.roles")),
+                ],
+                status: None,
+                cookies: vec![],
+            },
+        ],
+    });
+    p.services[0].routes.push(Route {
+        name: "jwks".into(),
+        method: HttpMethod::Get,
+        path: "/.well-known/jwks.json".into(),
+        request: "JwksRequest".into(),
+        response: "Jwks".into(),
+        status: 200,
+        steps: vec![
+            Step::Jwks {
+                id: "k3".into(),
+                key_envs: vec!["JWT_SIGNING_KEY".into()],
+                bind: "published".into(),
+            },
+            Step::Respond {
+                id: "k4".into(),
+                fields: vec![set("keys", path("published.keys"))],
+                status: None,
+                cookies: vec![],
+            },
+        ],
+    });
+    // The same check, for a browser that keeps the token in a cookie.
+    p.services[0].routes.push(Route {
+        name: "session".into(),
+        method: HttpMethod::Get,
+        path: "/session".into(),
+        request: "SessionRequest".into(),
+        response: "WhoamiView".into(),
+        status: 200,
+        steps: vec![
+            Step::VerifyJwt {
+                id: "k5".into(),
+                token: path("input.token"),
+                bearer: false,
+                source: JwksSource::Keys {
+                    key_envs: vec!["JWT_SIGNING_KEY".into()],
+                },
+                issuer: "orders".into(),
+                schema: "AccessClaims".into(),
+                bind: "claims".into(),
+            },
+            Step::Respond {
+                id: "k6".into(),
+                fields: vec![
+                    set("sub", path("claims.sub")),
+                    set("roles", path("claims.roles")),
+                ],
+                status: None,
+                cookies: vec![],
+            },
+        ],
+    });
+}

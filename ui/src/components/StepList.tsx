@@ -1,11 +1,12 @@
 import { useState } from 'react'
-import { declareProducer, ERROR_STATUSES, exprText, makeStep, newId, STEP_LABELS } from '../model'
+import { declareProducer, ensureJwksSchemas, ERROR_STATUSES, exprText, makeStep, newId, STEP_LABELS } from '../model'
 import { candidates, isSimpleScalar, SCALARS, type Scope, scopeAfter, scopesOf, scalar } from '../scope'
 import { useStore } from '../store'
 import type { CmpOp, Cookie, Condition, Diagnostic, FieldType, LogLevel, Project, SameSite, Step, StepType } from '../types'
 import { AssignmentsEditor } from './AssignmentsEditor'
 import { ExprEditor } from './ExprEditor'
 import { Icon } from './Icon'
+import { JwksBody, SignJwtBody, VerifyJwtBody } from './JwtSteps'
 import { OP_LABELS, SqlBody } from './SqlStep'
 import { Badge, Collapsible, Empty, IconButton, NumberInput } from './ui'
 
@@ -38,7 +39,7 @@ function literalDefault(kind: string, repeated: boolean): string | number | bool
 }
 
 
-const STEP_ORDER: StepType[] = ['publish', 'sql', 'callRpc', 'branch', 'let', 'log', 'respond', 'fail', 'rateLimit', 'verifyHmac', 'encrypt', 'decrypt', 'hashPassword', 'verifyPassword', 'randomToken', 'sha256', 'code']
+const STEP_ORDER: StepType[] = ['publish', 'sql', 'callRpc', 'branch', 'let', 'log', 'respond', 'fail', 'rateLimit', 'verifyHmac', 'signJwt', 'verifyJwt', 'jwks', 'encrypt', 'decrypt', 'hashPassword', 'verifyPassword', 'randomToken', 'sha256', 'code']
 
 export function StepList({ steps, base, scope, ctx, locate }: ListProps) {
   const project = useStore((s) => s.project)
@@ -74,6 +75,7 @@ export function StepList({ steps, base, scope, ctx, locate }: ListProps) {
           edit((p) => {
             const step = makeStep(type, p, endScope, ctx)
             // A signature is checked before anything else runs.
+            if (step.type === 'jwks') ensureJwksSchemas(p)
             if (step.type === 'verifyHmac') locate(p).unshift(step)
             else locate(p).push(step)
             // Publishing needs the service to own the topic: declare it, like drawing the arrow would.
@@ -94,7 +96,7 @@ function AddStep(props: { allowRespond: boolean; allowFail: boolean; allowSignat
       </button>
       {open && (
         <div className="widget-grid" role="menu">
-          {STEP_ORDER.filter((t) => (t !== 'respond' || props.allowRespond) && ((t !== 'fail' && t !== 'rateLimit') || props.allowFail) && (t !== 'verifyHmac' || props.allowSignature)).map((t) => (
+          {STEP_ORDER.filter((t) => (t !== 'respond' || props.allowRespond) && ((t !== 'fail' && t !== 'rateLimit') || props.allowFail) && (t !== 'verifyHmac' || props.allowSignature) && (t !== 'verifyJwt' || props.allowFail)).map((t) => (
             <button
               key={t}
               type="button"
@@ -164,6 +166,12 @@ function summary(step: Step): string {
       return `${step.max} par ${step.windowSecs} s`
     case 'verifyHmac':
       return step.header
+    case 'signJwt':
+      return `→ ${step.bind}`
+    case 'verifyJwt':
+      return `→ ${step.bind}`
+    case 'jwks':
+      return `→ ${step.bind}`
     case 'hashPassword':
     case 'randomToken':
     case 'sha256':
@@ -514,6 +522,13 @@ function StepBody(props: {
         <Empty>« Répondre » n’a de sens que dans un RPC ou une route.</Empty>
       )
     }
+
+    case 'signJwt':
+      return <SignJwtBody step={step} update={as<'signJwt'>(props.update)} scope={scope} />
+    case 'verifyJwt':
+      return <VerifyJwtBody step={step} update={as<'verifyJwt'>(props.update)} scope={scope} />
+    case 'jwks':
+      return <JwksBody step={step} update={as<'jwks'>(props.update)} />
 
     case 'verifyHmac': {
       const u = as<'verifyHmac'>(props.update)

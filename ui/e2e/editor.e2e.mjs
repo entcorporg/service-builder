@@ -671,6 +671,122 @@ describe('editor', () => {
     await page.close()
   })
 
+  it('signs a token, verifies one, and publishes the keys that check it', async () => {
+    const { page } = await open()
+    await page.locator('.tree button.sub', { hasText: '/orders/{order_id}' }).click()
+    await page.locator('.endpoint').waitFor()
+    const add = async (name) => {
+      await page.locator('.add-step-btn').last().click()
+      await page.getByRole('menuitem', { name }).click()
+    }
+    const step = (label) => page.locator('.card.step').filter({ has: page.locator('strong', { hasText: new RegExp(`^${label}$`) }) })
+
+    await add(/^Signer un jeton/)
+    const sign = step('Signer un jeton')
+    // It starts with a `sub` claim read from the request, 5 minutes, and the service as issuer.
+    assert.equal(await sign.getByLabel('Nom du claim').first().inputValue(), 'sub')
+    assert.equal(await sign.getByLabel('Émetteur du jeton').inputValue(), 'orders')
+    assert.equal(await sign.getByLabel('Durée de vie du jeton (secondes)').inputValue(), '300')
+    // The seed is an environment variable; `iss`, `iat` and `exp` are the step's, and `sub` cannot be left out.
+    await sign.getByLabel('Variable d’environnement de la graine').fill('signing-key')
+    await sign.getByRole('button', { name: /Retirer le claim sub/ }).click()
+    await settle(page)
+    const problems = await page.locator('.problems li').allInnerTexts()
+    assert.ok(problems.some((t) => t.includes('E_KEY_ENV')) && problems.some((t) => t.includes('E_JWT_NO_SUB')), problems.join(' | '))
+    await sign.getByLabel('Variable d’environnement de la graine').fill('JWT_SIGNING_KEY')
+    await sign.getByRole('button', { name: '+ Ajouter un claim' }).click()
+    await sign.getByLabel('Nom du claim').first().fill('sub')
+    await sign.getByLabel('Valeur du claim sub : source').selectOption('path')
+    await sign.getByLabel('Valeur du claim sub : champ').selectOption('input.order_id')
+
+    // Publishing keys creates the schemas of a JWKS when they are missing.
+    assert.equal(await page.locator('.tree').innerText().then((t) => t.includes('Jwks')), false)
+    await add(/^Publier les clés/)
+    await settle(page)
+    assert.ok((await page.locator('.tree').innerText()).includes('Jwks'))
+    assert.deepEqual(await page.locator('.tree button.mono, .tree button .mono').allTextContents().then((l) => l.filter((n) => n === 'Jwk' || n === 'Jwks').sort()), ['Jwk', 'Jwks'])
+
+    // Verifying reads the claims as an API schema.
+    await add(/^Vérifier un jeton/)
+    const verify = step('Vérifier un jeton')
+    await verify.getByLabel('Schéma des claims').selectOption('GetOrderRequest')
+    await verify.getByLabel('Jeton : champ').selectOption('input.order_id')
+    await verify.getByLabel('Origine des clés').selectOption('url')
+    assert.equal(await verify.getByLabel('Variable d’environnement de l’URL du JWKS').inputValue(), 'AUTH_JWKS_URL')
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/flows/api.rs"]').click()
+    const code = await page.locator('.code-main pre').innerText()
+    // rustfmt may wrap the call.
+    assert.match(code, /claims\.insert\(\s*"sub"\.to_string\(\),\s*eda_runtime::jwt::json!\(input\.order_id\.clone\(\)\),?\s*\);/)
+    assert.match(code, /eda_runtime::jwt::sign\("JWT_SIGNING_KEY", "orders", 300, claims\)\?/)
+    assert.match(code, /eda_runtime::jwt::public_keys\(&\["JWT_SIGNING_KEY"\]\)\?/)
+    assert.match(code, /let claims: pb::GetOrderRequest =/)
+    assert.match(code, /eda_runtime::jwt::Source::Url\("AUTH_JWKS_URL"\)/)
+    await page.locator('[role="treeitem"][data-path="services/orders/src/app/config.rs"]').click()
+    const config = await page.locator('.code-main pre').innerText()
+    assert.match(config, /eda_runtime::jwt::JwtKeys::from_env\("JWT_SIGNING_KEY"\)\?;/)
+    assert.match(config, /eda_runtime::jwt::jwks_url\("AUTH_JWKS_URL"\)\?;/)
+    await page.close()
+  })
+
+  it('reads a field of the request from a header or a cookie', async () => {
+    const { page } = await open()
+    await page.locator('.tree button.sub', { hasText: '/orders' }).first().click()
+    await page.locator('.endpoint').waitFor()
+    await page.getByRole('button', { name: '+ Ajouter un champ' }).first().click()
+    const source = page.getByRole('group', { name: 'Origine de field_3' })
+    // Only a required text field can come from a header; a list or a number never offers it.
+    assert.equal(await page.getByRole('group', { name: 'Origine de amount' }).count(), 0)
+    assert.equal(await page.getByRole('group', { name: 'Origine de items' }).count(), 0)
+    await source.getByLabel('Origine de field_3').selectOption('header')
+    assert.equal(await source.getByLabel('Nom de l’en-tête de field_3').inputValue(), 'Authorization')
+
+    // A name that cannot travel in a header is reported.
+    await source.getByLabel('Nom de l’en-tête de field_3').fill('not a header')
+    await source.getByLabel('Nom de l’en-tête de field_3').press('Enter')
+    await settle(page)
+    assert.ok((await page.locator('.problems li').allInnerTexts()).some((t) => t.includes('E_SOURCE_NAME')))
+    await source.getByLabel('Nom de l’en-tête de field_3').fill('X-Session')
+    await source.getByLabel('Nom de l’en-tête de field_3').press('Enter')
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+    // The client does not send it in the body any more.
+    assert.doesNotMatch(await page.locator('.json-preview pre').first().innerText(), /field_3/)
+    assert.match(await page.locator('.field-row .origin').last().innerText(), /en-tête X-Session/)
+
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/transport/http.rs"]').click()
+    let http = await page.locator('.code-main pre').innerText()
+    let handler = http.slice(http.indexOf('async fn handle_place_order'))
+    assert.match(handler, /headers: HeaderMap,/)
+    assert.match(handler, /input\.field_3 = headers\s*\.get\("x-session"\)/)
+
+    // A cookie is read through the runtime, which decodes it.
+    await page.getByRole('tab', { name: /Architecture/ }).click()
+    await page.locator('.tree button.sub', { hasText: '/orders' }).first().click()
+    await source.getByLabel('Origine de field_3').selectOption('cookie')
+    await settle(page)
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/transport/http.rs"]').click()
+    http = await page.locator('.code-main pre').innerText()
+    handler = http.slice(http.indexOf('async fn handle_place_order'))
+    assert.match(handler, /input\.field_3 = eda_runtime::http::cookie\(/)
+
+    // Back to the body: the headers are no longer taken.
+    await page.getByRole('tab', { name: /Architecture/ }).click()
+    await page.locator('.tree button.sub', { hasText: '/orders' }).first().click()
+    await source.getByLabel('Origine de field_3').selectOption('')
+    await settle(page)
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/transport/http.rs"]').click()
+    http = await page.locator('.code-main pre').innerText()
+    assert.doesNotMatch(http, /HeaderMap/)
+    await page.close()
+  })
+
   it('hides events, proto schemas and topics while an endpoint is open', async () => {
     const { page } = await open()
     const tree = page.locator('.tree')

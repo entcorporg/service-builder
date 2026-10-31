@@ -48,6 +48,7 @@ pub fn validate(project: &Project) -> Vec<Diagnostic> {
     c.project();
     c.messages();
     c.unused_rules();
+    c.unused_sources();
     c.topics();
     c.services();
     c.graph_warnings();
@@ -173,6 +174,32 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A field read from a header or a cookie is filled by the route that receives the schema: elsewhere (an
+    /// event, a nested schema) nothing would ever fill it.
+    fn unused_sources(&mut self) {
+        let direct: HashSet<&str> = self
+            .project
+            .services
+            .iter()
+            .flat_map(|s| s.routes.iter().map(|r| r.request.as_str()))
+            .collect();
+        for (i, m) in self.project.messages.iter().enumerate() {
+            if m.kind == MessageKind::Api
+                && m.fields.iter().any(|f| f.source.is_some())
+                && !direct.contains(m.name.as_str())
+            {
+                self.warn(
+                    "W_SOURCE_UNUSED",
+                    format!("/messages/{i}"),
+                    format!(
+                        "`{}` has fields read from headers or cookies, but no route receives it directly: they are never filled",
+                        m.name
+                    ),
+                );
+            }
+        }
+    }
+
     fn messages(&mut self) {
         let p = self.project;
         // Messages and services share the protobuf package namespace.
@@ -271,6 +298,7 @@ impl<'a> Checker<'a> {
                     );
                 }
                 self.field_rules(m, f, &fp);
+                self.field_source(m, f, &fp);
                 if f.repeated && f.optional {
                     self.error(
                         "E_REPEATED_OPTIONAL",
@@ -743,6 +771,55 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Where a field is read from the request: only the text fields of API schemas, under a name that can travel in
+    /// a header or a cookie.
+    fn field_source(&mut self, m: &Message, f: &Field, fp: &str) {
+        let Some(source) = &f.source else {
+            return;
+        };
+        let sp = format!("{fp}/source");
+        if m.kind != MessageKind::Api {
+            self.error(
+                "E_SOURCE_KIND",
+                &sp,
+                format!(
+                    "field `{}` is read from the request, but `{}` is {}: only API schemas come from a request",
+                    f.name,
+                    m.name,
+                    kind_label(m.kind)
+                ),
+            );
+        } else if !matches!(f.ty, FieldType::String | FieldType::Uuid) || f.repeated || f.optional {
+            self.error(
+                "E_SOURCE_TYPE",
+                &sp,
+                format!(
+                    "field `{}` is read from the request: it must be a single required string or uuid (empty when the request lacks it)",
+                    f.name
+                ),
+            );
+        }
+        let (what, name, extra) = match source {
+            RequestSource::Header { name } => ("header", name, ""),
+            RequestSource::Cookie { name } => ("cookie", name, "_."),
+        };
+        let valid = !name.is_empty()
+            && name.len() <= 100
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || extra.as_bytes().contains(&b));
+        if !valid {
+            self.error(
+                "E_SOURCE_NAME",
+                format!("{sp}/name"),
+                format!(
+                    "`{name}` is not a {what} name: letters, digits and `-`{} only, 100 characters at most",
+                    if extra.is_empty() { "" } else { ", `_` and `.`" }
+                ),
+            );
+        }
+    }
+
     /// The field that identifies an event: a single text or integer, since it becomes the key of a table.
     fn idempotent_field(&mut self, path: &str, message: &str, field: &str) {
         let Some(msg) = self.project.message(message) else {
@@ -868,6 +945,20 @@ impl<'a> Checker<'a> {
                     }
                     Some(_) => {}
                 }
+            }
+            for f in request
+                .fields
+                .iter()
+                .filter(|f| f.source.is_some() && params.contains(&f.name))
+            {
+                self.error(
+                    "E_SOURCE_PARAM",
+                    format!("{rp}/path"),
+                    format!(
+                        "field `{}` of `{}` is read from the request, and `{{{}}}` of the path fills it too",
+                        f.name, r.request, f.name
+                    ),
+                );
             }
             if !r.method.has_body() {
                 for f in request.fields.iter().filter(|f| !params.contains(&f.name)) {
@@ -1723,6 +1814,144 @@ impl<'a> Checker<'a> {
                 }
                 true
             }
+            Step::SignJwt {
+                key_env,
+                issuer,
+                ttl_secs,
+                claims,
+                bind,
+                ..
+            } => {
+                self.check_var_name(bind, &format!("{path}/bind"));
+                self.jwt_key_env(&format!("{path}/keyEnv"), key_env);
+                self.jwt_issuer(&format!("{path}/issuer"), issuer);
+                if !(1..=2_592_000).contains(ttl_secs) {
+                    self.error(
+                        "E_JWT_TTL",
+                        format!("{path}/ttlSecs"),
+                        "a token lives 1 second to 30 days (2592000)",
+                    );
+                }
+                let mut seen = HashSet::new();
+                for (i, claim) in claims.iter().enumerate() {
+                    let cp = format!("{path}/claims/{i}");
+                    let name = claim.field.as_str();
+                    let valid_name = name.starts_with(|c: char| c.is_ascii_lowercase())
+                        && name.len() <= 32
+                        && name
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+                    if !valid_name {
+                        self.error(
+                            "E_JWT_CLAIM_NAME",
+                            format!("{cp}/field"),
+                            format!("claim name `{name}` must be lower case letters, digits and `_`, 32 characters at most"),
+                        );
+                    } else if matches!(name, "iss" | "iat" | "exp") {
+                        self.error(
+                            "E_JWT_CLAIM_RESERVED",
+                            format!("{cp}/field"),
+                            format!("`{name}` is set by the step: the issuer, and the issue and expiry times"),
+                        );
+                    }
+                    if !seen.insert(name) {
+                        self.error(
+                            "E_JWT_CLAIM_DUPLICATE",
+                            format!("{cp}/field"),
+                            format!("claim `{name}` is set twice"),
+                        );
+                    }
+                    // A claim is JSON: text, number, boolean, or a list or an optional of those.
+                    if let Some(t) =
+                        self.check_expr(scope, &claim.value, None, &format!("{cp}/value"))
+                        && (t.is_message()
+                            || matches!(t.ty, FieldType::Bytes | FieldType::Timestamp))
+                    {
+                        self.error(
+                            "E_JWT_CLAIM_TYPE",
+                            format!("{cp}/value"),
+                            format!("claim `{name}` is a {t}: a claim is a text, a number, a boolean, or a list of those"),
+                        );
+                    }
+                }
+                if !seen.contains("sub") {
+                    self.error(
+                        "E_JWT_NO_SUB",
+                        format!("{path}/claims"),
+                        "an access token names who it is for: add a `sub` claim (verifying a token requires it)",
+                    );
+                }
+                scope.bind(bind.clone(), TypeRef::scalar(FieldType::String));
+                false
+            }
+            Step::VerifyJwt {
+                token,
+                source,
+                issuer,
+                schema,
+                bind,
+                ..
+            } => {
+                if !matches!(env.handler, Handler::Route { .. }) {
+                    self.error(
+                        "E_JWT_OUTSIDE_ROUTE",
+                        path,
+                        "a refused token is a 401: verifying one only makes sense in an HTTP route",
+                    );
+                }
+                self.check_var_name(bind, &format!("{path}/bind"));
+                self.jwt_issuer(&format!("{path}/issuer"), issuer);
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, token, Some(&text), &format!("{path}/token"));
+                match source {
+                    JwksSource::Keys { key_envs } => {
+                        if key_envs.is_empty() {
+                            self.error(
+                                "E_JWT_KEYS",
+                                format!("{path}/source/keyEnvs"),
+                                "name at least one seed whose public key checks the token",
+                            );
+                        }
+                        for (i, k) in key_envs.iter().enumerate() {
+                            self.jwt_key_env(&format!("{path}/source/keyEnvs/{i}"), k);
+                        }
+                    }
+                    JwksSource::Url { url_env } => {
+                        self.jwt_key_env(&format!("{path}/source/urlEnv"), url_env)
+                    }
+                }
+                match p.message(schema) {
+                    Some(m) if m.kind == MessageKind::Api => {}
+                    Some(_) => self.error(
+                        "E_JWT_SCHEMA",
+                        format!("{path}/schema"),
+                        format!("`{schema}` is not an API schema: the claims are read as JSON"),
+                    ),
+                    None => self.error(
+                        "E_JWT_SCHEMA",
+                        format!("{path}/schema"),
+                        format!("unknown schema `{schema}`: declare an API schema with the claims to read (`sub`, `roles`...)"),
+                    ),
+                }
+                scope.bind(bind.clone(), TypeRef::message(schema));
+                false
+            }
+            Step::Jwks { key_envs, bind, .. } => {
+                self.check_var_name(bind, &format!("{path}/bind"));
+                if key_envs.is_empty() {
+                    self.error(
+                        "E_JWT_KEYS",
+                        format!("{path}/keyEnvs"),
+                        "name at least one seed to publish the public key of",
+                    );
+                }
+                for (i, k) in key_envs.iter().enumerate() {
+                    self.jwt_key_env(&format!("{path}/keyEnvs/{i}"), k);
+                }
+                self.jwks_schema(path);
+                scope.bind(bind.clone(), TypeRef::message("Jwks"));
+                false
+            }
             Step::Encrypt {
                 key_env,
                 input,
@@ -1903,6 +2132,51 @@ impl<'a> Checker<'a> {
                 }
                 false
             }
+        }
+    }
+
+    /// The name of an environment variable.
+    fn jwt_key_env(&mut self, path: &str, name: &str) {
+        if !is_env_name(name) {
+            self.error(
+                "E_KEY_ENV",
+                path,
+                format!("`{name}` is not an environment variable name (e.g. `JWT_SIGNING_KEY`)"),
+            );
+        }
+    }
+
+    fn jwt_issuer(&mut self, path: &str, issuer: &str) {
+        if issuer.trim().is_empty() || issuer.chars().count() > 100 {
+            self.error(
+                "E_JWT_ISSUER",
+                path,
+                "the issuer is a name of 1 to 100 characters, the same on the service that signs and on those that verify",
+            );
+        }
+    }
+
+    /// The step `jwks` fills the API schema `Jwks`, a list of `Jwk`: the shape of a JWKS (RFC 7517).
+    fn jwks_schema(&mut self, path: &str) {
+        let p = self.project;
+        let ok = p.message("Jwks").is_some_and(|m| {
+            m.kind == MessageKind::Api
+                && m.field("keys").is_some_and(|f| {
+                    f.repeated && matches!(&f.ty, FieldType::Message { name } if name == "Jwk")
+                })
+        }) && p.message("Jwk").is_some_and(|m| {
+            m.kind == MessageKind::Api
+                && ["kty", "crv", "alg", "kid", "x"].iter().all(|n| {
+                    m.field(n)
+                        .is_some_and(|f| f.ty == FieldType::String && !f.repeated && !f.optional)
+                })
+        });
+        if !ok {
+            self.error(
+                "E_JWKS_SCHEMA",
+                path,
+                "publishing a JWKS needs the API schemas `Jwks` (`keys`: a list of `Jwk`) and `Jwk` (`kty`, `crv`, `alg`, `kid`, `x`: texts)",
+            );
         }
     }
 
@@ -2238,6 +2512,40 @@ mod tests {
             .filter(|d| d.severity == Severity::Error)
             .map(|d| d.code)
             .collect()
+    }
+
+    #[test]
+    fn the_showcase_is_valid_without_warnings_and_shows_every_step_type() {
+        let p = sample::showcase();
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+        let mut kinds = std::collections::BTreeSet::new();
+        for s in &p.services {
+            for step in s.handler_steps() {
+                step.walk(&mut |x| {
+                    kinds.insert(
+                        serde_json::to_value(x).unwrap()["type"]
+                            .as_str()
+                            .unwrap()
+                            .to_string(),
+                    );
+                });
+            }
+        }
+        // A new step type has to be added to the showcase, or an agent never sees it used.
+        let schema = json_schema();
+        let all: Vec<String> = schema["$defs"]["Step"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| {
+                v["properties"]["type"]["const"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        let missing: Vec<_> = all.iter().filter(|t| !kinds.contains(*t)).collect();
+        assert!(missing.is_empty(), "the showcase never uses {missing:?}");
     }
 
     #[test]
@@ -3652,6 +3960,123 @@ mod tests {
         );
     }
 
+    fn source_of<'a>(p: &'a mut Project, message: &str) -> &'a mut Field {
+        p.messages
+            .iter_mut()
+            .find(|m| m.name == message)
+            .and_then(|m| m.fields.first_mut())
+            .unwrap()
+    }
+
+    #[test]
+    fn a_field_can_be_read_from_a_header_or_a_cookie() {
+        let p = with_jwt();
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+        // The fields that carry the token are filled by the route, not by the client.
+        assert!(matches!(
+            &p.message("WhoamiRequest").unwrap().fields[0].source,
+            Some(RequestSource::Header { name }) if name == "Authorization"
+        ));
+        assert!(matches!(
+            &p.message("SessionRequest").unwrap().fields[0].source,
+            Some(RequestSource::Cookie { name }) if name == "access_token"
+        ));
+    }
+
+    #[test]
+    fn where_a_field_is_read_from_is_checked() {
+        let mut p = with_jwt();
+        source_of(&mut p, "WhoamiRequest").ty = FieldType::Int32;
+        assert!(errors(&p).contains(&"E_SOURCE_TYPE".to_string()));
+        let mut p = with_jwt();
+        source_of(&mut p, "WhoamiRequest").optional = true;
+        assert!(errors(&p).contains(&"E_SOURCE_TYPE".to_string()));
+        let mut p = with_jwt();
+        source_of(&mut p, "WhoamiRequest").repeated = true;
+        assert!(errors(&p).contains(&"E_SOURCE_TYPE".to_string()));
+        // Only an API schema comes from a request.
+        let mut p = with_jwt();
+        p.messages
+            .iter_mut()
+            .find(|m| m.name == "WhoamiRequest")
+            .unwrap()
+            .kind = MessageKind::Event;
+        assert!(errors(&p).contains(&"E_SOURCE_KIND".to_string()));
+        // A name that cannot travel in a header or a cookie.
+        for (source, ok) in [
+            (
+                RequestSource::Header {
+                    name: "X-Request-Id".into(),
+                },
+                true,
+            ),
+            (
+                RequestSource::Header {
+                    name: "X Request".into(),
+                },
+                false,
+            ),
+            (
+                RequestSource::Header {
+                    name: "X:Id".into(),
+                },
+                false,
+            ),
+            (RequestSource::Header { name: "a_b".into() }, false),
+            (
+                RequestSource::Header {
+                    name: String::new(),
+                },
+                false,
+            ),
+            (
+                RequestSource::Cookie {
+                    name: "access_token".into(),
+                },
+                true,
+            ),
+            (RequestSource::Cookie { name: "a=b".into() }, false),
+            (RequestSource::Cookie { name: "a;b".into() }, false),
+            (RequestSource::Cookie { name: "é".into() }, false),
+            (
+                RequestSource::Cookie {
+                    name: "x".repeat(101),
+                },
+                false,
+            ),
+        ] {
+            let mut p = with_jwt();
+            source_of(&mut p, "SessionRequest").source = Some(source.clone());
+            assert_eq!(
+                !errors(&p).contains(&"E_SOURCE_NAME".to_string()),
+                ok,
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_parameter_and_a_header_cannot_fill_the_same_field() {
+        let mut p = with_jwt();
+        p.services[0].routes[2].path = "/whoami/{token}".into();
+        assert!(errors(&p).contains(&"E_SOURCE_PARAM".to_string()));
+    }
+
+    #[test]
+    fn a_field_read_from_the_request_that_no_route_receives_is_a_warning() {
+        let mut p = with_jwt();
+        let warned = |p: &Project| {
+            validate(p)
+                .into_iter()
+                .filter(|d| d.code == "W_SOURCE_UNUSED")
+                .count()
+        };
+        assert_eq!(warned(&p), 0);
+        // The route is gone: nothing fills the header any more.
+        p.services[0].routes.retain(|r| r.name != "session");
+        assert_eq!(warned(&p), 1);
+    }
+
     fn with_seal() -> Project {
         let mut p = sample::orders();
         sample::add_sealed_text(&mut p);
@@ -3781,6 +4206,231 @@ mod tests {
             .collect();
         assert_eq!(warned.len(), 2, "{warned:?}");
         assert!(warned[0].message.contains("never checked"));
+    }
+
+    fn with_jwt() -> Project {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        p
+    }
+
+    /// The `whoami` route is the third; its `verifyJwt` is the first step, the `jwks` route is the fourth.
+    fn jwt_step(p: &mut Project, route: usize) -> &mut Step {
+        &mut p.services[0].routes[route].steps[0]
+    }
+
+    #[test]
+    fn a_token_can_be_signed_checked_and_its_keys_published() {
+        let p = with_jwt();
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+        // A signed claim keeps its type: the verifying side reads `claims.roles` as a list of texts, as the schema says.
+        let mut p = with_jwt();
+        if let Step::Respond { fields, .. } = &mut p.services[0].routes[2].steps[1] {
+            fields[1].value = Expr::Path {
+                path: "claims.sub".into(),
+            };
+        }
+        assert!(
+            errors(&p).contains(&"E_TYPE_MISMATCH".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+    }
+
+    #[test]
+    fn the_claims_of_a_token_are_checked() {
+        // (expected code, how to break the step)
+        type Case<'a> = (&'a str, &'a dyn Fn(&mut Step));
+        fn sign(step: &mut Step) -> &mut Vec<Assignment> {
+            match step {
+                Step::SignJwt { claims, .. } => claims,
+                _ => panic!("not a signJwt"),
+            }
+        }
+        let cases: [Case; 7] = [
+            ("E_JWT_CLAIM_RESERVED", &|s| {
+                sign(s).push(Assignment {
+                    field: "exp".into(),
+                    value: Expr::Literal { value: 1.into() },
+                })
+            }),
+            ("E_JWT_CLAIM_RESERVED", &|s| sign(s)[0].field = "iss".into()),
+            ("E_JWT_CLAIM_NAME", &|s| {
+                sign(s)[0].field = "Sub Ject".into()
+            }),
+            ("E_JWT_CLAIM_DUPLICATE", &|s| {
+                let again = sign(s)[0].clone();
+                sign(s).push(again)
+            }),
+            ("E_JWT_NO_SUB", &|s| sign(s)[0].field = "uid".into()),
+            ("E_JWT_CLAIM_TYPE", &|s| {
+                sign(s)[0].value = Expr::Path {
+                    path: "input".into(),
+                }
+            }),
+            ("E_UNKNOWN_PATH", &|s| {
+                sign(s)[0].value = Expr::Path {
+                    path: "nope".into(),
+                }
+            }),
+        ];
+        for (code, change) in cases {
+            let mut p = with_jwt();
+            // Add the step to a route of the sample.
+            let mut step = Step::SignJwt {
+                id: "j".into(),
+                key_env: "JWT_SIGNING_KEY".into(),
+                issuer: "orders".into(),
+                ttl_secs: 300,
+                claims: vec![Assignment {
+                    field: "sub".into(),
+                    value: Expr::Path {
+                        path: "input.order_id".into(),
+                    },
+                }],
+                bind: "token".into(),
+            };
+            change(&mut step);
+            p.services[0].routes[1].steps.insert(0, step);
+            assert!(
+                errors(&p).contains(&code.to_string()),
+                "{code}: {:?}",
+                errors(&p)
+            );
+        }
+        // Lifetime, issuer and key.
+        for (code, change) in [
+            (
+                "E_JWT_TTL",
+                &(|s: &mut Step| {
+                    if let Step::SignJwt { ttl_secs, .. } = s {
+                        *ttl_secs = 0
+                    }
+                }) as &dyn Fn(&mut Step),
+            ),
+            ("E_JWT_TTL", &|s| {
+                if let Step::SignJwt { ttl_secs, .. } = s {
+                    *ttl_secs = 2_592_001
+                }
+            }),
+            ("E_JWT_ISSUER", &|s| {
+                if let Step::SignJwt { issuer, .. } = s {
+                    issuer.clear()
+                }
+            }),
+            ("E_KEY_ENV", &|s| {
+                if let Step::SignJwt { key_env, .. } = s {
+                    *key_env = "signing-key".into()
+                }
+            }),
+        ] {
+            let mut p = with_jwt();
+            let mut step = Step::SignJwt {
+                id: "j".into(),
+                key_env: "JWT_SIGNING_KEY".into(),
+                issuer: "orders".into(),
+                ttl_secs: 300,
+                claims: vec![Assignment {
+                    field: "sub".into(),
+                    value: Expr::Path {
+                        path: "input.order_id".into(),
+                    },
+                }],
+                bind: "token".into(),
+            };
+            change(&mut step);
+            p.services[0].routes[1].steps.insert(0, step);
+            assert!(
+                errors(&p).contains(&code.to_string()),
+                "{code}: {:?}",
+                errors(&p)
+            );
+        }
+    }
+
+    #[test]
+    fn verifying_a_token_and_publishing_keys_are_checked() {
+        type Case<'a> = (&'a str, usize, &'a dyn Fn(&mut Step));
+        let cases: [Case; 8] = [
+            ("E_JWT_SCHEMA", 2, &|s| {
+                if let Step::VerifyJwt { schema, .. } = s {
+                    *schema = "Nope".into()
+                }
+            }),
+            ("E_JWT_SCHEMA", 2, &|s| {
+                if let Step::VerifyJwt { schema, .. } = s {
+                    *schema = "Customer".into()
+                }
+            }),
+            ("E_JWT_KEYS", 2, &|s| {
+                if let Step::VerifyJwt { source, .. } = s {
+                    *source = JwksSource::Keys { key_envs: vec![] }
+                }
+            }),
+            ("E_KEY_ENV", 2, &|s| {
+                if let Step::VerifyJwt { source, .. } = s {
+                    *source = JwksSource::Url {
+                        url_env: "auth url".into(),
+                    }
+                }
+            }),
+            ("E_JWT_ISSUER", 2, &|s| {
+                if let Step::VerifyJwt { issuer, .. } = s {
+                    issuer.clear()
+                }
+            }),
+            ("E_TYPE_MISMATCH", 2, &|s| {
+                if let Step::VerifyJwt { token, .. } = s {
+                    *token = Expr::Path {
+                        path: "input".into(),
+                    }
+                }
+            }),
+            ("E_JWT_KEYS", 3, &|s| {
+                if let Step::Jwks { key_envs, .. } = s {
+                    key_envs.clear()
+                }
+            }),
+            ("E_KEY_ENV", 3, &|s| {
+                if let Step::Jwks { key_envs, .. } = s {
+                    key_envs[0] = "lower".into()
+                }
+            }),
+        ];
+        for (code, route, change) in cases {
+            let mut p = with_jwt();
+            change(jwt_step(&mut p, route));
+            assert!(
+                errors(&p).contains(&code.to_string()),
+                "{code}: {:?}",
+                errors(&p)
+            );
+        }
+        // The JWKS needs its two schemas, in the shape of RFC 7517.
+        let mut p = with_jwt();
+        p.messages.retain(|m| m.name != "Jwk");
+        assert!(
+            errors(&p).contains(&"E_JWKS_SCHEMA".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+        let mut p = with_jwt();
+        p.messages
+            .iter_mut()
+            .find(|m| m.name == "Jwk")
+            .unwrap()
+            .fields
+            .retain(|f| f.name != "kid");
+        assert!(errors(&p).contains(&"E_JWKS_SCHEMA".to_string()));
+        // Refusing a token is a 401: HTTP only.
+        let mut p = with_jwt();
+        let step = jwt_step(&mut p, 2).clone();
+        p.services[0].rpcs[0].steps.insert(0, step);
+        assert!(
+            errors(&p).contains(&"E_JWT_OUTSIDE_ROUTE".to_string()),
+            "{:?}",
+            errors(&p)
+        );
     }
 
     #[test]

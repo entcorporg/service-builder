@@ -124,6 +124,11 @@ pub struct Field {
     /// API schemas; the first rule that fails is a 400.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<Rule>,
+    /// Where an HTTP route reads this field instead of the body or the query string: a request header or a cookie.
+    /// Only on text fields of API schemas. The route always overwrites it (empty when the request lacks it), so
+    /// that what a client sends in the body can never stand for a header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<RequestSource>,
 }
 
 impl Field {
@@ -135,8 +140,19 @@ impl Field {
             optional: false,
             tag: None,
             rules: vec![],
+            source: None,
         }
     }
+}
+
+/// A part of an HTTP request other than its body, that fills a field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "from", rename_all = "camelCase")]
+pub enum RequestSource {
+    /// A request header, by name (`Authorization`, `X-Request-Id`...), whatever its case.
+    Header { name: String },
+    /// A cookie of the `Cookie` header, by name, percent-decoded.
+    Cookie { name: String },
 }
 
 /// A rule on a text field.
@@ -732,6 +748,44 @@ pub enum Step {
         input: Expr,
         bind: String,
     },
+    /// Signs an access token with Ed25519 (EdDSA). The claims are the author's (`sub`, `tid`, `roles`...) plus `iss`, `iat`
+    /// and `exp` (now + `ttl_secs`), which cannot be overridden. The seed is 32 bytes as 64 hexadecimal characters in the
+    /// environment variable `key_env`. The variable `bind` receives the token, a text.
+    #[serde(rename_all = "camelCase")]
+    SignJwt {
+        id: String,
+        key_env: String,
+        issuer: String,
+        ttl_secs: u32,
+        claims: Vec<Assignment>,
+        bind: String,
+    },
+    /// Checks a token: the algorithm is EdDSA only, the issuer, `exp` (5 seconds of tolerance) and `sub` are required,
+    /// and the key is picked by the `kid` of the token. Anything wrong is the same 401. `bind` receives the claims as
+    /// the API schema `schema`, which lists the claims the flow reads (`sub`, `roles`...): a claim the token lacks has
+    /// the default value of its field.
+    #[serde(rename_all = "camelCase")]
+    VerifyJwt {
+        id: String,
+        /// The token: a text, or an `Authorization` header when `bearer` is set.
+        token: Expr,
+        /// The token is the value of an `Authorization: Bearer <token>` header: the prefix is taken off.
+        #[serde(default)]
+        bearer: bool,
+        source: JwksSource,
+        issuer: String,
+        schema: String,
+        bind: String,
+    },
+    /// Publishes the public keys of these seeds as a JWKS (RFC 7517), into a variable of the API schema `Jwks`
+    /// (`keys`: a list of `Jwk`: `kty`, `crv`, `alg`, `kid`, `x`). The first seed signs: a rotation puts the new one
+    /// first and keeps the old one listed until the tokens it signed have expired. Nothing private is ever published.
+    #[serde(rename_all = "camelCase")]
+    Jwks {
+        id: String,
+        key_envs: Vec<String>,
+        bind: String,
+    },
     /// AES-256-GCM of a text, for what is stored at rest (a TOTP secret, an API token). The key is 32 bytes as 64
     /// hexadecimal characters in the environment variable `key_env`. The result is `hex(nonce || ciphertext)` with
     /// a random nonce, so the same text never gives the same result twice.
@@ -786,6 +840,19 @@ pub enum Step {
 pub struct SqlMissing {
     pub status: u16,
     pub message: String,
+}
+
+/// Where the public keys that check a token come from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum JwksSource {
+    /// The seeds of this service, in the environment: it checks what it signs.
+    #[serde(rename_all = "camelCase")]
+    Keys { key_envs: Vec<String> },
+    /// The environment variable that holds the URL (`http://host:port/path`) of the JWKS of the service that signs. It is
+    /// fetched once, and again when a token names a key that is not in it (a rotation), never more than every 10 seconds.
+    #[serde(rename_all = "camelCase")]
+    Url { url_env: String },
 }
 
 /// A `Set-Cookie` of a route response. Safe by default: `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`.
@@ -879,6 +946,9 @@ impl Step {
             | Step::RateLimit { id, .. }
             | Step::VerifyHmac { id, .. }
             | Step::Encrypt { id, .. }
+            | Step::SignJwt { id, .. }
+            | Step::VerifyJwt { id, .. }
+            | Step::Jwks { id, .. }
             | Step::Decrypt { id, .. }
             | Step::HashPassword { id, .. }
             | Step::VerifyPassword { id, .. }

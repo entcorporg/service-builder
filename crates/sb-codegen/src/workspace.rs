@@ -12,6 +12,7 @@ const RUNTIME_LIB: &str = include_str!("../templates/runtime/lib.rs");
 const RUNTIME_OUTBOX: &str = include_str!("../templates/runtime/outbox.rs");
 const RUNTIME_DB: &str = include_str!("../templates/runtime/db.rs");
 const RUNTIME_DEDUP: &str = include_str!("../templates/runtime/dedup.rs");
+const RUNTIME_JWT: &str = include_str!("../templates/runtime/jwt.rs");
 const RUNTIME_JOBS: &str = include_str!("../templates/runtime/jobs.rs");
 const RUNTIME_CRYPTO: &str = include_str!("../templates/runtime/crypto.rs");
 const RUNTIME_VALIDATION: &str = include_str!("../templates/runtime/validation.rs");
@@ -40,6 +41,7 @@ pub fn files(project: &Project) -> Vec<GeneratedFile> {
         GeneratedFile::new("runtime/src/crypto.rs", RUNTIME_CRYPTO),
         GeneratedFile::new("runtime/src/dedup.rs", RUNTIME_DEDUP),
         GeneratedFile::new("runtime/src/jobs.rs", RUNTIME_JOBS),
+        GeneratedFile::new("runtime/src/jwt.rs", RUNTIME_JWT),
         GeneratedFile::new("runtime/src/rate_limit.rs", RUNTIME_RATE_LIMIT),
         GeneratedFile::new("runtime/src/validation.rs", RUNTIME_VALIDATION),
         GeneratedFile::new("runtime/src/webhook.rs", RUNTIME_WEBHOOK),
@@ -84,6 +86,10 @@ tracing = "0.1"
 tracing-subscriber = {{ version = "0.3", features = ["env-filter"] }}
 uuid = {{ version = "1", features = ["v4"] }}
 aes-gcm = "0.10"
+base64 = "0.22"
+ed25519-dalek = "2.1"
+jsonwebtoken = {{ version = "11", default-features = false, features = ["rust_crypto"] }}
+serde_json = "1"
 argon2 = "0.6"
 sha2 = "0.11"
 rand = "0.10"

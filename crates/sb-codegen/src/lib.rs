@@ -158,6 +158,7 @@ mod tests {
                 "runtime/src/db.rs",
                 "runtime/src/dedup.rs",
                 "runtime/src/jobs.rs",
+                "runtime/src/jwt.rs",
                 "runtime/src/lib.rs",
                 "runtime/src/outbox.rs",
                 "runtime/src/rate_limit.rs",
@@ -962,6 +963,118 @@ mod tests {
                 "services/orders/src/transport/http.rs"
             )
             .contains("fn invalid(")
+        );
+    }
+
+    #[test]
+    fn headers_and_cookies_fill_the_fields_they_are_declared_for() {
+        let files = generate(&sample::showcase()).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        let compact = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let whoami = &http[http.find("async fn handle_whoami(").unwrap()..];
+        let whoami = compact(&whoami[..whoami.find("\n}\n").unwrap()]);
+        // The header is read whatever its case, and always overwrites what the query string said.
+        assert!(whoami.contains("headers: HeaderMap,"), "{whoami}");
+        assert!(
+            whoami.contains("input.token = headers.get(\"authorization\")"),
+            "{whoami}"
+        );
+        let session = &http[http.find("async fn handle_session(").unwrap()..];
+        let session = compact(&session[..session.find("\n}\n").unwrap()]);
+        assert!(session.contains("eda_runtime::http::cookie("), "{session}");
+        assert!(session.contains("\"access_token\""), "{session}");
+        // The fields are filled before the flow runs.
+        assert!(
+            session.find("input.token =").unwrap() < session.find("flows::api::session").unwrap()
+        );
+        // A route that reads nothing from the request does not take the headers.
+        let jwks = &http[http.find("async fn handle_jwks(").unwrap()..];
+        assert!(!jwks[..jwks.find("\n}\n").unwrap()].contains("HeaderMap"));
+    }
+
+    #[test]
+    fn the_showcase_generates_a_workspace_of_every_feature() {
+        let files = generate(&sample::showcase()).unwrap();
+        for path in [
+            "services/orders/src/flows/jobs.rs",
+            "services/orders/src/transport/scheduler.rs",
+            "services/orders/src/app/schema.rs",
+            "runtime/src/webhook.rs",
+            "runtime/src/crypto.rs",
+        ] {
+            assert!(files.iter().any(|f| f.path == path), "{path}");
+        }
+        let schema = file(&files, "services/orders/src/app/schema.rs");
+        assert!(
+            schema.contains("FOREIGN KEY")
+                && schema.contains("JSONB")
+                && schema.contains("CREATE INDEX")
+        );
+    }
+
+    #[test]
+    fn tokens_are_signed_checked_and_their_keys_published() {
+        let mut p = sample::orders();
+        sample::add_login(&mut p);
+        sample::add_jwt(&mut p);
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&p)),
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        // Signed: the author's claims, each as the JSON of its own type; the standard ones are the step's.
+        assert!(
+            api.contains(
+                "claims.insert(\"sub\".to_string(), eda_runtime::jwt::json!(input.email.clone()));"
+            ),
+            "{api}"
+        );
+        assert!(api.contains(
+            "claims.insert(\"roles\".to_string(), eda_runtime::jwt::json!([\"member\"]));"
+        ));
+        assert!(
+            api.contains("eda_runtime::jwt::sign(\"JWT_SIGNING_KEY\", \"orders\", 300, claims)?")
+        );
+        // Checked: read as the schema of the claims, with the key of the environment.
+        assert!(api.contains("let claims: pb::AccessClaims ="));
+        assert!(api.contains("eda_runtime::jwt::verify(eda_runtime::jwt::Source::Keys(&[\"JWT_SIGNING_KEY\"]), \"orders\", &token).await?"));
+        // Published: the public key, in the shape of a JWKS.
+        assert!(api.contains("eda_runtime::jwt::public_keys(&[\"JWT_SIGNING_KEY\"])?"));
+        assert!(api.contains("pb::Jwk { kty: k.kty, crv: k.crv, alg: k.alg, kid: k.kid, x: k.x, ..Default::default() }"));
+        // A service that cannot sign or verify does not start.
+        let config = file(&files, "services/orders/src/app/config.rs");
+        assert_eq!(
+            config
+                .matches("eda_runtime::jwt::JwtKeys::from_env(\"JWT_SIGNING_KEY\")?;")
+                .count(),
+            1,
+            "{config}"
+        );
+        assert!(file(&files, "runtime/Cargo.toml").contains("jsonwebtoken.workspace = true"));
+        assert!(file(&files, "Cargo.toml").contains("jsonwebtoken = { version = \"11\""));
+    }
+
+    #[test]
+    fn a_remote_jwks_and_a_bearer_header_are_read_from_the_environment() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        if let sb_model::Step::VerifyJwt { source, bearer, .. } =
+            &mut p.services[0].routes[2].steps[0]
+        {
+            *source = sb_model::JwksSource::Url {
+                url_env: "AUTH_JWKS_URL".into(),
+            };
+            *bearer = true;
+        }
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        assert!(api.contains("let token = eda_runtime::jwt::bearer(&token);"));
+        assert!(api.contains("eda_runtime::jwt::Source::Url(\"AUTH_JWKS_URL\")"));
+        assert!(
+            file(&files, "services/orders/src/app/config.rs")
+                .contains("eda_runtime::jwt::jwks_url(\"AUTH_JWKS_URL\")?;")
         );
     }
 

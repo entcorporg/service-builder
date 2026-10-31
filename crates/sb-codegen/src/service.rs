@@ -17,8 +17,8 @@ use sb_model::names::route_params;
 use sb_model::names::{shouty, snake, topic_const};
 use sb_model::typing::{Scope, TypeRef};
 use sb_model::{
-    Column, ColumnType, DEFAULT_HTTP_PORT, Expr, FieldType, HttpMethod, Project, Rule, Service,
-    SqlOp, Step, sql_row_name,
+    Column, ColumnType, DEFAULT_HTTP_PORT, Expr, FieldType, HttpMethod, Project, RequestSource,
+    Rule, Service, SqlOp, Step, sql_row_name,
 };
 
 use crate::expr::{condition_code, log_code, lower, rust_let_type, struct_literal};
@@ -344,6 +344,18 @@ fn config_rs(project: &Project, service: &Service, publishes: bool) -> String {
         c.line("// The secrets of the signed webhooks: a service that cannot verify them does not start.");
         for env in &secrets {
             c.line(format!("eda_runtime::webhook::secret({env:?})?;"));
+        }
+    }
+    let (seeds, urls) = jwt_settings(service);
+    if !seeds.is_empty() || !urls.is_empty() {
+        c.line(
+            "// The keys of the tokens: a service that cannot sign or verify them does not start.",
+        );
+        for env in &seeds {
+            c.line(format!("eda_runtime::jwt::JwtKeys::from_env({env:?})?;"));
+        }
+        for env in &urls {
+            c.line(format!("eda_runtime::jwt::jwks_url({env:?})?;"));
         }
     }
     let keys = encryption_keys(service);
@@ -813,11 +825,17 @@ fn http_rs(project: &Project, service: &Service) -> String {
                 ""
             }
     ));
-    c.line(if service.routes.iter().any(|r| hmac_of(r).is_some()) {
-        "    http::{HeaderMap, HeaderValue, StatusCode},"
-    } else {
-        "    http::{HeaderValue, StatusCode},"
-    });
+    c.line(
+        if service
+            .routes
+            .iter()
+            .any(|r| hmac_of(r).is_some() || !sourced_fields(project, r).is_empty())
+        {
+            "    http::{HeaderMap, HeaderValue, StatusCode},"
+        } else {
+            "    http::{HeaderValue, StatusCode},"
+        },
+    );
     c.line("    response::{IntoResponse, Response},");
     c.line(format!("    routing::{{{}}},", verbs.join(", ")));
     c.line("};");
@@ -877,7 +895,12 @@ fn http_rs(project: &Project, service: &Service) -> String {
             202 => "StatusCode::ACCEPTED",
             _ => "StatusCode::OK",
         };
-        let m = if params.is_empty() { "" } else { "mut " };
+        let sourced = sourced_fields(project, r);
+        let m = if params.is_empty() && sourced.is_empty() {
+            ""
+        } else {
+            "mut "
+        };
         c.blank();
         c.line(format!("/// `{} {}`", r.method.as_str(), r.path));
         c.line(format!("async fn handle_{}(", r.name));
@@ -891,6 +914,13 @@ fn http_rs(project: &Project, service: &Service) -> String {
             // The signature covers the exact bytes: they are read as JSON only once it checks out.
             c.line("headers: HeaderMap,");
             c.line("body: Bytes,");
+        } else if !sourced.is_empty() {
+            c.line("headers: HeaderMap,");
+            c.line(if r.method.has_body() {
+                format!("Json({m}input): Json<pb::{}>,", r.request)
+            } else {
+                format!("Query({m}input): Query<pb::{}>,", r.request)
+            });
         } else {
             c.line(if r.method.has_body() {
                 format!("Json({m}input): Json<pb::{}>,", r.request)
@@ -921,6 +951,18 @@ fn http_rs(project: &Project, service: &Service) -> String {
         }
         for param in &params {
             c.line(format!("input.{param} = param(&path, {param:?})?;"));
+        }
+        for (field, source) in &sourced {
+            // Always overwritten, so that nothing a client puts in the body or the query stands for a header.
+            c.line(match source {
+                RequestSource::Header { name } => format!(
+                    "input.{field} = headers.get({:?}).and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();",
+                    name.to_ascii_lowercase()
+                ),
+                RequestSource::Cookie { name } => format!(
+                    "input.{field} = eda_runtime::http::cookie(headers.get_all(axum::http::header::COOKIE).iter().filter_map(|v| v.to_str().ok()), {name:?}).unwrap_or_default();"
+                ),
+            });
         }
         if project.has_rules(&r.request) {
             // The rules of the schema, before any step: the first that fails is a 400.
@@ -1162,6 +1204,19 @@ fn rules_rs(c: &mut Code, project: &Project, service: &Service) {
 }
 
 /// The signature check of a route, if it has one: the header, the environment variable of the secret, the tolerance.
+/// The fields of the request of a route that come from a header or a cookie, with where from.
+fn sourced_fields<'a>(
+    project: &'a Project,
+    route: &sb_model::Route,
+) -> Vec<(&'a str, &'a RequestSource)> {
+    project.message(&route.request).map_or(vec![], |m| {
+        m.fields
+            .iter()
+            .filter_map(|f| f.source.as_ref().map(|s| (f.name.as_str(), s)))
+            .collect()
+    })
+}
+
 fn hmac_of(route: &sb_model::Route) -> Option<(&str, &str, u32)> {
     match route.steps.first() {
         Some(Step::VerifyHmac {
@@ -1172,6 +1227,48 @@ fn hmac_of(route: &sb_model::Route) -> Option<(&str, &str, u32)> {
         }) => Some((header, secret_env, *tolerance_secs)),
         _ => None,
     }
+}
+
+/// A claim as a JSON value: a path keeps its type (a list stays a list, an absent optional is `null`), a literal is
+/// its JSON, and raw Rust is anything that serializes.
+fn claim_json(project: &Project, scope: &Scope, value: &Expr) -> Result<String, CodegenError> {
+    Ok(match value {
+        Expr::Path { path } => {
+            let rp = sb_model::typing::resolve_path(project, scope, path)
+                .map_err(CodegenError::Internal)?;
+            format!("eda_runtime::jwt::json!({})", crate::expr::path_code(&rp))
+        }
+        Expr::Literal { value } => format!("eda_runtime::jwt::json!({value})"),
+        Expr::Raw { code } => format!("eda_runtime::jwt::json!({})", code.trim()),
+        Expr::Now => {
+            return Err(CodegenError::Internal(
+                "`now()` only exists in an SQL step".into(),
+            ));
+        }
+    })
+}
+
+/// The seeds and the JWKS URLs the JWT steps of a service read from the environment, once each.
+fn jwt_settings(service: &Service) -> (BTreeSet<&str>, BTreeSet<&str>) {
+    let (mut seeds, mut urls) = (BTreeSet::new(), BTreeSet::new());
+    for step in service.handler_steps() {
+        step.walk(&mut |s| match s {
+            Step::SignJwt { key_env, .. } => {
+                seeds.insert(key_env.as_str());
+            }
+            Step::Jwks { key_envs, .. } => seeds.extend(key_envs.iter().map(String::as_str)),
+            Step::VerifyJwt { source, .. } => match source {
+                sb_model::JwksSource::Keys { key_envs } => {
+                    seeds.extend(key_envs.iter().map(String::as_str))
+                }
+                sb_model::JwksSource::Url { url_env } => {
+                    urls.insert(url_env.as_str());
+                }
+            },
+            _ => {}
+        });
+    }
+    (seeds, urls)
 }
 
 /// The environment variables of the encryption keys a service uses, once each.
@@ -1583,6 +1680,75 @@ fn steps(
                 ));
                 scope.bind(bind.clone(), text);
             }
+            Step::SignJwt {
+                key_env,
+                issuer,
+                ttl_secs,
+                claims,
+                bind,
+                ..
+            } => {
+                c.open(format!("let {bind}: String ="));
+                c.line("let mut claims = eda_runtime::jwt::Map::new();");
+                for claim in claims {
+                    let value = claim_json(project, scope, &claim.value)?;
+                    c.line(format!(
+                        "claims.insert({:?}.to_string(), {value});",
+                        claim.field
+                    ));
+                }
+                c.line(format!(
+                    "eda_runtime::jwt::sign({key_env:?}, {issuer:?}, {ttl_secs}, claims)?"
+                ));
+                c.close_with(";");
+                scope.bind(bind.clone(), TypeRef::scalar(FieldType::String));
+            }
+            Step::VerifyJwt {
+                token,
+                bearer,
+                source,
+                issuer,
+                schema,
+                bind,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let token = lower(project, scope, token, &text)?;
+                let source = match source {
+                    sb_model::JwksSource::Keys { key_envs } => {
+                        let list: Vec<String> = key_envs.iter().map(|k| format!("{k:?}")).collect();
+                        format!("eda_runtime::jwt::Source::Keys(&[{}])", list.join(", "))
+                    }
+                    sb_model::JwksSource::Url { url_env } => {
+                        format!("eda_runtime::jwt::Source::Url({url_env:?})")
+                    }
+                };
+                c.open(format!("let {bind}: pb::{schema} ="));
+                c.line(format!("let token = {token};"));
+                if *bearer {
+                    c.line("let token = eda_runtime::jwt::bearer(&token);");
+                }
+                c.line(format!(
+                    "eda_runtime::jwt::claims_into(eda_runtime::jwt::verify({source}, {issuer:?}, {}).await?)?",
+                    if *bearer { "token" } else { "&token" }
+                ));
+                c.close_with(";");
+                scope.bind(bind.clone(), TypeRef::message(schema));
+            }
+            Step::Jwks { key_envs, bind, .. } => {
+                let list: Vec<String> = key_envs.iter().map(|k| format!("{k:?}")).collect();
+                c.line(format!("let {bind} = pb::Jwks {{"));
+                c.line(format!(
+                    "    keys: eda_runtime::jwt::public_keys(&[{}])?",
+                    list.join(", ")
+                ));
+                c.line("        .into_iter()");
+                c.line("        .map(|k| pb::Jwk { kty: k.kty, crv: k.crv, alg: k.alg, kid: k.kid, x: k.x, ..Default::default() })");
+                c.line("        .collect(),");
+                c.line("    ..Default::default()");
+                c.line("};");
+                scope.bind(bind.clone(), TypeRef::message("Jwks"));
+            }
             Step::RandomToken { bind, .. } => {
                 c.line(format!(
                     "let {bind}: String = eda_runtime::crypto::random_token();"
@@ -1958,6 +2124,9 @@ fn describe(step: &Step) -> String {
         Step::RandomToken { bind, .. } => format!("random token into {bind}"),
         Step::Sha256 { bind, .. } => format!("sha256 into {bind}"),
         Step::Encrypt { bind, .. } => format!("encrypt into {bind}"),
+        Step::SignJwt { bind, .. } => format!("sign a token into {bind}"),
+        Step::VerifyJwt { bind, .. } => format!("verify a token into {bind}"),
+        Step::Jwks { bind, .. } => format!("publish the public keys into {bind}"),
         Step::Decrypt { bind, .. } => format!("decrypt into {bind}"),
         Step::Sql { op, table, .. } => format!(
             "sql {} {table}",

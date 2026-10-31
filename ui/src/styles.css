@@ -251,6 +251,7 @@ textarea { resize: vertical; line-height: 1.5; }
 .step-icon.callRpc { background: rgba(120, 134, 255, 0.2); color: var(--service); }
 .step-icon.branch { background: rgba(255, 102, 160, 0.17); color: #ff8fb8; }
 .step-icon.respond { background: rgba(62, 207, 142, 0.17); color: var(--ok); }
+.step-icon.signJwt, .step-icon.verifyJwt, .step-icon.jwks { background: rgba(255, 196, 77, 0.15); color: #ffc44d; }
 .step-icon.encrypt, .step-icon.decrypt { background: rgba(255, 196, 77, 0.15); color: #ffc44d; }
 .step-icon.verifyHmac { background: rgba(255, 196, 77, 0.15); color: #ffc44d; }
 .step-icon.rateLimit { background: rgba(255, 140, 90, 0.16); color: #ff9c6e; }
@@ -300,6 +301,7 @@ textarea { resize: vertical; line-height: 1.5; }
 .widget.branch svg { color: #ff8fb8; }
 .widget.respond svg { color: var(--ok); }
 .widget.fail svg { color: var(--err); }
+.widget.signJwt svg, .widget.verifyJwt svg, .widget.jwks svg { color: #ffc44d; }
 .widget.encrypt svg, .widget.decrypt svg { color: #ffc44d; }
 .widget.verifyHmac svg { color: #ffc44d; }
 .widget.rateLimit svg { color: #ff9c6e; }

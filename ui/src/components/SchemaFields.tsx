@@ -1,7 +1,7 @@
 import { nestable, nextTag, renameField } from '../model'
 import { SCALARS } from '../scope'
 import { useStore } from '../store'
-import type { Field, FieldType, MessageKind, Rule } from '../types'
+import type { Field, FieldType, MessageKind, RequestSource, Rule } from '../types'
 import { CommitInput, IconButton, NumberInput } from './ui'
 
 // API schemas travel as JSON: bytes and timestamp have no JSON form yet.
@@ -62,6 +62,46 @@ function FieldRules(props: { field: Field; onChange: (fn: (f: Field) => void) =>
   )
 }
 
+const SOURCES: { value: '' | RequestSource['from']; label: string; name: string }[] = [
+  { value: '', label: 'Corps / query', name: '' },
+  { value: 'header', label: 'En-tête', name: 'Authorization' },
+  { value: 'cookie', label: 'Cookie', name: 'session' },
+]
+
+/** Where a route reads a required text field of its request from: the body, or a header or a cookie that always
+ * replaces what the client sent in the body. */
+function FieldSource(props: { field: Field; onChange: (fn: (f: Field) => void) => void }) {
+  const source = props.field.source
+  return (
+    <div className="flex flex-wrap items-center gap-2 pb-1.5 pl-9 text-xs" role="group" aria-label={`Origine de ${props.field.name}`}>
+      <span className="text-2xs tracking-[0.7px] text-faint uppercase">Lu depuis</span>
+      <select
+        aria-label={`Origine de ${props.field.name}`}
+        value={source?.from ?? ''}
+        onChange={(e) =>
+          props.onChange((f) => {
+            const next = SOURCES.find((s) => s.value === e.target.value)!
+            f.source = next.value ? ({ from: next.value, name: next.name } as RequestSource) : undefined
+          })
+        }
+      >
+        {SOURCES.map((s) => (
+          <option key={s.value} value={s.value}>{s.label}</option>
+        ))}
+      </select>
+      {source && (
+        <CommitInput
+          value={source.name}
+          mono
+          label={`Nom ${source.from === 'header' ? 'de l’en-tête' : 'du cookie'} de ${props.field.name}`}
+          onCommit={(name) => props.onChange((f) => void (f.source = { ...f.source!, name }))}
+        />
+      )}
+      {source && <span className="text-faint">remplacé à chaque requête : le corps ne peut pas le fournir</span>}
+    </div>
+  )
+}
+
 export function FieldRow(props: {
   field: Field
   /** Kind of the schema owning the field: it decides which types and schemas can be used. */
@@ -83,7 +123,7 @@ export function FieldRow(props: {
     <div className="field-row">
       <span className="tag" title="Numéro de champ protobuf, stable">#{props.tag}</span>
       <CommitInput value={f.name} mono label="Nom du champ" onCommit={props.onRename} />
-      <select aria-label="Type du champ" value={typeValue(f.type)} onChange={(e) => props.onChange((x) => { x.type = parseType(e.target.value); if (x.type.kind === 'message') x.optional = false; if (x.type.kind !== 'string' && x.type.kind !== 'uuid') x.rules = undefined })}>
+      <select aria-label="Type du champ" value={typeValue(f.type)} onChange={(e) => props.onChange((x) => { x.type = parseType(e.target.value); if (x.type.kind === 'message') x.optional = false; if (x.type.kind !== 'string' && x.type.kind !== 'uuid') { x.rules = undefined; x.source = undefined } })}>
         <optgroup label="Types simples">
           {TYPE_OPTIONS(props.kind).map((k) => (
             <option key={k} value={k}>{k}</option>
@@ -106,17 +146,18 @@ export function FieldRow(props: {
         )}
       </select>
       <label className="check" title="Liste">
-        <input type="checkbox" checked={f.repeated} onChange={(e) => props.onChange((x) => { x.repeated = e.target.checked; if (e.target.checked) x.optional = false })} />
+        <input type="checkbox" checked={f.repeated} onChange={(e) => props.onChange((x) => { x.repeated = e.target.checked; if (e.target.checked) { x.optional = false; x.source = undefined } })} />
         []
       </label>
       <label className="check" title="Optionnel (présence suivie)">
-        <input type="checkbox" checked={f.optional} disabled={isMsg || f.repeated} onChange={(e) => props.onChange((x) => (x.optional = e.target.checked))} />
+        <input type="checkbox" checked={f.optional} disabled={isMsg || f.repeated} onChange={(e) => props.onChange((x) => { x.optional = e.target.checked; if (e.target.checked) x.source = undefined })} />
         ?
       </label>
       <IconButton icon="trash" title={`Supprimer ${f.name}`} danger onClick={props.onDelete} />
       {props.origin && <span className="origin" title="D’où vient la valeur dans la requête HTTP">{props.origin}</span>}
     </div>
     {props.kind === 'api' && text && <FieldRules field={f} onChange={props.onChange} />}
+    {props.kind === 'api' && props.origin !== undefined && text && !f.repeated && !f.optional && <FieldSource field={f} onChange={props.onChange} />}
     </>
   )
 }

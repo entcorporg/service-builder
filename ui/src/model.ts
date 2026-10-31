@@ -75,6 +75,13 @@ export function renameMessage(p: Project, from: string, to: string) {
       if (r.request === from) r.request = to
       if (r.response === from) r.response = to
     }
+  // The steps that name a schema: a schema variable, the schema a SQL step converts rows into, the claims of a token.
+  for (const h of allHandlers(p))
+    walkSteps(h.steps, (st) => {
+      if (st.type === 'let' && st.valueType.kind === 'message' && st.valueType.name === from) st.valueType.name = to
+      if (st.type === 'sql' && st.into === from) st.into = to
+      if (st.type === 'verifyJwt' && st.schema === from) st.schema = to
+    })
 }
 
 export function renameTopic(p: Project, from: string, to: string) {
@@ -360,6 +367,15 @@ export function addForeignKey(service: Service, table: Table): ForeignKey | null
   return fk
 }
 
+/** The API schemas a `jwks` step fills (RFC 7517), added when they are missing: a list of keys of five texts. */
+export function ensureJwksSchemas(p: Project) {
+  const text = (name: string) => ({ name, type: { kind: 'string' as const }, repeated: false, optional: false })
+  if (!p.messages.some((m) => m.name === 'Jwk')) p.messages.push({ name: 'Jwk', kind: 'api', fields: ['kty', 'crv', 'alg', 'kid', 'x'].map(text) })
+  if (!p.messages.some((m) => m.name === 'Jwks')) {
+    p.messages.push({ name: 'Jwks', kind: 'api', fields: [{ name: 'keys', type: { kind: 'message', name: 'Jwk' }, repeated: true, optional: false }] })
+  }
+}
+
 /** The fields of a message that can tell its events apart: a single string, uuid, int32 or int64 (mirrors the validator). */
 export function eventKeys(p: Project, message: string): string[] {
   const msg = p.messages.find((m) => m.name === message)
@@ -452,6 +468,9 @@ export const STEP_LABELS: Record<StepType, { label: string; hint: string }> = {
   callRpc: { label: 'Appeler un RPC', hint: 'Appeler un autre service en gRPC' },
   branch: { label: 'Condition', hint: 'Si … alors … sinon …' },
   respond: { label: 'Répondre', hint: 'Renvoyer la réponse du RPC' },
+  signJwt: { label: 'Signer un jeton', hint: 'Access token Ed25519 (EdDSA) : vos claims, plus émetteur, émission et expiration' },
+  verifyJwt: { label: 'Vérifier un jeton', hint: 'Signature, émetteur et expiration ; les claims lus comme un schéma. Sinon 401' },
+  jwks: { label: 'Publier les clés', hint: 'Le JWKS : les clés publiques qui permettent de vérifier un jeton, jamais la graine' },
   encrypt: { label: 'Chiffrer', hint: 'AES-256-GCM, pour ce qui est stocké (un secret TOTP, un jeton)' },
   decrypt: { label: 'Déchiffrer', hint: 'Le texte qu’un bloc « Chiffrer » a scellé' },
   verifyHmac: { label: 'Vérifier une signature', hint: 'Webhook signé (HMAC-SHA256 du corps brut), sans session : toujours la première étape' },
@@ -534,6 +553,33 @@ export function makeStep(type: StepType, p: Project, scope: Scope, ctx: { servic
     }
     case 'respond':
       return { type, id, fields: ctx.response ? autoMap(p, scope, ctx.response) : [], status: null, cookies: [] }
+    case 'signJwt':
+      return {
+        type,
+        id,
+        keyEnv: 'JWT_SIGNING_KEY',
+        issuer: ctx.service.toLowerCase(),
+        ttlSecs: 300,
+        claims: [{ field: 'sub', value: firstText(p, scope, ['sub', 'account', 'user', 'email', 'id']) }],
+        bind: uniqueName('access_token', Object.keys(scope)),
+      }
+    case 'verifyJwt': {
+      // The schema that lists the claims to read: one that looks like it, else any API schema.
+      const api = p.messages.filter((m) => m.kind === 'api')
+      const schema = (api.find((m) => /claims/i.test(m.name)) ?? api[0])?.name ?? ''
+      return {
+        type,
+        id,
+        token: firstText(p, scope, ['token', 'authorization']),
+        bearer: false,
+        source: { kind: 'keys', keyEnvs: ['JWT_SIGNING_KEY'] },
+        issuer: ctx.service.toLowerCase(),
+        schema,
+        bind: uniqueName('claims', Object.keys(scope)),
+      }
+    }
+    case 'jwks':
+      return { type, id, keyEnvs: ['JWT_SIGNING_KEY'], bind: uniqueName('published', Object.keys(scope)) }
     case 'encrypt':
       return { type, id, keyEnv: 'ENCRYPTION_KEY', input: firstText(p, scope, ['secret', 'text']), bind: uniqueName('sealed', Object.keys(scope)) }
     case 'decrypt':
