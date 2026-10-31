@@ -732,6 +732,61 @@ describe('editor', () => {
     await page.close()
   })
 
+  it('reads a field of the request from a header or a cookie', async () => {
+    const { page } = await open()
+    await page.locator('.tree button.sub', { hasText: '/orders' }).first().click()
+    await page.locator('.endpoint').waitFor()
+    await page.getByRole('button', { name: '+ Ajouter un champ' }).first().click()
+    const source = page.getByRole('group', { name: 'Origine de field_3' })
+    // Only a required text field can come from a header; a list or a number never offers it.
+    assert.equal(await page.getByRole('group', { name: 'Origine de amount' }).count(), 0)
+    assert.equal(await page.getByRole('group', { name: 'Origine de items' }).count(), 0)
+    await source.getByLabel('Origine de field_3').selectOption('header')
+    assert.equal(await source.getByLabel('Nom de l’en-tête de field_3').inputValue(), 'Authorization')
+
+    // A name that cannot travel in a header is reported.
+    await source.getByLabel('Nom de l’en-tête de field_3').fill('not a header')
+    await source.getByLabel('Nom de l’en-tête de field_3').press('Enter')
+    await settle(page)
+    assert.ok((await page.locator('.problems li').allInnerTexts()).some((t) => t.includes('E_SOURCE_NAME')))
+    await source.getByLabel('Nom de l’en-tête de field_3').fill('X-Session')
+    await source.getByLabel('Nom de l’en-tête de field_3').press('Enter')
+    await settle(page)
+    assert.doesNotMatch(await page.locator('.status').innerText(), /erreur/)
+    // The client does not send it in the body any more.
+    assert.doesNotMatch(await page.locator('.json-preview pre').first().innerText(), /field_3/)
+    assert.match(await page.locator('.field-row .origin').last().innerText(), /en-tête X-Session/)
+
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/transport/http.rs"]').click()
+    let http = await page.locator('.code-main pre').innerText()
+    let handler = http.slice(http.indexOf('async fn handle_place_order'))
+    assert.match(handler, /headers: HeaderMap,/)
+    assert.match(handler, /input\.field_3 = headers\s*\.get\("x-session"\)/)
+
+    // A cookie is read through the runtime, which decodes it.
+    await page.getByRole('tab', { name: /Architecture/ }).click()
+    await page.locator('.tree button.sub', { hasText: '/orders' }).first().click()
+    await source.getByLabel('Origine de field_3').selectOption('cookie')
+    await settle(page)
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/transport/http.rs"]').click()
+    http = await page.locator('.code-main pre').innerText()
+    handler = http.slice(http.indexOf('async fn handle_place_order'))
+    assert.match(handler, /input\.field_3 = eda_runtime::http::cookie\(/)
+
+    // Back to the body: the headers are no longer taken.
+    await page.getByRole('tab', { name: /Architecture/ }).click()
+    await page.locator('.tree button.sub', { hasText: '/orders' }).first().click()
+    await source.getByLabel('Origine de field_3').selectOption('')
+    await settle(page)
+    await page.getByRole('tab', { name: /Code généré/ }).click()
+    await page.locator('[role="treeitem"][data-path="services/orders/src/transport/http.rs"]').click()
+    http = await page.locator('.code-main pre').innerText()
+    assert.doesNotMatch(http, /HeaderMap/)
+    await page.close()
+  })
+
   it('hides events, proto schemas and topics while an endpoint is open', async () => {
     const { page } = await open()
     const tree = page.locator('.tree')

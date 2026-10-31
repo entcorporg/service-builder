@@ -841,6 +841,9 @@ pub fn add_login(p: &mut Project) {
         .push(Table::new("accounts", vec![email_column, password_hash]));
     let mut session = Cookie::new("session", path("session_token"));
     session.max_age_secs = Some(900);
+    // The same access token the body carries, for the browser that would rather not keep it in a script.
+    let mut access = Cookie::new("access_token", path("access_token"));
+    access.max_age_secs = Some(300);
     p.services[0].routes.push(Route {
         name: "login".into(),
         method: HttpMethod::Post,
@@ -921,15 +924,16 @@ pub fn add_login(p: &mut Project) {
                     set("access_token", path("access_token")),
                 ],
                 status: None,
-                cookies: vec![session],
+                cookies: vec![session, access],
             },
         ],
     });
 }
 
 /// Adds to the first service what an access token needs besides the login that issues it: the route that checks
-/// one (`POST /whoami`, the claims read as the schema `AccessClaims`) and the public route that publishes the
-/// key (`GET /.well-known/jwks.json`), which the services that verify on their own fetch.
+/// one (`GET /whoami` with `Authorization: Bearer`, `GET /session` with the `access_token` cookie, the claims read
+/// as the schema `AccessClaims`) and the public route that publishes the key (`GET /.well-known/jwks.json`), which
+/// the services that verify on their own fetch.
 pub fn add_jwt(p: &mut Project) {
     let string = || FieldType::String;
     let mut roles = field("roles", string());
@@ -938,8 +942,24 @@ pub fn add_jwt(p: &mut Project) {
         "AccessClaims",
         vec![field("sub", string()), roles.clone()],
     ));
-    p.messages
-        .push(api("WhoamiBody", vec![field("token", string())]));
+    // The token comes from the `Authorization` header, or from the session cookie `login` sets.
+    let from = |source: RequestSource| {
+        let mut token = field("token", string());
+        token.source = Some(source);
+        token
+    };
+    p.messages.push(api(
+        "WhoamiRequest",
+        vec![from(RequestSource::Header {
+            name: "Authorization".into(),
+        })],
+    ));
+    p.messages.push(api(
+        "SessionRequest",
+        vec![from(RequestSource::Cookie {
+            name: "access_token".into(),
+        })],
+    ));
     p.messages
         .push(api("WhoamiView", vec![field("sub", string()), roles]));
     // The shape of a JWKS (RFC 7517), which the `jwks` step fills.
@@ -959,9 +979,9 @@ pub fn add_jwt(p: &mut Project) {
     p.messages.push(api("JwksRequest", vec![]));
     p.services[0].routes.push(Route {
         name: "whoami".into(),
-        method: HttpMethod::Post,
+        method: HttpMethod::Get,
         path: "/whoami".into(),
-        request: "WhoamiBody".into(),
+        request: "WhoamiRequest".into(),
         response: "WhoamiView".into(),
         status: 200,
         steps: vec![
@@ -969,7 +989,7 @@ pub fn add_jwt(p: &mut Project) {
             Step::VerifyJwt {
                 id: "k1".into(),
                 token: path("input.token"),
-                bearer: false,
+                bearer: true,
                 source: JwksSource::Keys {
                     key_envs: vec!["JWT_SIGNING_KEY".into()],
                 },
@@ -1004,6 +1024,37 @@ pub fn add_jwt(p: &mut Project) {
             Step::Respond {
                 id: "k4".into(),
                 fields: vec![set("keys", path("published.keys"))],
+                status: None,
+                cookies: vec![],
+            },
+        ],
+    });
+    // The same check, for a browser that keeps the token in a cookie.
+    p.services[0].routes.push(Route {
+        name: "session".into(),
+        method: HttpMethod::Get,
+        path: "/session".into(),
+        request: "SessionRequest".into(),
+        response: "WhoamiView".into(),
+        status: 200,
+        steps: vec![
+            Step::VerifyJwt {
+                id: "k5".into(),
+                token: path("input.token"),
+                bearer: false,
+                source: JwksSource::Keys {
+                    key_envs: vec!["JWT_SIGNING_KEY".into()],
+                },
+                issuer: "orders".into(),
+                schema: "AccessClaims".into(),
+                bind: "claims".into(),
+            },
+            Step::Respond {
+                id: "k6".into(),
+                fields: vec![
+                    set("sub", path("claims.sub")),
+                    set("roles", path("claims.roles")),
+                ],
                 status: None,
                 cookies: vec![],
             },

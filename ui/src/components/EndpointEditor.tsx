@@ -61,7 +61,8 @@ function Endpoint(props: {
   const ctx: HandlerCtx = { service: service.name, response: route.response, http: true }
 
   const params = pathParams(route.path)
-  const origin = (f: Field) => (params.includes(f.name) ? 'chemin' : route.method === 'get' || route.method === 'delete' ? 'query' : 'corps')
+  const origin = (f: Field) =>
+    params.includes(f.name) ? 'chemin' : f.source ? `${f.source.from === 'header' ? 'en-tête' : 'cookie'} ${f.source.name}` : route.method === 'get' || route.method === 'delete' ? 'query' : 'corps'
   const requestIndex = project.messages.findIndex((m) => m.name === route.request)
   const responseIndex = project.messages.findIndex((m) => m.name === route.response)
   const response = project.messages[responseIndex]
@@ -124,7 +125,7 @@ function Endpoint(props: {
     })
 
   const hasBody = route.method === 'post' || route.method === 'put' || route.method === 'patch'
-  const notPath = (f: Field) => !params.includes(f.name)
+  const notPath = (f: Field) => !params.includes(f.name) && !f.source
 
   return (
     <div className="endpoint">

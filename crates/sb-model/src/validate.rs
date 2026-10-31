@@ -48,6 +48,7 @@ pub fn validate(project: &Project) -> Vec<Diagnostic> {
     c.project();
     c.messages();
     c.unused_rules();
+    c.unused_sources();
     c.topics();
     c.services();
     c.graph_warnings();
@@ -173,6 +174,32 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A field read from a header or a cookie is filled by the route that receives the schema: elsewhere (an
+    /// event, a nested schema) nothing would ever fill it.
+    fn unused_sources(&mut self) {
+        let direct: HashSet<&str> = self
+            .project
+            .services
+            .iter()
+            .flat_map(|s| s.routes.iter().map(|r| r.request.as_str()))
+            .collect();
+        for (i, m) in self.project.messages.iter().enumerate() {
+            if m.kind == MessageKind::Api
+                && m.fields.iter().any(|f| f.source.is_some())
+                && !direct.contains(m.name.as_str())
+            {
+                self.warn(
+                    "W_SOURCE_UNUSED",
+                    format!("/messages/{i}"),
+                    format!(
+                        "`{}` has fields read from headers or cookies, but no route receives it directly: they are never filled",
+                        m.name
+                    ),
+                );
+            }
+        }
+    }
+
     fn messages(&mut self) {
         let p = self.project;
         // Messages and services share the protobuf package namespace.
@@ -271,6 +298,7 @@ impl<'a> Checker<'a> {
                     );
                 }
                 self.field_rules(m, f, &fp);
+                self.field_source(m, f, &fp);
                 if f.repeated && f.optional {
                     self.error(
                         "E_REPEATED_OPTIONAL",
@@ -743,6 +771,55 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Where a field is read from the request: only the text fields of API schemas, under a name that can travel in
+    /// a header or a cookie.
+    fn field_source(&mut self, m: &Message, f: &Field, fp: &str) {
+        let Some(source) = &f.source else {
+            return;
+        };
+        let sp = format!("{fp}/source");
+        if m.kind != MessageKind::Api {
+            self.error(
+                "E_SOURCE_KIND",
+                &sp,
+                format!(
+                    "field `{}` is read from the request, but `{}` is {}: only API schemas come from a request",
+                    f.name,
+                    m.name,
+                    kind_label(m.kind)
+                ),
+            );
+        } else if !matches!(f.ty, FieldType::String | FieldType::Uuid) || f.repeated || f.optional {
+            self.error(
+                "E_SOURCE_TYPE",
+                &sp,
+                format!(
+                    "field `{}` is read from the request: it must be a single required string or uuid (empty when the request lacks it)",
+                    f.name
+                ),
+            );
+        }
+        let (what, name, extra) = match source {
+            RequestSource::Header { name } => ("header", name, ""),
+            RequestSource::Cookie { name } => ("cookie", name, "_."),
+        };
+        let valid = !name.is_empty()
+            && name.len() <= 100
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || extra.as_bytes().contains(&b));
+        if !valid {
+            self.error(
+                "E_SOURCE_NAME",
+                format!("{sp}/name"),
+                format!(
+                    "`{name}` is not a {what} name: letters, digits and `-`{} only, 100 characters at most",
+                    if extra.is_empty() { "" } else { ", `_` and `.`" }
+                ),
+            );
+        }
+    }
+
     /// The field that identifies an event: a single text or integer, since it becomes the key of a table.
     fn idempotent_field(&mut self, path: &str, message: &str, field: &str) {
         let Some(msg) = self.project.message(message) else {
@@ -868,6 +945,20 @@ impl<'a> Checker<'a> {
                     }
                     Some(_) => {}
                 }
+            }
+            for f in request
+                .fields
+                .iter()
+                .filter(|f| f.source.is_some() && params.contains(&f.name))
+            {
+                self.error(
+                    "E_SOURCE_PARAM",
+                    format!("{rp}/path"),
+                    format!(
+                        "field `{}` of `{}` is read from the request, and `{{{}}}` of the path fills it too",
+                        f.name, r.request, f.name
+                    ),
+                );
             }
             if !r.method.has_body() {
                 for f in request.fields.iter().filter(|f| !params.contains(&f.name)) {
@@ -3867,6 +3958,123 @@ mod tests {
             "{:?}",
             errors(&p)
         );
+    }
+
+    fn source_of<'a>(p: &'a mut Project, message: &str) -> &'a mut Field {
+        p.messages
+            .iter_mut()
+            .find(|m| m.name == message)
+            .and_then(|m| m.fields.first_mut())
+            .unwrap()
+    }
+
+    #[test]
+    fn a_field_can_be_read_from_a_header_or_a_cookie() {
+        let p = with_jwt();
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+        // The fields that carry the token are filled by the route, not by the client.
+        assert!(matches!(
+            &p.message("WhoamiRequest").unwrap().fields[0].source,
+            Some(RequestSource::Header { name }) if name == "Authorization"
+        ));
+        assert!(matches!(
+            &p.message("SessionRequest").unwrap().fields[0].source,
+            Some(RequestSource::Cookie { name }) if name == "access_token"
+        ));
+    }
+
+    #[test]
+    fn where_a_field_is_read_from_is_checked() {
+        let mut p = with_jwt();
+        source_of(&mut p, "WhoamiRequest").ty = FieldType::Int32;
+        assert!(errors(&p).contains(&"E_SOURCE_TYPE".to_string()));
+        let mut p = with_jwt();
+        source_of(&mut p, "WhoamiRequest").optional = true;
+        assert!(errors(&p).contains(&"E_SOURCE_TYPE".to_string()));
+        let mut p = with_jwt();
+        source_of(&mut p, "WhoamiRequest").repeated = true;
+        assert!(errors(&p).contains(&"E_SOURCE_TYPE".to_string()));
+        // Only an API schema comes from a request.
+        let mut p = with_jwt();
+        p.messages
+            .iter_mut()
+            .find(|m| m.name == "WhoamiRequest")
+            .unwrap()
+            .kind = MessageKind::Event;
+        assert!(errors(&p).contains(&"E_SOURCE_KIND".to_string()));
+        // A name that cannot travel in a header or a cookie.
+        for (source, ok) in [
+            (
+                RequestSource::Header {
+                    name: "X-Request-Id".into(),
+                },
+                true,
+            ),
+            (
+                RequestSource::Header {
+                    name: "X Request".into(),
+                },
+                false,
+            ),
+            (
+                RequestSource::Header {
+                    name: "X:Id".into(),
+                },
+                false,
+            ),
+            (RequestSource::Header { name: "a_b".into() }, false),
+            (
+                RequestSource::Header {
+                    name: String::new(),
+                },
+                false,
+            ),
+            (
+                RequestSource::Cookie {
+                    name: "access_token".into(),
+                },
+                true,
+            ),
+            (RequestSource::Cookie { name: "a=b".into() }, false),
+            (RequestSource::Cookie { name: "a;b".into() }, false),
+            (RequestSource::Cookie { name: "é".into() }, false),
+            (
+                RequestSource::Cookie {
+                    name: "x".repeat(101),
+                },
+                false,
+            ),
+        ] {
+            let mut p = with_jwt();
+            source_of(&mut p, "SessionRequest").source = Some(source.clone());
+            assert_eq!(
+                !errors(&p).contains(&"E_SOURCE_NAME".to_string()),
+                ok,
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_parameter_and_a_header_cannot_fill_the_same_field() {
+        let mut p = with_jwt();
+        p.services[0].routes[2].path = "/whoami/{token}".into();
+        assert!(errors(&p).contains(&"E_SOURCE_PARAM".to_string()));
+    }
+
+    #[test]
+    fn a_field_read_from_the_request_that_no_route_receives_is_a_warning() {
+        let mut p = with_jwt();
+        let warned = |p: &Project| {
+            validate(p)
+                .into_iter()
+                .filter(|d| d.code == "W_SOURCE_UNUSED")
+                .count()
+        };
+        assert_eq!(warned(&p), 0);
+        // The route is gone: nothing fills the header any more.
+        p.services[0].routes.retain(|r| r.name != "session");
+        assert_eq!(warned(&p), 1);
     }
 
     fn with_seal() -> Project {

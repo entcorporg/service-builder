@@ -17,8 +17,8 @@ use sb_model::names::route_params;
 use sb_model::names::{shouty, snake, topic_const};
 use sb_model::typing::{Scope, TypeRef};
 use sb_model::{
-    Column, ColumnType, DEFAULT_HTTP_PORT, Expr, FieldType, HttpMethod, Project, Rule, Service,
-    SqlOp, Step, sql_row_name,
+    Column, ColumnType, DEFAULT_HTTP_PORT, Expr, FieldType, HttpMethod, Project, RequestSource,
+    Rule, Service, SqlOp, Step, sql_row_name,
 };
 
 use crate::expr::{condition_code, log_code, lower, rust_let_type, struct_literal};
@@ -825,11 +825,17 @@ fn http_rs(project: &Project, service: &Service) -> String {
                 ""
             }
     ));
-    c.line(if service.routes.iter().any(|r| hmac_of(r).is_some()) {
-        "    http::{HeaderMap, HeaderValue, StatusCode},"
-    } else {
-        "    http::{HeaderValue, StatusCode},"
-    });
+    c.line(
+        if service
+            .routes
+            .iter()
+            .any(|r| hmac_of(r).is_some() || !sourced_fields(project, r).is_empty())
+        {
+            "    http::{HeaderMap, HeaderValue, StatusCode},"
+        } else {
+            "    http::{HeaderValue, StatusCode},"
+        },
+    );
     c.line("    response::{IntoResponse, Response},");
     c.line(format!("    routing::{{{}}},", verbs.join(", ")));
     c.line("};");
@@ -889,7 +895,12 @@ fn http_rs(project: &Project, service: &Service) -> String {
             202 => "StatusCode::ACCEPTED",
             _ => "StatusCode::OK",
         };
-        let m = if params.is_empty() { "" } else { "mut " };
+        let sourced = sourced_fields(project, r);
+        let m = if params.is_empty() && sourced.is_empty() {
+            ""
+        } else {
+            "mut "
+        };
         c.blank();
         c.line(format!("/// `{} {}`", r.method.as_str(), r.path));
         c.line(format!("async fn handle_{}(", r.name));
@@ -903,6 +914,13 @@ fn http_rs(project: &Project, service: &Service) -> String {
             // The signature covers the exact bytes: they are read as JSON only once it checks out.
             c.line("headers: HeaderMap,");
             c.line("body: Bytes,");
+        } else if !sourced.is_empty() {
+            c.line("headers: HeaderMap,");
+            c.line(if r.method.has_body() {
+                format!("Json({m}input): Json<pb::{}>,", r.request)
+            } else {
+                format!("Query({m}input): Query<pb::{}>,", r.request)
+            });
         } else {
             c.line(if r.method.has_body() {
                 format!("Json({m}input): Json<pb::{}>,", r.request)
@@ -933,6 +951,18 @@ fn http_rs(project: &Project, service: &Service) -> String {
         }
         for param in &params {
             c.line(format!("input.{param} = param(&path, {param:?})?;"));
+        }
+        for (field, source) in &sourced {
+            // Always overwritten, so that nothing a client puts in the body or the query stands for a header.
+            c.line(match source {
+                RequestSource::Header { name } => format!(
+                    "input.{field} = headers.get({:?}).and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();",
+                    name.to_ascii_lowercase()
+                ),
+                RequestSource::Cookie { name } => format!(
+                    "input.{field} = eda_runtime::http::cookie(headers.get_all(axum::http::header::COOKIE).iter().filter_map(|v| v.to_str().ok()), {name:?}).unwrap_or_default();"
+                ),
+            });
         }
         if project.has_rules(&r.request) {
             // The rules of the schema, before any step: the first that fails is a 400.
@@ -1174,6 +1204,19 @@ fn rules_rs(c: &mut Code, project: &Project, service: &Service) {
 }
 
 /// The signature check of a route, if it has one: the header, the environment variable of the secret, the tolerance.
+/// The fields of the request of a route that come from a header or a cookie, with where from.
+fn sourced_fields<'a>(
+    project: &'a Project,
+    route: &sb_model::Route,
+) -> Vec<(&'a str, &'a RequestSource)> {
+    project.message(&route.request).map_or(vec![], |m| {
+        m.fields
+            .iter()
+            .filter_map(|f| f.source.as_ref().map(|s| (f.name.as_str(), s)))
+            .collect()
+    })
+}
+
 fn hmac_of(route: &sb_model::Route) -> Option<(&str, &str, u32)> {
     match route.steps.first() {
         Some(Step::VerifyHmac {

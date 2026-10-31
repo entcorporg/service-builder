@@ -7,6 +7,9 @@ export type FieldType = { kind: ScalarKind } | { kind: 'message'; name: string }
 /** What a request has to satisfy, checked by the HTTP routes before any step runs. */
 export type Rule = { rule: 'length'; min: number; max: number } | { rule: 'email' } | { rule: 'siren' }
 
+/** A part of an HTTP request other than its body that fills a field. */
+export type RequestSource = { from: 'header'; name: string } | { from: 'cookie'; name: string }
+
 export interface Field {
   name: string
   type: FieldType
@@ -15,6 +18,8 @@ export interface Field {
   tag?: number
   /** Only on the text fields of API schemas; absent when there is none. */
   rules?: Rule[]
+  /** Only on required text fields of API schemas: read from a header or a cookie instead of the body. */
+  source?: RequestSource
 }
 
 /** What a schema is for: Kafka payload, gRPC message / shared type, or HTTP API (not generated yet). */

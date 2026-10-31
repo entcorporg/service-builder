@@ -967,6 +967,32 @@ mod tests {
     }
 
     #[test]
+    fn headers_and_cookies_fill_the_fields_they_are_declared_for() {
+        let files = generate(&sample::showcase()).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        let compact = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let whoami = &http[http.find("async fn handle_whoami(").unwrap()..];
+        let whoami = compact(&whoami[..whoami.find("\n}\n").unwrap()]);
+        // The header is read whatever its case, and always overwrites what the query string said.
+        assert!(whoami.contains("headers: HeaderMap,"), "{whoami}");
+        assert!(
+            whoami.contains("input.token = headers.get(\"authorization\")"),
+            "{whoami}"
+        );
+        let session = &http[http.find("async fn handle_session(").unwrap()..];
+        let session = compact(&session[..session.find("\n}\n").unwrap()]);
+        assert!(session.contains("eda_runtime::http::cookie("), "{session}");
+        assert!(session.contains("\"access_token\""), "{session}");
+        // The fields are filled before the flow runs.
+        assert!(
+            session.find("input.token =").unwrap() < session.find("flows::api::session").unwrap()
+        );
+        // A route that reads nothing from the request does not take the headers.
+        let jwks = &http[http.find("async fn handle_jwks(").unwrap()..];
+        assert!(!jwks[..jwks.find("\n}\n").unwrap()].contains("HeaderMap"));
+    }
+
+    #[test]
     fn the_showcase_generates_a_workspace_of_every_feature() {
         let files = generate(&sample::showcase()).unwrap();
         for path in [

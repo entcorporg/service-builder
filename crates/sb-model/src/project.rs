@@ -124,6 +124,11 @@ pub struct Field {
     /// API schemas; the first rule that fails is a 400.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<Rule>,
+    /// Where an HTTP route reads this field instead of the body or the query string: a request header or a cookie.
+    /// Only on text fields of API schemas. The route always overwrites it (empty when the request lacks it), so
+    /// that what a client sends in the body can never stand for a header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<RequestSource>,
 }
 
 impl Field {
@@ -135,8 +140,19 @@ impl Field {
             optional: false,
             tag: None,
             rules: vec![],
+            source: None,
         }
     }
+}
+
+/// A part of an HTTP request other than its body, that fills a field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "from", rename_all = "camelCase")]
+pub enum RequestSource {
+    /// A request header, by name (`Authorization`, `X-Request-Id`...), whatever its case.
+    Header { name: String },
+    /// A cookie of the `Cookie` header, by name, percent-decoded.
+    Cookie { name: String },
 }
 
 /// A rule on a text field.

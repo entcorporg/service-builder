@@ -166,6 +166,42 @@ pub mod http {
         out
     }
 
+    /// The value of the cookie `name` among the `Cookie` headers of a request, decoded the way `Cookie` encodes it.
+    /// The first cookie of that name wins (the browser sends the most specific path first); a value that does not
+    /// decode to UTF-8 is as good as absent.
+    pub fn cookie<'a>(headers: impl IntoIterator<Item = &'a str>, name: &str) -> Option<String> {
+        headers
+            .into_iter()
+            .flat_map(|header| header.split(';'))
+            .filter_map(|pair| pair.split_once('='))
+            .find(|(n, _)| n.trim() == name)
+            .and_then(|(_, value)| decode_value(value.trim().trim_matches('"')))
+    }
+
+    /// Undoes `encode_value`; a `%` that is not followed by two hex digits is kept as it is.
+    fn decode_value(value: &str) -> Option<String> {
+        let bytes = value.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            let hex = (bytes[i] == b'%' && i + 2 < bytes.len())
+                .then(|| std::str::from_utf8(&bytes[i + 1..i + 3]).ok())
+                .flatten()
+                .and_then(|h| u8::from_str_radix(h, 16).ok());
+            match hex {
+                Some(b) => {
+                    out.push(b);
+                    i += 3;
+                }
+                None => {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+        }
+        String::from_utf8(out).ok()
+    }
+
     /// What a route answers when its `Respond` step sets a status or cookies: the body and the extras.
     #[derive(Debug)]
     pub struct Reply<T> {
@@ -222,6 +258,32 @@ pub mod http {
             let value = header.split("; Path=").next().unwrap();
             assert!(!value.contains(';') && !value.contains(' ') && !value.contains('"') && !value.contains('\r'), "{value}");
             assert_eq!(value, "x=a%3B%20Domain=evil.example%2C%20b=c%20%22q%22%0D%0A%20%C3%A9%25");
+        }
+
+        #[test]
+        fn a_cookie_is_read_back_as_it_was_set() {
+            let sent = Cookie::new("session", "a; b=c é%").header_value();
+            let pair = sent.split("; Path=").next().unwrap().to_string();
+            assert_eq!(cookie([pair.as_str()], "session").as_deref(), Some("a; b=c é%"));
+        }
+
+        #[test]
+        fn the_right_cookie_is_found_among_several() {
+            let headers = ["theme=dark; session=first", "session=second"];
+            assert_eq!(cookie(headers, "session").as_deref(), Some("first"));
+            assert_eq!(cookie(headers, "theme").as_deref(), Some("dark"));
+            assert_eq!(cookie(["xsession=no; session2=no"], "session"), None);
+            assert_eq!(cookie(["session=\"quoted\""], "session").as_deref(), Some("quoted"));
+            assert_eq!(cookie(["bare; session=ok"], "session").as_deref(), Some("ok"));
+            assert_eq!(cookie([], "session"), None);
+        }
+
+        #[test]
+        fn a_value_that_does_not_decode_is_absent() {
+            assert_eq!(cookie(["a=%FF%FE"], "a"), None);
+            // A stray `%` is kept.
+            assert_eq!(cookie(["a=100%"], "a").as_deref(), Some("100%"));
+            assert_eq!(cookie(["a=%zz"], "a").as_deref(), Some("%zz"));
         }
 
         #[test]
