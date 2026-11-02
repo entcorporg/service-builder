@@ -14,10 +14,8 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Where the checks run: our own machine (label `service-builder`) is faster and costs no minutes, so it
-# takes everything except the release itself. A pull request from a fork never reaches it, because its
-# code is not ours to run there: it falls back to a GitHub-hosted runner. The expression is repeated in
-# each job, since `runs-on` cannot read `env`.
+# Where the checks run: GitHub-hosted runners. A self-hosted runner (label `service-builder`) can take over by
+# changing `runs-on` back; the steps below already handle both (`runner.environment`).
 
 jobs:
   # Rule 1 — every change names its update type: [minor] 0.0.X, [normal] 0.X.0, [major] X.0.0,
@@ -25,7 +23,7 @@ jobs:
   # count: a description or commit body that merely talks about the mentions must not release.
   # A pull request without the mention fails here; a push to main reads it to decide the release.
   update-type:
-    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "service-builder"]') || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     outputs:
       level: ${{ steps.detect.outputs.level }}
     steps:
@@ -63,7 +61,7 @@ jobs:
           fi
 
   scripts:
-    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "service-builder"]') || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -72,7 +70,7 @@ jobs:
       - run: node scripts/release.mjs check
 
   rust:
-    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "service-builder"]') || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -97,7 +95,7 @@ jobs:
 
   generated-workspace:
     # The code we generate must compile, not just look right.
-    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "service-builder"]') || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -119,7 +117,7 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
 
   ui:
-    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "service-builder"]') || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -135,7 +133,7 @@ jobs:
       - run: pnpm --dir ui build
 
   e2e:
-    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "service-builder"]') || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
