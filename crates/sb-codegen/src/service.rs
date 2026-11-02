@@ -1346,7 +1346,9 @@ fn bucket_envs(service: &Service) -> BTreeSet<&str> {
         step.walk(&mut |s| {
             if let Step::ObjectPut { bucket_env, .. }
             | Step::ObjectGet { bucket_env, .. }
-            | Step::ObjectDelete { bucket_env, .. } = s
+            | Step::ObjectDelete { bucket_env, .. }
+            | Step::ObjectPresignGet { bucket_env, .. }
+            | Step::ObjectPresignPut { bucket_env, .. } = s
             {
                 envs.insert(bucket_env.as_str());
             }
@@ -2011,6 +2013,40 @@ fn steps(
                     },
                 );
             }
+            Step::ObjectPresignGet {
+                bucket_env,
+                key,
+                expires_secs,
+                bind,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let key = lower(project, scope, key, &text)?;
+                c.line(format!(
+                    "let {bind}: String = eda_runtime::s3::presign_get({bucket_env:?}, &{key}, {expires_secs}).await?;"
+                ));
+                scope.bind(bind.clone(), text);
+            }
+            Step::ObjectPresignPut {
+                bucket_env,
+                key,
+                content_type,
+                size,
+                max_bytes,
+                expires_secs,
+                bind,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let int = TypeRef::scalar(FieldType::Int64);
+                let key = lower(project, scope, key, &text)?;
+                let content_type = lower(project, scope, content_type, &text)?;
+                let size = lower(project, scope, size, &int)?;
+                c.line(format!(
+                    "let {bind}: String = eda_runtime::s3::presign_put({bucket_env:?}, &{key}, &{content_type}, {size}, {max_bytes}, {expires_secs}).await?;"
+                ));
+                scope.bind(bind.clone(), text);
+            }
             Step::ObjectDelete {
                 bucket_env, key, ..
             } => {
@@ -2445,6 +2481,8 @@ fn describe(step: &Step) -> String {
         Step::ObjectPut { .. } => "store an object".into(),
         Step::ObjectGet { bind, .. } => format!("read an object into {bind}"),
         Step::ObjectDelete { .. } => "delete an object".into(),
+        Step::ObjectPresignGet { bind, .. } => format!("sign a download URL into {bind}"),
+        Step::ObjectPresignPut { bind, .. } => format!("sign an upload URL into {bind}"),
         Step::TotpVerify { .. } => "verify a TOTP code".into(),
         Step::RecoveryCodes { bind, .. } => format!("issue recovery codes into {bind}"),
         Step::RecoveryCodeUse { .. } => "spend a recovery code".into(),

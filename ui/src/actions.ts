@@ -50,10 +50,11 @@ export async function newProject() {
   }
 }
 
-export async function loadSample() {
+/** `orders`: the small project; `showcase`: every kind of step, including the signed-URL ones (S3, direct to the store). */
+export async function loadSample(name: 'orders' | 'showcase' = 'orders') {
   if (!(await confirmDiscard())) return
   try {
-    store().load(await api.sampleProject(), null, true)
+    store().load(await api.sampleProject(name), null, true)
   } catch (e) {
     fail(e)
   }

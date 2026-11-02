@@ -1435,6 +1435,17 @@ pub fn add_avatars(p: &mut Project) {
         .push(api("AvatarAck", vec![field("content_type", string())]));
     p.messages
         .push(api("AvatarDone", vec![field("ok", FieldType::Bool)]));
+    // The direct way: the service only signs, the client talks to the store (or its CDN).
+    p.messages.push(api(
+        "AvatarSign",
+        vec![
+            bearer(),
+            field("content_type", string()),
+            field("size", FieldType::Int64),
+        ],
+    ));
+    p.messages
+        .push(api("AvatarUrl", vec![field("url", string())]));
 
     let who = |id: &str| Step::VerifyJwt {
         id: id.into(),
@@ -1528,6 +1539,58 @@ pub fn add_avatars(p: &mut Project) {
             },
         ],
     ));
+    // Direct to the store: a signed URL to upload the avatar, and one to read it, so that no byte crosses the service.
+    let mut upload = route(
+        "sign_avatar_upload",
+        HttpMethod::Post,
+        "AvatarSign",
+        "AvatarUrl",
+        vec![
+            who("v11"),
+            Step::ObjectPresignPut {
+                id: "v12".into(),
+                bucket_env: "AVATAR_BUCKET".into(),
+                key: path("claims.sub"),
+                content_type: path("input.content_type"),
+                size: path("input.size"),
+                max_bytes: 2 * 1024 * 1024,
+                expires_secs: 300,
+                bind: "url".into(),
+            },
+            Step::Respond {
+                id: "v13".into(),
+                fields: vec![set("url", path("url"))],
+                status: None,
+                cookies: vec![],
+            },
+        ],
+    );
+    upload.path = "/avatar/upload-url".into();
+    routes.push(upload);
+    let mut download = route(
+        "sign_avatar_download",
+        HttpMethod::Get,
+        "AvatarRequest",
+        "AvatarUrl",
+        vec![
+            who("v14"),
+            Step::ObjectPresignGet {
+                id: "v15".into(),
+                bucket_env: "AVATAR_BUCKET".into(),
+                key: path("claims.sub"),
+                expires_secs: 300,
+                bind: "url".into(),
+            },
+            Step::Respond {
+                id: "v16".into(),
+                fields: vec![set("url", path("url"))],
+                status: None,
+                cookies: vec![],
+            },
+        ],
+    );
+    download.path = "/avatar/url".into();
+    routes.push(download);
 }
 
 /// Adds to the first service notes that belong to a tenant and are never really deleted: the table is filtered by its

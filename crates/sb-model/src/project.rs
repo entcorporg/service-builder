@@ -1041,6 +1041,35 @@ pub enum Step {
         bucket_env: String,
         key: Expr,
     },
+    /// A time-limited URL to **read** an object, signed (SigV4) so that the client fetches it straight from the store or
+    /// from a CDN in front of it: the bytes never cross the service. `bind` receives the URL (a text). The service only
+    /// checks who may read and signs; it does not look whether the object exists (the client gets a 404 from the store).
+    /// The host is `S3_PUBLIC_ENDPOINT` when set (the address the client reaches, which may differ from the service's
+    /// own `S3_ENDPOINT`), else the store's. `expires_secs` is between 1 second and 7 days.
+    #[serde(rename_all = "camelCase")]
+    ObjectPresignGet {
+        id: String,
+        bucket_env: String,
+        key: Expr,
+        expires_secs: u32,
+        bind: String,
+    },
+    /// A time-limited URL to **write** an object: the client sends it a `PUT` with the file, straight to the store. The
+    /// `Content-Type` and the `Content-Length` are part of the signature, so the client must send exactly the type and the
+    /// size declared here: `size` (bytes) is checked against `max_bytes` (a `400` above it, or below 1) and any other
+    /// body is refused by the store. The type is the client's word, not sniffed: do not serve it back as is for anything
+    /// but a download. `bind` receives the URL (a text).
+    #[serde(rename_all = "camelCase")]
+    ObjectPresignPut {
+        id: String,
+        bucket_env: String,
+        key: Expr,
+        content_type: Expr,
+        size: Expr,
+        max_bytes: u32,
+        expires_secs: u32,
+        bind: String,
+    },
     /// Authenticates a webhook by its signature, before the body is read as JSON: an HMAC-SHA256 of
     /// `"{timestamp}.{raw body}"`, sent in `header` as `t=<unix seconds>,v1=<hex>` (Stripe's scheme). A
     /// wrong, missing or stale signature (past `tolerance_secs`, which stops a replay) is a 401. It has
@@ -1197,6 +1226,8 @@ impl Step {
             | Step::ObjectPut { id, .. }
             | Step::ObjectGet { id, .. }
             | Step::ObjectDelete { id, .. }
+            | Step::ObjectPresignGet { id, .. }
+            | Step::ObjectPresignPut { id, .. }
             | Step::Decrypt { id, .. }
             | Step::HashPassword { id, .. }
             | Step::VerifyPassword { id, .. }

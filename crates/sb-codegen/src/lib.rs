@@ -1122,6 +1122,9 @@ mod tests {
             ),
             "{flat}"
         );
+        // The direct way: the service signs, the client talks to the store.
+        assert!(flat.contains("let url: String = eda_runtime::s3::presign_put(\"AVATAR_BUCKET\", &claims.sub.clone(), &input.content_type.clone(), input.size.clone(), 2097152, 300).await?;"), "{flat}");
+        assert!(flat.contains("let url: String = eda_runtime::s3::presign_get(\"AVATAR_BUCKET\", &claims.sub.clone(), 300).await?;"), "{flat}");
         // The SDK is built only for the service that stores objects, and a missing bucket stops it at start-up.
         assert!(file(&files, "services/orders/Cargo.toml").contains("features = [\"s3\"]"));
         assert!(

@@ -407,6 +407,18 @@ workspace généré (avec ses propres tests : `cargo test -p eda-runtime`), et v
   - `objectPut` (corps en base64, 10 Mio au plus, type `type/sous-type`), `objectGet` (la variable est le contenu en base64, ou
     **rien** si l'objet n'existe pas, ce qui n'est pas une erreur) et `objectDelete` (un objet absent n'est pas une erreur). La clé
     ne peut pas être vide, dépasser 1024 octets ni contenir de caractère de contrôle.
+  - **Deux façons de servir un fichier.** Par l'API (`objectPut` / `objectGet` : les octets traversent le service, en base64) ou
+    **en direct** : l'API vérifie les droits et **signe**, puis le front parle lui-même au stockage ou au CDN placé devant lui,
+    si bien que le service reste léger (avatars, historique d'avatars, listes de PDF : N URL signées, zéro octet relayé).
+    - `objectPresignGet` : la variable est une URL signée (SigV4) de lecture, valable `expiresSecs` (1 s à 7 jours). L'existence de
+      l'objet n'est pas vérifiée (le stockage répond 404 au front) ; la signature est locale, aucun appel au stockage.
+    - `objectPresignPut` : la variable est une URL signée d'écriture, sur laquelle le front fait un `PUT`. Le `Content-Type` et le
+      `Content-Length` font partie de la signature : `size` (octets, annoncé par le front) est borné par `maxBytes` (1 à 10 Mio, `400`
+      sinon) et le stockage refuse tout autre corps. Le type reste la parole du client (pas de reconnaissance par les premiers
+      octets comme avec `imageSniff`) : ne pas le servir tel quel dans une page. À la charge du flux : écrire la ligne en base une
+      fois l'envoi confirmé par le front (un objet sans ligne est inoffensif).
+    - La signature porte l'hôte : `S3_PUBLIC_ENDPOINT` (une URL, vérifiée au démarrage) donne l'adresse que le front atteint, quand
+      elle n'est pas celle du service (`S3_ENDPOINT`), par exemple un CDN ; sans elle, l'adresse du stockage.
   - Le nom du bucket est lu dans la variable d'environnement de l'étape, vérifiée au démarrage. `S3_ENDPOINT` (une URL) désigne un
     stockage compatible, adressé **par chemin** ; sans elle, AWS. Les identifiants sont la chaîne standard du SDK
     (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `us-east-1` par défaut avec un endpoint), jamais dans le projet. Rien

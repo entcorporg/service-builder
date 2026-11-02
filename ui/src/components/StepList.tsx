@@ -7,7 +7,7 @@ import { AssignmentsEditor } from './AssignmentsEditor'
 import { ExprEditor } from './ExprEditor'
 import { Icon } from './Icon'
 import { JwksBody, SignJwtBody, VerifyJwtBody } from './JwtSteps'
-import { ImageSniffBody, ObjectDeleteBody, ObjectGetBody, ObjectPutBody } from './ObjectSteps'
+import { ImageSniffBody, ObjectDeleteBody, ObjectGetBody, ObjectPresignGetBody, ObjectPresignPutBody, ObjectPutBody } from './ObjectSteps'
 import { PasskeyLoginFinishBody, PasskeyLoginStartBody, PasskeyRegisterFinishBody, PasskeyRegisterStartBody } from './PasskeySteps'
 import { RecoveryCodesBody, RecoveryCodeUseBody, TotpGenerateBody, TotpVerifyBody } from './TotpSteps'
 import { OP_LABELS, SqlBody } from './SqlStep'
@@ -42,7 +42,7 @@ function literalDefault(kind: string, repeated: boolean): string | number | bool
 }
 
 
-const STEP_ORDER: StepType[] = ['publish', 'sql', 'callRpc', 'branch', 'let', 'log', 'respond', 'fail', 'rateLimit', 'verifyHmac', 'signJwt', 'verifyJwt', 'jwks', 'totpGenerate', 'totpVerify', 'recoveryCodes', 'recoveryCodeUse', 'passkeyRegisterStart', 'passkeyRegisterFinish', 'passkeyLoginStart', 'passkeyLoginFinish', 'imageSniff', 'objectPut', 'objectGet', 'objectDelete', 'encrypt', 'decrypt', 'hashPassword', 'verifyPassword', 'randomToken', 'sha256', 'code']
+const STEP_ORDER: StepType[] = ['publish', 'sql', 'callRpc', 'branch', 'let', 'log', 'respond', 'fail', 'rateLimit', 'verifyHmac', 'signJwt', 'verifyJwt', 'jwks', 'totpGenerate', 'totpVerify', 'recoveryCodes', 'recoveryCodeUse', 'passkeyRegisterStart', 'passkeyRegisterFinish', 'passkeyLoginStart', 'passkeyLoginFinish', 'imageSniff', 'objectPut', 'objectGet', 'objectPresignGet', 'objectPresignPut', 'objectDelete', 'encrypt', 'decrypt', 'hashPassword', 'verifyPassword', 'randomToken', 'sha256', 'code']
 
 export function StepList({ steps, base, scope, ctx, locate }: ListProps) {
   const project = useStore((s) => s.project)
@@ -187,6 +187,8 @@ function summary(step: Step): string {
       return ''
     case 'imageSniff':
     case 'objectGet':
+    case 'objectPresignGet':
+    case 'objectPresignPut':
       return `→ ${step.bind}`
     case 'passkeyRegisterStart':
     case 'passkeyLoginStart':
@@ -563,6 +565,10 @@ function StepBody(props: {
       return <ObjectPutBody step={step} update={as<'objectPut'>(props.update)} scope={scope} />
     case 'objectGet':
       return <ObjectGetBody step={step} update={as<'objectGet'>(props.update)} scope={scope} />
+    case 'objectPresignGet':
+      return <ObjectPresignGetBody step={step} update={as<'objectPresignGet'>(props.update)} scope={scope} />
+    case 'objectPresignPut':
+      return <ObjectPresignPutBody step={step} update={as<'objectPresignPut'>(props.update)} scope={scope} />
     case 'objectDelete':
       return <ObjectDeleteBody step={step} update={as<'objectDelete'>(props.update)} scope={scope} />
     case 'totpGenerate':

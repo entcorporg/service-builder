@@ -8,7 +8,7 @@ import { check, type Update } from '@tauri-apps/plugin-updater'
 import type { AgentFeedback, Analysis, ExportReport, McpActivation, McpInfo, Project } from './types'
 
 export const api = {
-  sampleProject: () => invoke<Project>('sample_project'),
+  sampleProject: (name?: 'orders' | 'showcase') => invoke<Project>('sample_project', { name }),
   newProject: (name: string) => invoke<Project>('new_project', { name }),
   analyze: (project: Project) => invoke<Analysis>('analyze', { project }),
   openProject: (path: string) => invoke<Project>('open_project', { path }),

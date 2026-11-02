@@ -7,8 +7,11 @@ use sb_model::Project;
 use serde::Serialize;
 
 #[tauri::command]
-fn sample_project() -> Project {
-    sb_model::sample::orders()
+fn sample_project(name: Option<String>) -> Project {
+    match name.as_deref() {
+        Some("showcase") => sb_model::sample::showcase(),
+        _ => sb_model::sample::orders(),
+    }
 }
 
 #[tauri::command]

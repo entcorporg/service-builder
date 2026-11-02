@@ -130,8 +130,18 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                 expr(body, &format!("{path}/body"), out);
                 expr(content_type, &format!("{path}/contentType"), out);
             }
-            Step::ObjectGet { key, .. } | Step::ObjectDelete { key, .. } => {
-                expr(key, &format!("{path}/key"), out)
+            Step::ObjectGet { key, .. }
+            | Step::ObjectDelete { key, .. }
+            | Step::ObjectPresignGet { key, .. } => expr(key, &format!("{path}/key"), out),
+            Step::ObjectPresignPut {
+                key,
+                content_type,
+                size,
+                ..
+            } => {
+                expr(key, &format!("{path}/key"), out);
+                expr(content_type, &format!("{path}/contentType"), out);
+                expr(size, &format!("{path}/size"), out);
             }
             Step::RecoveryCodes { account, .. } => expr(account, &format!("{path}/account"), out),
             Step::RecoveryCodeUse { account, code, .. } => {

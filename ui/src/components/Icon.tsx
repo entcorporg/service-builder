@@ -29,6 +29,8 @@ const PATHS = {
   imageSniff: 'M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4M9 9.5a1 1 0 100-2 1 1 0 000 2z',
   objectPut: 'M12 16V4M7 9l5-5 5 5M4 20h16',
   objectGet: 'M12 4v12M7 11l5 5 5-5M4 20h16',
+  objectPresignGet: 'M10 14a4 4 0 005.7 0l3-3a4 4 0 00-5.7-5.7l-1 1M14 10a4 4 0 00-5.7 0l-3 3a4 4 0 005.7 5.7l1-1',
+  objectPresignPut: 'M10 14a4 4 0 005.7 0l3-3a4 4 0 00-5.7-5.7l-1 1M14 10a4 4 0 00-5.7 0l-3 3a4 4 0 005.7 5.7l1-1M12 21v-5M9.500 18.500L12 16l2.500 2.500',
   objectDelete: 'M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v5M14 11v5',
   encrypt: 'M7 11V8a5 5 0 0110 0v3M5 11h14v10H5zM12 14v4M10 16h4',
   decrypt: 'M7 11V8a5 5 0 019.6-2M5 11h14v10H5zM12 14v4',

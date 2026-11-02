@@ -180,6 +180,10 @@ export type Step =
   /** Reads an object (base64); nothing when there is none. */
   | { type: 'objectGet'; id: string; bucketEnv: string; key: Expr; bind: string }
   | { type: 'objectDelete'; id: string; bucketEnv: string; key: Expr }
+  /** A signed, time-limited URL the client reads an object from directly (store or CDN); binds the URL. */
+  | { type: 'objectPresignGet'; id: string; bucketEnv: string; key: Expr; expiresSecs: number; bind: string }
+  /** A signed URL the client uploads an object to directly, with a fixed type and size; binds the URL. */
+  | { type: 'objectPresignPut'; id: string; bucketEnv: string; key: Expr; contentType: Expr; size: Expr; maxBytes: number; expiresSecs: number; bind: string }
   /** AES-256-GCM of `input`, with the key of the environment variable `keyEnv`: `hex(nonce || ciphertext)`. */
   | { type: 'encrypt'; id: string; keyEnv: string; input: Expr; bind: string }
   /** The text `encrypt` sealed; a wrong key or an altered value is an internal error. */

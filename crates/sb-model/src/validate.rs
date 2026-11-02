@@ -2481,6 +2481,52 @@ impl<'a> Checker<'a> {
                 );
                 false
             }
+            Step::ObjectPresignGet {
+                bucket_env,
+                key,
+                expires_secs,
+                bind,
+                ..
+            } => {
+                self.bucket_env(&format!("{path}/bucketEnv"), bucket_env);
+                self.check_var_name(bind, &format!("{path}/bind"));
+                self.presign_expiry(&format!("{path}/expiresSecs"), *expires_secs);
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, key, Some(&text), &format!("{path}/key"));
+                scope.bind(bind.clone(), text);
+                false
+            }
+            Step::ObjectPresignPut {
+                bucket_env,
+                key,
+                content_type,
+                size,
+                max_bytes,
+                expires_secs,
+                bind,
+                ..
+            } => {
+                self.bucket_env(&format!("{path}/bucketEnv"), bucket_env);
+                self.check_var_name(bind, &format!("{path}/bind"));
+                self.presign_expiry(&format!("{path}/expiresSecs"), *expires_secs);
+                if !(1..=MAX_OBJECT_BYTES).contains(max_bytes) {
+                    self.error(
+                        "E_IMAGE_SIZE",
+                        format!("{path}/maxBytes"),
+                        format!(
+                            "the largest object is between 1 byte and {MAX_OBJECT_BYTES} (10 MiB)"
+                        ),
+                    );
+                }
+                let text = TypeRef::scalar(FieldType::String);
+                for (name, e) in [("key", key), ("contentType", content_type)] {
+                    self.check_expr(scope, e, Some(&text), &format!("{path}/{name}"));
+                }
+                let int = TypeRef::scalar(FieldType::Int64);
+                self.check_expr(scope, size, Some(&int), &format!("{path}/size"));
+                scope.bind(bind.clone(), text);
+                false
+            }
             Step::ObjectDelete {
                 bucket_env, key, ..
             } => {
@@ -2680,6 +2726,17 @@ impl<'a> Checker<'a> {
                 "E_BUCKET_ENV",
                 path,
                 format!("`{name}` is not an environment variable name (e.g. `AVATAR_BUCKET`)"),
+            );
+        }
+    }
+
+    /// A signed URL lives from a second to a week (the longest SigV4 allows).
+    fn presign_expiry(&mut self, path: &str, secs: u32) {
+        if !(1..=604_800).contains(&secs) {
+            self.error(
+                "E_PRESIGN_EXPIRY",
+                path,
+                "a signed URL lasts between 1 second and 7 days (604800)",
             );
         }
     }
@@ -4932,7 +4989,29 @@ mod tests {
     #[test]
     fn the_steps_of_the_object_storage_are_checked() {
         type Case<'a> = (&'a str, &'a dyn Fn(&mut Project));
-        let cases: [Case; 9] = [
+        let cases: [Case; 13] = [
+            ("E_PRESIGN_EXPIRY", &|p| {
+                if let Step::ObjectPresignGet { expires_secs, .. } = avatar_step(p, 4, 1) {
+                    *expires_secs = 0;
+                }
+            }),
+            ("E_PRESIGN_EXPIRY", &|p| {
+                if let Step::ObjectPresignPut { expires_secs, .. } = avatar_step(p, 3, 1) {
+                    *expires_secs = 604_801;
+                }
+            }),
+            ("E_IMAGE_SIZE", &|p| {
+                if let Step::ObjectPresignPut { max_bytes, .. } = avatar_step(p, 3, 1) {
+                    *max_bytes = 0;
+                }
+            }),
+            ("E_TYPE_MISMATCH", &|p| {
+                if let Step::ObjectPresignPut { size, .. } = avatar_step(p, 3, 1) {
+                    *size = Expr::Path {
+                        path: "input.content_type".into(),
+                    };
+                }
+            }),
             ("E_IMAGE_ALLOW", &|p| {
                 if let Step::ImageSniff { allow, .. } = avatar_step(p, 0, 1) {
                     allow.clear();

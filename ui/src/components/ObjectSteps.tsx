@@ -104,3 +104,60 @@ export function ObjectDeleteBody(props: Body<'objectDelete'>) {
     </div>
   )
 }
+
+const SIGNED_NOTE = (
+  <>
+    L’API ne fait que <strong>vérifier qui a le droit et signer</strong> : les octets passent directement entre le front et le stockage (ou un CDN devant lui), jamais par
+    l’API. Si le front n’atteint pas le stockage à la même adresse que le service, <code>S3_PUBLIC_ENDPOINT</code> (une URL) donne celle pour laquelle l’URL est signée. {STORE_NOTE}
+  </>
+)
+
+function Expiry(props: { value: number; onChange: (n: number) => void }) {
+  return (
+    <div className="form-row">
+      <span>Durée</span>
+      <NumberInput label="Durée de validité de l’URL (secondes)" min={1} value={props.value} onChange={props.onChange} />
+      <small className="muted">secondes, de 1 à 604800 (7 jours)</small>
+    </div>
+  )
+}
+
+/** `objectPresignGet`. */
+export function ObjectPresignGetBody(props: Body<'objectPresignGet'>) {
+  const { step, update: u, scope } = props
+  return (
+    <div className="stack">
+      <BucketEnv value={step.bucketEnv} onChange={(v) => u((s) => (s.bucketEnv = v))} />
+      <ExprEditor label="Clé de l’objet" expr={step.key} target={TEXT} scope={scope} onChange={(v) => v && u((s) => (s.key = v))} />
+      <Expiry value={step.expiresSecs} onChange={(n) => u((s) => (s.expiresSecs = n))} />
+      <small className="muted">
+        La variable est l’URL à donner au front, qui lit l’objet directement. L’existence de l’objet n’est pas vérifiée (le stockage répondra 404 au front) : pour « donne-moi
+        les 5 PDF », lisez les clés en base, signez-en une par objet et renvoyez les URL. {SIGNED_NOTE}
+      </small>
+    </div>
+  )
+}
+
+/** `objectPresignPut`. */
+export function ObjectPresignPutBody(props: Body<'objectPresignPut'>) {
+  const { step, update: u, scope } = props
+  return (
+    <div className="stack">
+      <BucketEnv value={step.bucketEnv} onChange={(v) => u((s) => (s.bucketEnv = v))} />
+      <ExprEditor label="Clé de l’objet" expr={step.key} target={TEXT} scope={scope} onChange={(v) => v && u((s) => (s.key = v))} />
+      <ExprEditor label="Type du contenu" expr={step.contentType} target={TEXT} scope={scope} onChange={(v) => v && u((s) => (s.contentType = v))} />
+      <ExprEditor label="Taille du fichier (octets)" expr={step.size} target={scalar('int64')} scope={scope} onChange={(v) => v && u((s) => (s.size = v))} />
+      <div className="form-row">
+        <span>Taille max</span>
+        <NumberInput label="Taille maximale (octets)" min={1} value={step.maxBytes} onChange={(n) => u((s) => (s.maxBytes = n))} />
+        <small className="muted">octets (2 Mo = 2097152, 10 Mio au plus) ; au-delà ou sous 1 : 400</small>
+      </div>
+      <Expiry value={step.expiresSecs} onChange={(n) => u((s) => (s.expiresSecs = n))} />
+      <small className="muted">
+        La variable est l’URL à donner au front, qui fait un <code>PUT</code> du fichier dessus. Le type et la taille sont <strong>signés</strong> : le front doit envoyer exactement
+        ceux-là (en-têtes <code>Content-Type</code> et <code>Content-Length</code>), sinon le stockage refuse. Le type est la parole du client, il n’est pas reconnu d’après les
+        octets comme avec « Reconnaître une image » : ne le servez pas tel quel dans une page. Enregistrez la ligne en base une fois l’envoi confirmé par le front. {SIGNED_NOTE}
+      </small>
+    </div>
+  )
+}
