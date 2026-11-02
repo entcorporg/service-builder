@@ -59,9 +59,9 @@ export function Toolbar() {
       <div className="btn-group">
         <button type="button" className="ghost" onClick={() => void newProject()} title="Nouveau projet vide"><Icon name="new" size={15} /><span className="label">Nouveau</span></button>
         <button type="button" className="ghost" onClick={() => void loadSample()} title="Charger le projet d’exemple"><Icon name="sparkles" size={15} /><span className="label">Exemple</span></button>
-        <button type="button" className="ghost" onClick={() => void loadSample('showcase')} title="Charger l’exemple complet : tous les types de blocs, dont le stockage S3 en direct (URLs signées)"><Icon name="sparkles" size={15} /><span className="label">Exemple complet</span></button>
-        <button type="button" className="ghost" onClick={() => void openProject()} title="Ouvrir (Ctrl+O)"><Icon name="open" size={15} /> Ouvrir</button>
-        <button type="button" className="ghost" onClick={() => void saveProject()} title="Enregistrer (Ctrl+S)"><Icon name="save" size={15} /> Enregistrer</button>
+        <button type="button" className="ghost" onClick={() => void loadSample('showcase')} title="Charger l’exemple complet : tous les types de blocs, dont le stockage S3 en direct (URLs signées)" aria-label="Exemple complet"><Icon name="schema" size={15} /></button>
+        <button type="button" className="ghost" onClick={() => void openProject()} title="Ouvrir (Ctrl+O)" aria-label="Ouvrir"><Icon name="open" size={15} /><span className="label">Ouvrir</span></button>
+        <button type="button" className="ghost" onClick={() => void saveProject()} title="Enregistrer (Ctrl+S)" aria-label="Enregistrer"><Icon name="save" size={15} /><span className="label">Enregistrer</span></button>
         <button type="button" className="ghost" onClick={() => void saveProjectAs()} title="Enregistrer sous… (Ctrl+Maj+S)" aria-label="Enregistrer sous">
           <Icon name="copy" size={15} />
         </button>
