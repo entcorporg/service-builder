@@ -120,7 +120,7 @@ subtle = "2"
 tera = "1"
 tokio-native-tls = "0.3"
 tower = {{ version = "0.5", features = ["util"] }}
-webauthn-rs = {{ version = "0.5", features = ["danger-allow-state-serialisation"] }}
+webauthn-rs = {{ version = "0.5", features = ["danger-allow-state-serialisation", "conditional-ui"] }}
 webauthn-authenticator-rs = {{ version = "0.5", default-features = false, features = ["softtoken"] }}
 "#,
         members.join(", ")

@@ -1067,6 +1067,11 @@ mod tests {
             flat.contains("eda_runtime::webauthn::login_start(&mut tx, &input.account.clone())"),
             "{flat}"
         );
+        // A login that names nobody starts a challenge that names nobody; its second request is the same step.
+        assert!(
+            flat.contains("eda_runtime::webauthn::login_discoverable_start(&mut tx).await?"),
+            "{flat}"
+        );
         assert!(flat.contains("let account: String = eda_runtime::webauthn::login_finish(&mut tx, &input.state_id.clone(), &input.credential.clone()).await?;"), "{flat}");
         // The runtime module is built with its feature, which only this service turns on.
         assert!(

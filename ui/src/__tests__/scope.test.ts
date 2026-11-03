@@ -759,6 +759,15 @@ describe('passkey steps', () => {
     expect(scopeAfter(p, scope, step).challenge).toEqual({ type: { kind: 'message', name: 'PasskeyChallenge' }, repeated: false, optional: false })
   })
 
+  it('start a login on an account, or on nobody (a discoverable login), into the same schema', () => {
+    const p = project()
+    p.messages.push({ name: 'Body', kind: 'api', fields: [text('account')] })
+    const step = makeStep('passkeyLoginStart', p, inputScope('Body'), ctx)
+    expect(step).toMatchObject({ type: 'passkeyLoginStart', account: { kind: 'path', path: 'input.account' }, bind: 'challenge' })
+    const discoverable = { ...step, account: null } as typeof step
+    expect(scopeAfter(p, inputScope('Body'), discoverable).challenge).toEqual({ type: { kind: 'message', name: 'PasskeyChallenge' }, repeated: false, optional: false })
+  })
+
   it('finish a login on the answer of the request, and bind the account', () => {
     const p = project()
     p.messages.push({ name: 'Answer', kind: 'api', fields: [text('state_id'), text('credential')] })

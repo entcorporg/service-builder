@@ -109,7 +109,9 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                 expr(account, &format!("{path}/account"), out);
             }
             Step::PasskeyLoginStart { account, .. } => {
-                expr(account, &format!("{path}/account"), out)
+                if let Some(account) = account {
+                    expr(account, &format!("{path}/account"), out)
+                }
             }
             Step::PasskeyLoginFinish {
                 state_id,

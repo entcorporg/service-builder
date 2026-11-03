@@ -979,17 +979,22 @@ pub enum Step {
         credential: Expr,
         account: Expr,
     },
-    /// First request of logging in with a passkey: a challenge for the passkeys of `account`, into a variable of the
-    /// schema `PasskeyChallenge` (`options` is for `navigator.credentials.get`). An account without any passkey is a
-    /// `401 invalid passkey`, which tells whether it has one: limit the attempts with a `rateLimit` before it. Routes only.
+    /// First request of logging in with a passkey, into a variable of the schema `PasskeyChallenge` (`options` is for
+    /// `navigator.credentials.get`). With an `account`, the challenge is for the passkeys of that account; an account
+    /// without any is a `401 invalid passkey`, which tells whether it has one. Without `account` (a discoverable login,
+    /// no identifier asked), the challenge names nobody: the device offers its passkeys for the site and the account is
+    /// the one that owns the passkey it signs with (`passkeyLoginFinish` gives it back); only passkeys registered with
+    /// `passkeyRegisterStart` can be found so. Either way, limit the attempts with a `rateLimit` before it. Routes only.
     #[serde(rename_all = "camelCase")]
     PasskeyLoginStart {
         id: String,
-        account: Expr,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<Expr>,
         bind: String,
     },
     /// Second request: checks the answer of the browser against the challenge `state_id` (once, within five minutes)
-    /// and gives back, as a text, the account the challenge was started for; the signature counter of the passkey is
+    /// and gives back, as a text, the account the challenge was started for (for a discoverable login, the account that
+    /// owns the passkey the device signed with); the signature counter of the passkey is
     /// kept up to date. Anything wrong is the same `401 invalid passkey`. Routes only.
     #[serde(rename_all = "camelCase")]
     PasskeyLoginFinish {

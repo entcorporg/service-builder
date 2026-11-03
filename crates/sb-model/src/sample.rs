@@ -1283,6 +1283,12 @@ pub fn add_passkeys(p: &mut Project) {
         .push(api("PasskeyAck", vec![field("ok", FieldType::Bool)]));
     p.messages
         .push(api("PasskeyLoginBody", vec![field("account", string())]));
+    // A login that names nobody has no account to count the attempts under: the caller is counted instead.
+    let mut client = field("client", string());
+    client.source = Some(RequestSource::Header {
+        name: "X-Forwarded-For".into(),
+    });
+    p.messages.push(api("PasskeyDiscoverBody", vec![client]));
     p.messages.push(api(
         "PasskeyLoginAnswer",
         vec![field("state_id", string()), field("credential", string())],
@@ -1372,7 +1378,7 @@ pub fn add_passkeys(p: &mut Project) {
             },
             Step::PasskeyLoginStart {
                 id: "p8".into(),
-                account: path("input.account"),
+                account: Some(path("input.account")),
                 bind: "challenge".into(),
             },
             challenge_back("p9"),
@@ -1407,6 +1413,27 @@ pub fn add_passkeys(p: &mut Project) {
                 status: None,
                 cookies: vec![],
             },
+        ],
+    ));
+    // The discoverable login: no account in the request. Its second request is `passkey_login_finish`.
+    routes.push(route(
+        "passkey_discover_start",
+        "/passkeys/discover/start",
+        "PasskeyDiscoverBody",
+        "PasskeyChallenge",
+        vec![
+            Step::RateLimit {
+                id: "p13".into(),
+                key: path("input.client"),
+                max: 30,
+                window_secs: 900,
+            },
+            Step::PasskeyLoginStart {
+                id: "p14".into(),
+                account: None,
+                bind: "challenge".into(),
+            },
+            challenge_back("p15"),
         ],
     ));
 }

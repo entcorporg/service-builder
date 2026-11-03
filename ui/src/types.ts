@@ -169,8 +169,8 @@ export type Step =
   | { type: 'passkeyRegisterStart'; id: string; account: Expr; name: Expr; bind: string }
   /** Second request: checks the browser's answer against the challenge and stores the passkey. A refusal is a 400. */
   | { type: 'passkeyRegisterFinish'; id: string; stateId: Expr; credential: Expr; account: Expr }
-  /** First request of a login with a passkey: a challenge for the passkeys of the account. */
-  | { type: 'passkeyLoginStart'; id: string; account: Expr; bind: string }
+  /** First request of a login with a passkey: a challenge for the passkeys of the account. Without `account` (absent or `null`), a discoverable login: the challenge names nobody and the account is the one of the passkey the device signs with. */
+  | { type: 'passkeyLoginStart'; id: string; account?: Expr | null; bind: string }
   /** Second request: checks the answer and binds the account (a text) the challenge was started for. A refusal is a 401. */
   | { type: 'passkeyLoginFinish'; id: string; stateId: Expr; credential: Expr; bind: string }
   /** Recognises an image (base64) from its first bytes, within a size; binds its media type. A refusal is a 400. */

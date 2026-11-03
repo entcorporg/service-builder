@@ -2378,7 +2378,9 @@ impl<'a> Checker<'a> {
                 self.passkey_in_route(env, path);
                 self.check_var_name(bind, &format!("{path}/bind"));
                 let text = TypeRef::scalar(FieldType::String);
-                self.check_expr(scope, account, Some(&text), &format!("{path}/account"));
+                if let Some(account) = account {
+                    self.check_expr(scope, account, Some(&text), &format!("{path}/account"));
+                }
                 self.passkey_schema(path);
                 scope.bind(bind.clone(), TypeRef::message("PasskeyChallenge"));
                 false
@@ -4883,6 +4885,48 @@ mod tests {
             };
         }
         assert!(errors(&p).contains(&"E_UNKNOWN_PATH".to_string()));
+    }
+
+    #[test]
+    fn a_passkey_login_may_leave_the_account_out_but_not_get_it_wrong() {
+        // The showcase has both: with an account (route 2) and without (the last route).
+        let p = with_passkeys();
+        let routes = &p.services[0].routes;
+        let account_of = |r: &crate::project::Route| {
+            r.steps.iter().find_map(|s| match s {
+                Step::PasskeyLoginStart { account, .. } => Some(account.is_some()),
+                _ => None,
+            })
+        };
+        assert_eq!(account_of(&routes[5 + 2]), Some(true));
+        assert_eq!(account_of(routes.last().unwrap()), Some(false));
+        // An account that is there is still checked.
+        let mut p = with_passkeys();
+        if let Step::PasskeyLoginStart { account, .. } = passkey_step(&mut p, 2, 1) {
+            *account = Some(Expr::Path {
+                path: "input.nope".into(),
+            });
+        }
+        assert!(errors(&p).contains(&"E_UNKNOWN_PATH".to_string()));
+        // In the JSON, no `account` is a discoverable login, and an old project with one reads as before.
+        let step: Step =
+            serde_json::from_str(r#"{"type":"passkeyLoginStart","id":"a","bind":"c"}"#).unwrap();
+        assert!(matches!(
+            step,
+            Step::PasskeyLoginStart { account: None, .. }
+        ));
+        assert!(!serde_json::to_string(&step).unwrap().contains("account"));
+        let step: Step = serde_json::from_str(
+            r#"{"type":"passkeyLoginStart","id":"a","bind":"c","account":{"kind":"path","path":"input.account"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            step,
+            Step::PasskeyLoginStart {
+                account: Some(_),
+                ..
+            }
+        ));
     }
 
     #[test]

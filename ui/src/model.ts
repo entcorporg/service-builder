@@ -586,7 +586,7 @@ export const STEP_LABELS: Record<StepType, { label: string; hint: string }> = {
   recoveryCodeUse: { label: 'Utiliser un code de récupération', hint: 'Valable une seule fois, avec ou sans tiret. Sinon 401' },
   passkeyRegisterStart: { label: 'Passkey : début d’enregistrement', hint: 'Un défi pour le navigateur (WebAuthn) ; le compte est déjà authentifié' },
   passkeyRegisterFinish: { label: 'Passkey : fin d’enregistrement', hint: 'Vérifie la réponse de l’appareil, une seule fois, et stocke la passkey. Sinon 400' },
-  passkeyLoginStart: { label: 'Passkey : début de connexion', hint: 'Un défi pour les passkeys du compte. Sans passkey : 401' },
+  passkeyLoginStart: { label: 'Passkey : début de connexion', hint: 'Un défi pour les passkeys du compte, ou sans compte : l’appareil propose les siennes. Sans passkey : 401' },
   passkeyLoginFinish: { label: 'Passkey : fin de connexion', hint: 'Vérifie la réponse et donne le compte. Sinon 401' },
   imageSniff: { label: 'Reconnaître une image', hint: 'PNG ou JPEG d’après les premiers octets, jamais le Content-Type du client ; pas de SVG. Sinon 400' },
   objectPut: { label: 'Stocker un objet', hint: 'Dans un bucket privé (S3 : Garage, MinIO ou AWS). L’objet d’abord, la base ensuite' },

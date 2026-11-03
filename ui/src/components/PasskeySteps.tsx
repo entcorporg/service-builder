@@ -47,11 +47,29 @@ export function PasskeyLoginStartBody(props: Body<'passkeyLoginStart'>) {
   const { step, update: u, scope } = props
   return (
     <div className="stack">
-      <ExprEditor label="Compte" expr={step.account} target={TEXT} scope={scope} onChange={(v) => v && u((s) => (s.account = v))} />
-      <small className="muted">
-        La variable reçoit <code>PasskeyChallenge</code> (<code>options</code> : le JSON de <code>navigator.credentials.get</code>). Un compte sans passkey est un{' '}
-        <code>401 invalid passkey</code> : cela révèle qu’il n’en a pas, donc placez un « Limiter le débit » avant.
-      </small>
+      <label className="check" title="Aucun identifiant demandé : l’appareil propose les passkeys qu’il a pour le site">
+        <input
+          type="checkbox"
+          aria-label="Sans identifiant"
+          checked={!step.account}
+          onChange={(e) => u((s) => (s.account = e.target.checked ? null : { kind: 'path', path: 'input.account' }))}
+        />{' '}
+        sans identifiant (passkey découvrable)
+      </label>
+      {step.account && <ExprEditor label="Compte" expr={step.account} target={TEXT} scope={scope} onChange={(v) => v && u((s) => (s.account = v))} />}
+      {step.account ? (
+        <small className="muted">
+          La variable reçoit <code>PasskeyChallenge</code> (<code>options</code> : le JSON de <code>navigator.credentials.get</code>). Un compte sans passkey est un{' '}
+          <code>401 invalid passkey</code> : cela révèle qu’il n’en a pas, donc placez un « Limiter le débit » avant.
+        </small>
+      ) : (
+        <small className="muted">
+          Le défi ne nomme personne : le navigateur propose les passkeys qu’il détient pour le site (<code>navigator.credentials.get</code> avec <code>mediation: &quot;conditional&quot;</code>, ou en
+          bouton) et l’étape de fin donne le compte à qui appartient la passkey signée. Seules les passkeys enregistrées par « début d’enregistrement » sont retrouvées ainsi, et seulement si
+          l’appareil les garde de son côté. Chaque appel garde un défi cinq minutes, sans compte pour compter : placez un « Limiter le débit » avant, sur le client (un en-tête
+          comme X-Forwarded-For, par exemple).
+        </small>
+      )}
     </div>
   )
 }

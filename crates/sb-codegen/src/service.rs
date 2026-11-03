@@ -1942,9 +1942,16 @@ fn steps(
             }
             Step::PasskeyLoginStart { account, bind, .. } => {
                 let text = TypeRef::scalar(FieldType::String);
-                let account = lower(project, scope, account, &text)?;
+                // Without an account the challenge names nobody (a discoverable login).
+                let start = match account {
+                    Some(account) => format!(
+                        "login_start(&mut tx, &{})",
+                        lower(project, scope, account, &text)?
+                    ),
+                    None => "login_discoverable_start(&mut tx)".to_string(),
+                };
                 c.line(format!(
-                    "let {bind}: pb::PasskeyChallenge = {{ let challenge = eda_runtime::webauthn::login_start(&mut tx, &{account}).await?; pb::PasskeyChallenge {{ state_id: challenge.state_id, options: challenge.options, ..Default::default() }} }};"
+                    "let {bind}: pb::PasskeyChallenge = {{ let challenge = eda_runtime::webauthn::{start}.await?; pb::PasskeyChallenge {{ state_id: challenge.state_id, options: challenge.options, ..Default::default() }} }};"
                 ));
                 scope.bind(bind.clone(), TypeRef::message("PasskeyChallenge"));
             }

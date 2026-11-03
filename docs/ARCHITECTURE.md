@@ -388,12 +388,32 @@ workspace généré (avec ses propres tests : `cargo test -p eda-runtime`), et v
     `400 invalid passkey`, la fin de connexion en `401 invalid passkey` (même réponse faux, rejoué, expiré ou mal formé) ;
     elle donne le compte du défi, auquel on signe un jeton, et tient à jour le compteur de signature.
   - Un compte sans passkey reçoit un 401 au début de connexion, ce qui révèle qu'il n'en a pas : à protéger par un
-    `rateLimit` (la vitrine : 10 par 15 minutes). La connexion **sans identifiant** (passkey « découvrable ») n'est pas faite.
+    `rateLimit` (la vitrine : 10 par 15 minutes).
+  - **Connexion sans identifiant (passkey « découvrable »)** : `passkeyLoginStart` **sans `account`**. Le défi ne nomme
+    personne (pas d'`allowCredentials`, vérification de l'utilisateur exigée, `mediation: "conditional"` pour le
+    remplissage automatique ; un bouton marche aussi) : l'appareil propose ses passkeys pour le site. La fin de connexion est
+    la **même étape** `passkeyLoginFinish`, qui reconnaît le cas au type d'état (`discover`, sans compte). Le compte est celui
+    **pour lequel la passkey a été stockée** (retrouvée par `credential_id`), jamais ce que dit le client : son `userHandle`
+    ne sert qu'à recouper (il doit être celui du compte de la passkey, sinon 401) et la signature est vérifiée avec la clé
+    stockée. Un défi de l'un ne termine pas l'autre. Même `401 invalid passkey` pour tout refus, un `credential_id` inconnu
+    compris, donc rien ne dit si une passkey existe. Comme il n'y a pas de compte sur lequel compter les essais, le
+    `rateLimit` se fait sur le client (la vitrine : l'en-tête `X-Forwarded-For`, fiable derrière un proxy qui le fixe) ; chaque
+    début garde un état cinq minutes, nettoyé au début suivant.
+  - L'enregistrement demande `residentKey: "preferred"` (options modifiées après la bibliothèque, qui n'en demande aucune) : sans
+    cela un appareil peut créer une clé qu'il ne sait pas proposer sans compte. « Préféré » et non « exigé » : un appareil qui
+    ne peut pas s'enregistre quand même, mais ne sera pas retrouvé sans compte. Les passkeys déjà enregistrées avant ce
+    changement ne sont découvrables que si l'appareil les avait créées ainsi (les clés des gestionnaires de mots de passe et
+    des téléphones le sont en général ; une clé de sécurité matérielle non).
   - La fonctionnalité Cargo `webauthn` du runtime (qui apporte OpenSSL) n'est activée que dans le `Cargo.toml` des services
     qui ont une étape passkey ; `webauthn-tests` ajoute l'authentificateur logiciel des tests.
   Vérifié avec un authentificateur logiciel (vraies signatures, sans navigateur) puis sur le code généré avec PostgreSQL :
   enregistrement puis connexion, jeton d'accès valide pour le bon compte ; défi rejoué, jeton d'un autre compte, compte sans
   passkey, JSON invalide : refus ; la onzième tentative d'un compte est un 429.
+  La connexion découvrable est vérifiée de la même façon (avec PostgreSQL, l'appareil logiciel étant complété côté client de
+  test : il ne choisit pas seul une clé et ne rend pas de `userHandle`, ce que fait un vrai appareil) : deux appareils
+  reconnus chacun pour son compte, défi à usage unique, réponse refusée contre un autre défi, `userHandle` d'un autre
+  compte, clé d'un autre compte revendiquée avec une signature qui n'est pas la sienne, passkey inconnue, JSON invalide :
+  401 chaque fois ; le test échoue si le recoupement du `userHandle` est retiré. **Pas essayé avec un vrai navigateur.**
 
 - **Stockage objet (S3)** : pour les fichiers d'un utilisateur, la photo de profil par exemple, dans un bucket **privé**
   (Garage ou MinIO en développement, AWS en production). Ce qui traverse une étape est du **texte** : le contenu est en

@@ -1,6 +1,7 @@
 //! Passkeys (WebAuthn) for the `passkey*` steps: registering a device and logging in with it, each in two requests.
 //! The first request (`start`) hands the browser a challenge; the second (`finish`) checks the browser's answer
-//! against it. What links them is the state of the challenge, kept in `webauthn_states` for a few minutes and consumed
+//! against it. A login can name the account (`login_start`) or not (`login_discoverable_start`): the device then
+//! offers its passkeys for the site and the account is found from the passkey it signed with. What links them is the state of the challenge, kept in `webauthn_states` for a few minutes and consumed
 //! by one `DELETE ... RETURNING`, so a `start` can be finished once and an answer cannot be replayed.
 //!
 //! The relying party is the site itself: the domain (RP ID) and the origin come from the environment variable
@@ -15,8 +16,8 @@ use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use webauthn_rs::prelude::{
-    Passkey, PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential,
-    RegisterPublicKeyCredential, Url, Webauthn, WebauthnBuilder,
+    AuthenticationResult, DiscoverableAuthentication, DiscoverableKey, Passkey, PasskeyAuthentication,
+    PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential, Url, Webauthn, WebauthnBuilder,
 };
 
 use crate::http::HttpError;
@@ -35,6 +36,8 @@ pub const STATE_TTL_MINUTES: i32 = 5;
 
 const REGISTER: &str = "register";
 const LOGIN: &str = "login";
+/// A login that did not name the account. It has no account in its state: the column holds an empty text.
+const DISCOVER: &str = "discover";
 
 /// What the browser needs to go on: the state to give back, and the options of `navigator.credentials.create` (or
 /// `.get`) as JSON.
@@ -107,14 +110,21 @@ async fn keep_state(tx: &mut sqlx::PgConnection, kind: &str, account: &str, stat
     Ok(id)
 }
 
-/// Takes the state of a challenge: one statement, so two answers to the same challenge cannot both find it. `account`
-/// restricts it to the account it was started for, when the caller knows who is answering.
-async fn take_state(tx: &mut sqlx::PgConnection, kind: &str, state_id: &str, account: Option<&str>) -> Result<Option<(String, String)>> {
+/// Takes the state of a challenge: one statement, so two answers to the same challenge cannot both find it. `kinds` are
+/// the kinds of challenge the caller accepts; `account` restricts it to the account it was started for, when the caller
+/// knows who is answering. Gives back the kind, the account and the state.
+async fn take_state(
+    tx: &mut sqlx::PgConnection,
+    kinds: &[&str],
+    state_id: &str,
+    account: Option<&str>,
+) -> Result<Option<(String, String, String)>> {
+    let kinds: Vec<String> = kinds.iter().map(|k| k.to_string()).collect();
     Ok(sqlx::query_as(
-        "DELETE FROM webauthn_states WHERE id = $1 AND kind = $2 AND expires_at > now() AND ($3::text IS NULL OR account = $3) RETURNING account, state",
+        "DELETE FROM webauthn_states WHERE id = $1 AND kind = ANY($2) AND expires_at > now() AND ($3::text IS NULL OR account = $3) RETURNING kind, account, state",
     )
     .bind(state_id)
-    .bind(kind)
+    .bind(kinds)
     .bind(account)
     .fetch_optional(tx)
     .await?)
@@ -128,14 +138,27 @@ pub async fn register_start(tx: &mut sqlx::PgConnection, account: &str, name: &s
         .start_passkey_registration(user_handle(account), name, name, (!known.is_empty()).then_some(known))
         .map_err(|e| anyhow!("WebAuthn: {e}"))?;
     let state_id = keep_state(tx, REGISTER, account, &serde_json::to_string(&state)?).await?;
-    Ok(Challenge { state_id, options: serde_json::to_string(&options)? })
+    Ok(Challenge { state_id, options: prefer_discoverable(&options)? })
+}
+
+/// The options of a registration, asking the device for a passkey it can offer without being told the account
+/// (`residentKey: preferred`): the library asks for none, and a login that does not name the account can only find
+/// such passkeys. "Preferred" and not "required", so that a device that cannot still registers (it then logs in with the
+/// account named). The options are not signed and the state does not hold them, so changing them is safe.
+fn prefer_discoverable(options: &webauthn_rs::prelude::CreationChallengeResponse) -> Result<String> {
+    let mut json = serde_json::to_value(options)?;
+    if let Some(selection) = json.pointer_mut("/publicKey/authenticatorSelection").and_then(|v| v.as_object_mut()) {
+        selection.insert("residentKey".into(), "preferred".into());
+        selection.insert("requireResidentKey".into(), false.into());
+    }
+    Ok(json.to_string())
 }
 
 /// The step `passkeyRegisterFinish`: checks the answer of the device (`credential`, the JSON of the browser) against
 /// the challenge, which must have been started for `account`, and stores the passkey. A 400 when anything is off,
 /// including a device that is already registered, on this account or another.
 pub async fn register_finish(tx: &mut sqlx::PgConnection, state_id: &str, credential: &str, account: &str) -> Result<()> {
-    let Some((_, state)) = take_state(tx, REGISTER, state_id, Some(account)).await? else {
+    let Some((_, _, state)) = take_state(tx, &[REGISTER], state_id, Some(account)).await? else {
         return Err(refused(400));
     };
     let state: PasskeyRegistration = serde_json::from_str(&state).context("a stored challenge cannot be read")?;
@@ -173,27 +196,77 @@ pub async fn login_start(tx: &mut sqlx::PgConnection, account: &str) -> Result<C
     Ok(Challenge { state_id, options: serde_json::to_string(&options)? })
 }
 
-/// The step `passkeyLoginFinish`: checks the answer of the device against the challenge and gives back the account it
-/// was started for. A 401 for anything else, the same whatever is wrong. The signature counter of the passkey is
-/// kept up to date.
+/// The step `passkeyLoginStart` without an account: a challenge that names nobody. The browser offers the passkeys it
+/// holds for the site and the user picks one. Nothing is known of the account here, so nothing can be said about it: the
+/// answer is the same for everybody. Each call keeps a state for five minutes: put a `rateLimit` before it.
+pub async fn login_discoverable_start(tx: &mut sqlx::PgConnection) -> Result<Challenge> {
+    let (options, state) = webauthn()?
+        .start_discoverable_authentication()
+        .map_err(|e| anyhow!("WebAuthn: {e}"))?;
+    let state_id = keep_state(tx, DISCOVER, "", &serde_json::to_string(&state)?).await?;
+    Ok(Challenge { state_id, options: serde_json::to_string(&options)? })
+}
+
+/// The step `passkeyLoginFinish`: checks the answer of the device against the challenge and gives back the account. For
+/// a challenge started for an account, that is the account; for one that named nobody, it is the account that owns the
+/// passkey the device signed with. A 401 for anything else, the same whatever is wrong. The signature counter of the
+/// passkey is kept up to date.
 pub async fn login_finish(tx: &mut sqlx::PgConnection, state_id: &str, credential: &str) -> Result<String> {
-    let Some((account, state)) = take_state(tx, LOGIN, state_id, None).await? else {
+    let Some((kind, account, state)) = take_state(tx, &[LOGIN, DISCOVER], state_id, None).await? else {
         return Err(refused(401));
     };
-    let state: PasskeyAuthentication = serde_json::from_str(&state).context("a stored challenge cannot be read")?;
     let Ok(credential) = serde_json::from_str::<PublicKeyCredential>(credential) else {
         return Err(refused(401));
     };
-    let result = match webauthn()?.finish_passkey_authentication(&credential, &state) {
+    let wa = webauthn()?;
+    if kind == LOGIN {
+        let state: PasskeyAuthentication = serde_json::from_str(&state).context("a stored challenge cannot be read")?;
+        let result = match wa.finish_passkey_authentication(&credential, &state) {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::warn!(error = %e, "a passkey login was refused");
+                return Err(refused(401));
+            }
+        };
+        // The device signed for one of the passkeys of the account; keep its counter.
+        let keys = passkeys(tx, &account).await?;
+        keep_counter(tx, keys, &result).await?;
+        return Ok(account);
+    }
+
+    // The challenge named nobody: the passkey says whose it is. What the device claims (the credential id and the user
+    // handle) is only used to look the passkey up and to cross-check it; the account is the one the passkey was stored for.
+    let state: DiscoverableAuthentication = serde_json::from_str(&state).context("a stored challenge cannot be read")?;
+    let Ok((handle, credential_id)) = wa.identify_discoverable_authentication(&credential) else {
+        return Err(refused(401));
+    };
+    let stored: Option<(String, String)> = sqlx::query_as("SELECT account, passkey FROM webauthn_credentials WHERE credential_id = $1")
+        .bind(credential_key(credential_id))
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some((account, passkey)) = stored else {
+        return Err(refused(401));
+    };
+    if user_handle(&account) != handle {
+        tracing::warn!("a passkey login was refused: the user handle is not the one of the passkey");
+        return Err(refused(401));
+    }
+    let passkey: Passkey = serde_json::from_str(&passkey).context("a stored passkey cannot be read")?;
+    let result = match wa.finish_discoverable_authentication(&credential, state, &[DiscoverableKey::from(&passkey)]) {
         Ok(result) => result,
         Err(e) => {
             tracing::warn!(error = %e, "a passkey login was refused");
             return Err(refused(401));
         }
     };
-    // The device signed for one of the passkeys of the account; keep its counter.
-    for mut passkey in passkeys(tx, &account).await? {
-        if passkey.update_credential(&result) == Some(true) {
+    keep_counter(tx, vec![passkey], &result).await?;
+    Ok(account)
+}
+
+/// Keeps the signature counter of the passkey the device signed with.
+async fn keep_counter(tx: &mut sqlx::PgConnection, keys: Vec<Passkey>, result: &AuthenticationResult) -> Result<()> {
+    for mut passkey in keys {
+        if passkey.update_credential(result) == Some(true) {
             sqlx::query("UPDATE webauthn_credentials SET passkey = $1 WHERE credential_id = $2")
                 .bind(serde_json::to_string(&passkey)?)
                 .bind(credential_key(passkey.cred_id().as_ref()))
@@ -201,7 +274,7 @@ pub async fn login_finish(tx: &mut sqlx::PgConnection, state_id: &str, credentia
                 .await?;
         }
     }
-    Ok(account)
+    Ok(())
 }
 
 #[cfg(all(test, feature = "webauthn-tests"))]
@@ -408,5 +481,116 @@ mod tests {
         sqlx::query("UPDATE webauthn_states SET expires_at = now() - interval '1 second' WHERE id = $1").bind(&challenge.state_id).execute(&mut *tx).await.unwrap();
         assert_eq!(status_of(register_finish(&mut tx, &challenge.state_id, &answer, account).await), Some(400));
         tx.commit().await.unwrap();
+    }
+
+    #[test]
+    fn a_registration_asks_the_device_for_a_passkey_it_can_offer_without_an_account() {
+        let wa = build(APP_URL, None).unwrap();
+        let (options, _) = wa.start_passkey_registration(user_handle("a"), "a@b.fr", "a@b.fr", None).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&prefer_discoverable(&options).unwrap()).unwrap();
+        let selection = &json["publicKey"]["authenticatorSelection"];
+        assert_eq!(selection["residentKey"], "preferred");
+        assert_eq!(selection["requireResidentKey"], false);
+        // The rest of the options is left as the library made it.
+        assert_eq!(json["publicKey"]["challenge"], serde_json::to_value(&options).unwrap()["publicKey"]["challenge"]);
+    }
+
+    /// What a real device does for a challenge that names nobody: it picks the passkey it holds for the site and gives its
+    /// user handle back. The software token cannot (it needs the key to be named and returns no user handle), so the key
+    /// is named on the client side here, and the handle is put in the answer; the server only ever sees the answer. The
+    /// user handle is not signed, so this is what a device sends.
+    fn discoverable_answer(device: &mut WebauthnAuthenticator<SoftToken>, challenge: &Challenge, credential_id: &str, handle: Uuid) -> String {
+        let mut options: serde_json::Value = serde_json::from_str(&challenge.options).unwrap();
+        options["publicKey"]["allowCredentials"] = serde_json::json!([{ "type": "public-key", "id": credential_id }]);
+        let mut answer = serde_json::to_value(device.do_authentication(origin(), serde_json::from_value(options).unwrap()).unwrap()).unwrap();
+        answer["response"]["userHandle"] = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(handle.as_bytes()).into();
+        answer.to_string()
+    }
+
+    async fn credential_of(db: &PgPool, account: &str) -> String {
+        sqlx::query_scalar("SELECT credential_id FROM webauthn_credentials WHERE account = $1").bind(account).fetch_one(db).await.unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "needs EDA_TEST_DATABASE_URL"]
+    async fn a_device_logs_in_without_naming_the_account_and_the_account_is_the_one_of_its_passkey() {
+        let db = database().await;
+        let (mut alice_device, mut bob_device) = (device(), device());
+        let (alice, bob) = ("passkey-disc-alice", "passkey-disc-bob");
+        sqlx::query("DELETE FROM webauthn_credentials WHERE account = ANY($1)").bind(vec![alice, bob]).execute(&db).await.unwrap();
+        register(&db, &mut alice_device, alice).await;
+        register(&db, &mut bob_device, bob).await;
+        let (alice_key, bob_key) = (credential_of(&db, alice).await, credential_of(&db, bob).await);
+
+        let start = || {
+            let db = db.clone();
+            async move {
+                let mut tx = db.begin().await.unwrap();
+                let c = login_discoverable_start(&mut tx).await.unwrap();
+                tx.commit().await.unwrap();
+                c
+            }
+        };
+        let finish = |challenge: Challenge, answer: String| {
+            let db = db.clone();
+            async move {
+                let mut tx = db.begin().await.unwrap();
+                let result = login_finish(&mut tx, &challenge.state_id, &answer).await;
+                tx.commit().await.unwrap();
+                result
+            }
+        };
+
+        // Nobody is named in the challenge, and the state keeps no account.
+        let first = start().await;
+        let options: serde_json::Value = serde_json::from_str(&first.options).unwrap();
+        assert!(options["publicKey"]["allowCredentials"].as_array().map_or(true, Vec::is_empty));
+        assert_eq!(options["publicKey"]["userVerification"], "required");
+        let kept: String = sqlx::query_scalar("SELECT account FROM webauthn_states WHERE id = $1").bind(&first.state_id).fetch_one(&db).await.unwrap();
+        assert_eq!(kept, "");
+
+        // Each device is recognised as its own account.
+        let answer = discoverable_answer(&mut alice_device, &first, &alice_key, user_handle(alice));
+        assert_eq!(finish(first, answer).await.unwrap(), alice);
+        let second = start().await;
+        let answer = discoverable_answer(&mut bob_device, &second, &bob_key, user_handle(bob));
+        assert_eq!(finish(second, answer).await.unwrap(), bob);
+
+        // The challenge works once, and an answer does not open another challenge.
+        let (one, other) = (start().await, start().await);
+        let for_one = discoverable_answer(&mut alice_device, &one, &alice_key, user_handle(alice));
+        let one_id = Challenge { state_id: one.state_id.clone(), options: one.options.clone() };
+        assert_eq!(status_of(finish(other, for_one.clone()).await), Some(401));
+        assert_eq!(finish(one, for_one.clone()).await.unwrap(), alice);
+        assert_eq!(status_of(finish(one_id, for_one).await), Some(401));
+
+        // A device that claims another account's user handle is refused: the passkey belongs to one account only.
+        let lying = start().await;
+        let answer = discoverable_answer(&mut alice_device, &lying, &alice_key, user_handle(bob));
+        assert_eq!(status_of(finish(lying, answer).await), Some(401));
+        // Bob signs with his key and claims Alice's key id and user handle: the signature is not Alice's.
+        let borrowed = start().await;
+        let mut answer: serde_json::Value = serde_json::from_str(&discoverable_answer(&mut bob_device, &borrowed, &bob_key, user_handle(alice))).unwrap();
+        answer["id"] = alice_key.clone().into();
+        answer["rawId"] = alice_key.clone().into();
+        assert_eq!(status_of(finish(borrowed, answer.to_string()).await), Some(401));
+
+        // A challenge that names the account still works, next to the others.
+        let mut tx = db.begin().await.unwrap();
+        let named = login_start(&mut tx, alice).await.unwrap();
+        tx.commit().await.unwrap();
+        let answer = serde_json::to_string(&alice_device.do_authentication(origin(), serde_json::from_str(&named.options).unwrap()).unwrap()).unwrap();
+        assert_eq!(finish(named, answer).await.unwrap(), alice);
+
+        // A passkey the server never stored: the device signs, the server cannot find the passkey.
+        let mut stranger = device();
+        let (options, _) = build(APP_URL, None).unwrap().start_passkey_registration(user_handle("nobody"), "n", "n", None).unwrap();
+        let registered = stranger.do_registration(origin(), options).unwrap();
+        let unknown = start().await;
+        let answer = discoverable_answer(&mut stranger, &unknown, &credential_key(registered.raw_id.as_ref()), user_handle("nobody"));
+        assert_eq!(status_of(finish(unknown, answer).await), Some(401));
+        // The garbage of a client.
+        let junk = start().await;
+        assert_eq!(status_of(finish(junk, "{not json".into()).await), Some(401));
     }
 }
