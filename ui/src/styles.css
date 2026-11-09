@@ -247,7 +247,7 @@ textarea { resize: vertical; line-height: 1.5; }
 .step-icon { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 7px; flex: none; }
 .step-icon.log { background: rgba(143, 151, 189, 0.18); color: #b6bdea; }
 .step-icon.let { background: rgba(180, 130, 255, 0.18); color: #c7a0ff; }
-.step-icon.publish { background: rgba(255, 176, 74, 0.18); color: var(--topic); }
+.step-icon.publish, .step-icon.publishLive { background: rgba(255, 176, 74, 0.18); color: var(--topic); }
 .step-icon.callRpc { background: rgba(120, 134, 255, 0.2); color: var(--service); }
 .step-icon.branch { background: rgba(255, 102, 160, 0.17); color: #ff8fb8; }
 .step-icon.respond { background: rgba(62, 207, 142, 0.17); color: var(--ok); }
@@ -299,7 +299,7 @@ textarea { resize: vertical; line-height: 1.5; }
 .widget:hover { border-color: var(--accent); background: var(--raised); }
 .widget svg { grid-row: span 2; align-self: center; color: var(--muted); }
 .widget small { color: var(--muted); font-size: 10.5px; line-height: 1.3; }
-.widget.publish svg { color: var(--topic); }
+.widget.publish svg, .widget.publishLive svg { color: var(--topic); }
 .widget.callRpc svg { color: var(--service); }
 .widget.branch svg { color: #ff8fb8; }
 .widget.respond svg { color: var(--ok); }

@@ -69,6 +69,26 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
             Step::Log { .. } => {}
             Step::Let { value, .. } => expr(value, &format!("{path}/value"), out),
             Step::Publish { payload, .. } => assignments(payload, &format!("{path}/payload"), out),
+            Step::PublishLive {
+                account_id,
+                tenant_id,
+                account_ids,
+                origin,
+                data,
+                ..
+            } => {
+                for (name, e) in [
+                    ("accountId", account_id),
+                    ("tenantId", tenant_id),
+                    ("accountIds", account_ids),
+                    ("origin", origin),
+                ] {
+                    if let Some(e) = e {
+                        expr(e, &format!("{path}/{name}"), out);
+                    }
+                }
+                assignments(data, &format!("{path}/data"), out);
+            }
             Step::CallRpc { request, .. } => assignments(request, &format!("{path}/request"), out),
             Step::Respond {
                 fields, cookies, ..

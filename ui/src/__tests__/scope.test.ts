@@ -106,6 +106,16 @@ describe('rename cascades', () => {
     const publish = p.services[0]!.rpcs[0]!.steps[0]!
     expect(publish.type === 'publish' && publish.topic).toBe('orders.accepted')
   })
+  it('follows a real-time service that is renamed, in the steps that push to it', () => {
+    const p = project()
+    addRealtimeService(p, { x: 0, y: 0 })
+    const live = p.services.find((s) => s.kind === 'realtime')!
+    const step = makeStep('publishLive', p, inputScope('Order'), { service: 'Orders', response: 'Placed' })
+    expect(step).toMatchObject({ type: 'publishLive', service: live.name, event: 'orders.changed', permission: 'orders.view', accountId: null })
+    p.services[0]!.rpcs[0]!.steps.push(step)
+    renameService(p, live.name, 'Live')
+    expect(p.services[0]!.rpcs[0]!.steps.some((s) => s.type === 'publishLive' && s.service === 'Live')).toBe(true)
+  })
   it('renames a message in topics, RPCs and field types', () => {
     const p = project()
     renameMessage(p, 'Customer', 'Buyer')

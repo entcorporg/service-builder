@@ -827,7 +827,7 @@ pub fn showcase() -> Project {
     add_avatars(&mut p);
     add_notes(&mut p);
     add_mailer(&mut p);
-    add_realtime(&mut p);
+    add_live_events(&mut p);
     p
 }
 
@@ -1952,4 +1952,41 @@ pub fn add_realtime(p: &mut Project) {
         templates: vec![],
         realtime: Some(RealtimeConfig::default()),
     });
+}
+
+/// Adds a real-time service and makes `Orders.CreateOrder` push `orders.created` to the browsers that may view orders: the
+/// event is sent through the channel of that service once the order is committed.
+pub fn add_live_events(p: &mut Project) {
+    if !p.services.iter().any(|s| s.kind == ServiceKind::Realtime) {
+        add_realtime(p);
+    }
+    let orders = p
+        .services
+        .iter_mut()
+        .find(|s| s.name == "Orders")
+        .expect("the Orders service");
+    let create = orders
+        .rpcs
+        .iter_mut()
+        .find(|r| r.name == "CreateOrder")
+        .expect("the CreateOrder RPC");
+    let at = create
+        .steps
+        .iter()
+        .position(|s| matches!(s, Step::Respond { .. }))
+        .unwrap_or(create.steps.len());
+    create.steps.insert(
+        at,
+        Step::PublishLive {
+            id: "o3b".into(),
+            service: "Realtime".into(),
+            event: "orders.created".into(),
+            account_id: None,
+            tenant_id: None,
+            permission: Some("orders.view".into()),
+            account_ids: None,
+            origin: None,
+            data: vec![set("id", path("order_id"))],
+        },
+    );
 }

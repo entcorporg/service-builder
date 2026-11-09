@@ -166,6 +166,7 @@ mod tests {
                 "runtime/src/jobs.rs",
                 "runtime/src/jwt.rs",
                 "runtime/src/lib.rs",
+                "runtime/src/live.rs",
                 "runtime/src/outbox.rs",
                 "runtime/src/rate_limit.rs",
                 "runtime/src/s3.rs",
@@ -1149,6 +1150,54 @@ mod tests {
         assert!(!file(&plain, "services/orders/Cargo.toml").contains("webauthn"));
         assert!(!file(&plain, "services/orders/src/app/schema.rs").contains("webauthn"));
         assert!(!file(&plain, "services/orders/src/app/config.rs").contains("webauthn"));
+    }
+
+    #[test]
+    fn a_live_event_is_pushed_after_the_commit_through_the_channel_of_the_realtime_service() {
+        let mut p = sample::orders();
+        sample::add_live_events(&mut p);
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&p)),
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        let files = generate(&p).unwrap();
+        let rpc = file(&files, "services/orders/src/flows/rpc.rs");
+        let flat = rpc.split_whitespace().collect::<Vec<_>>().join(" ");
+        // The buffer lives with the transaction, the event is kept in it, and sent right after the commit.
+        assert!(
+            flat.contains("let mut live = eda_runtime::live::Live::default();"),
+            "{flat}"
+        );
+        assert!(
+            flat.contains("live.push(\"live-events\", eda_runtime::live::Event { kind: \"orders.created\", account_id: None, tenant_id: None, permission: Some(\"orders.view\"), account_ids: Vec::new(), origin: None, data: vec![(\"id\", (order_id.clone()).to_string())], });"),
+            "{flat}"
+        );
+        let commit = flat.find("tx.commit().await?; live.flush().await;");
+        assert!(commit.is_some(), "{flat}");
+        assert!(flat.find("live.push(").unwrap() < commit.unwrap());
+        // Only this service brings the Redis client in, and it checks where the server is at start-up.
+        assert!(file(&files, "services/orders/Cargo.toml").contains("features = [\"live\"]"));
+        assert!(
+            file(&files, "services/orders/src/app/config.rs")
+                .contains("eda_runtime::live::check_config()?;")
+        );
+        assert!(
+            file(&files, "runtime/src/lib.rs")
+                .contains("#[cfg(feature = \"live\")]\npub mod live;")
+        );
+        assert!(file(&files, "docker-compose.yml").contains("dragonfly:"));
+        // Nothing of it in a service that pushes nothing.
+        for (path, absent) in [
+            ("services/payments/Cargo.toml", "live"),
+            ("services/payments/src/flows/consumers.rs", "live"),
+            ("services/payments/src/app/config.rs", "live::"),
+        ] {
+            assert!(!file(&files, path).contains(absent), "{path}");
+        }
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/Cargo.toml").contains("live"));
+        assert!(!file(&plain, "services/orders/src/flows/rpc.rs").contains("live"));
     }
 
     #[test]

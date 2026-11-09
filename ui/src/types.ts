@@ -148,6 +148,19 @@ export type Step =
   | { type: 'log'; id: string; level: LogLevel; message: string }
   | { type: 'let'; id: string; name: string; valueType: FieldType; optional: boolean; repeated: boolean; value: Expr }
   | { type: 'publish'; id: string; topic: string; payload: Assignment[] }
+  /** An event for the browsers through a real-time service, sent after the commit. */
+  | {
+      type: 'publishLive'
+      id: string
+      service: string
+      event: string
+      accountId: Expr | null
+      tenantId: Expr | null
+      permission: string | null
+      accountIds: Expr | null
+      origin: Expr | null
+      data: Assignment[]
+    }
   | { type: 'callRpc'; id: string; service: string; method: string; request: Assignment[]; bind: string | null }
   | { type: 'branch'; id: string; condition: Condition; then: Step[]; otherwise: Step[] }
   | { type: 'respond'; id: string; fields: Assignment[]; status: number | null; cookies: Cookie[] }

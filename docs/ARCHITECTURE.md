@@ -52,7 +52,7 @@ vérité : le canvas, l'inspecteur et le code généré en sont des vues.
   Un producteur sans étape *Publier* donne un avertissement. Les projets enregistrés avant (`schemaVersion` 1) sont
   migrés à l'ouverture : tout service qui publiait sur un topic en devient producteur.
 - **Services** : des RPC (gRPC), des routes HTTP, des consumers (Kafka) et des tâches planifiées. Chacun contient une **liste d'étapes**.
-- **Étapes** : `log`, `let`, `publish`, `callRpc`, `branch` (étapes imbriquées), `respond`, `fail`, `rateLimit` et `verifyHmac` (routes HTTP), `sql`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
+- **Étapes** : `log`, `let`, `publish`, `publishLive`, `callRpc`, `branch` (étapes imbriquées), `respond`, `fail`, `rateLimit` et `verifyHmac` (routes HTTP), `sql`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
   Une liste d'étapes est un arbre (pas un graphe arbitraire) : cela se génère en Rust structuré et s'édite comme
   une pile de blocs, comme dans un page builder.
 
@@ -662,6 +662,28 @@ machine de 16 threads, client et serveur sur la même machine (bouclage), un Dra
 le heartbeat de 15 s est censé tenir) ; la mémoire sous une vraie limite de conteneur (cgroup) ; plus de 50 000 flux ; une tenue de
 plusieurs heures (fuites) ; DragonflyDB en cluster ; la reprise des événements perdus (les Streams `XADD`/`XREAD` avec `Last-Event-ID`
 la permettraient, ce n'est pas fait) ; une entrée Kafka (seul le pub/sub est lu).
+
+**Écrire dans le canal : l'étape `publishLive`.** Un flux n'écrit pas dans Redis à la main : l'étape `publishLive` (« Pousser vers les
+navigateurs », proposée dès que le projet a un service temps réel) nomme le **service temps réel** (le canal vient de ses réglages, il
+n'est donc écrit nulle part ailleurs), le type de l'événement (`domaine.action`), les destinataires et au plus 4 données. Le message
+JSON publié est exactement celui que lit le service (`{"type", "accountId" | "tenantId" + "permission" + "accountIds", "origin", "data"}`).
+Les destinataires sont obligatoires, comme côté service : un compte (`accountId`, seul), ou une permission (`module.view` /
+`module.manage`) et/ou des comptes, dans une entreprise (`tenantId`) ou, sans elle, parmi les flux sans entreprise.
+
+- **Après le commit, jamais avant.** Le flux garde l'événement dans un tampon (`eda_runtime::live::Live`) et le publie juste après
+  `tx.commit()`, y compris pour le commit d'une étape `respond` : un flux qui échoue n'envoie rien, et un navigateur n'apprend jamais un
+  changement que la base n'a pas. Le tampon n'existe que dans les flux d'un service qui a une telle étape. Dans une étape *Code Rust*
+  qui fait un `return` anticipé, il faut écrire `live.flush().await;` après `tx.commit().await?;`.
+- **Au mieux.** Le pub/sub ne garde rien et la base est la vérité : un événement qui ne part pas est journalisé (`live events not
+  published`) mais ne fait pas échouer la requête. Le navigateur relit son état à chaque événement et sur `resync`. Ce n'est pas une
+  garantie de livraison ; pour celle-là il faut l'étape `publish` (outbox, Kafka). Le tampon est envoyé en un seul aller-retour (pipeline).
+- **Le serveur** est `DRAGONFLY_URL` (obligatoire si `APP_ENV=production`, `redis://localhost:6379` sinon), vérifié au démarrage
+  (`eda_runtime::live::check_config`) ; la connexion est faite au premier événement puis gardée. Le client Redis n'est compilé que par
+  les services qui ont l'étape (feature `live` du runtime).
+- **Validation** (les règles du service, vues avant l'exécution) : `E_LIVE_SERVICE` (inconnu ou pas temps réel), `E_LIVE_EVENT` (format,
+  64 caractères, et les noms réservés `grants.updated` et `resync`), `E_LIVE_PERMISSION`, `E_LIVE_AUDIENCE` (aucun destinataire, ou un
+  compte mêlé à une permission, une entreprise ou une liste), `E_LIVE_DATA` (plus de 4 entrées, clé non alphanumérique ou en double), et
+  les types des expressions (UUID pour les comptes, l'entreprise et l'onglet d'origine).
 
 ### Persistance et outbox
 

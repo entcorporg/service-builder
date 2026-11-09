@@ -99,7 +99,7 @@ export function renameService(p: Project, from: string, to: string) {
   for (const t of p.topics) t.producers = t.producers.map((x) => (x === from ? to : x))
   for (const h of allHandlers(p))
     walkSteps(h.steps, (st) => {
-      if (st.type === 'callRpc' && st.service === from) st.service = to
+      if ((st.type === 'callRpc' || st.type === 'publishLive') && st.service === from) st.service = to
     })
 }
 
@@ -593,6 +593,7 @@ export const STEP_LABELS: Record<StepType, { label: string; hint: string }> = {
   log: { label: 'Journal', hint: 'Écrire une ligne de log' },
   let: { label: 'Variable', hint: 'Calculer et nommer une valeur' },
   publish: { label: 'Publier un événement', hint: 'Mis en file (outbox) avec la transaction, puis envoyé sur le topic' },
+  publishLive: { label: 'Pousser vers les navigateurs', hint: 'Événement temps réel (SSE), envoyé après le commit, à un compte ou à une permission' },
   callRpc: { label: 'Appeler un RPC', hint: 'Appeler un autre service en gRPC' },
   branch: { label: 'Condition', hint: 'Si … alors … sinon …' },
   respond: { label: 'Répondre', hint: 'Renvoyer la réponse du RPC' },
@@ -665,6 +666,22 @@ export function makeStep(type: StepType, p: Project, scope: Scope, ctx: { servic
       // A topic this service already produces, else the first one (the caller then declares the service as producer).
       const topic = p.topics.find((t) => t.producers.includes(ctx.service)) ?? p.topics[0]
       return { type, id, topic: topic?.name ?? '', payload: topic ? autoMap(p, scope, topic.message) : [] }
+    }
+    case 'publishLive': {
+      // The first real-time service; the event and the permission are named after the service that sends it.
+      const module = ctx.service.toLowerCase().replace(/[^a-z]+/g, '_').replace(/^_+|_+$/g, '') || 'module'
+      return {
+        type,
+        id,
+        service: p.services.find((s) => s.kind === 'realtime')?.name ?? '',
+        event: `${module}.changed`,
+        accountId: null,
+        tenantId: null,
+        permission: `${module}.view`,
+        accountIds: null,
+        origin: null,
+        data: [{ field: 'id', value: firstText(p, scope, ['id'], { avoid: ['hash', 'token'] }) }],
+      }
     }
     case 'callRpc': {
       const target = p.services.find((s) => s.name !== ctx.service && s.rpcs.length > 0)

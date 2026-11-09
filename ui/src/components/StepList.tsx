@@ -6,6 +6,7 @@ import type { CmpOp, Cookie, Condition, Diagnostic, FieldType, LogLevel, Project
 import { AssignmentsEditor } from './AssignmentsEditor'
 import { ExprEditor } from './ExprEditor'
 import { Icon } from './Icon'
+import { PublishLiveBody } from './LiveSteps'
 import { JwksBody, SignJwtBody, VerifyJwtBody } from './JwtSteps'
 import { ImageSniffBody, ObjectDeleteBody, ObjectGetBody, ObjectPresignGetBody, ObjectPresignPutBody, ObjectPutBody } from './ObjectSteps'
 import { PasskeyLoginFinishBody, PasskeyLoginStartBody, PasskeyRegisterFinishBody, PasskeyRegisterStartBody } from './PasskeySteps'
@@ -42,7 +43,7 @@ function literalDefault(kind: string, repeated: boolean): string | number | bool
 }
 
 
-const STEP_ORDER: StepType[] = ['publish', 'sql', 'callRpc', 'branch', 'let', 'log', 'respond', 'fail', 'rateLimit', 'verifyHmac', 'signJwt', 'verifyJwt', 'jwks', 'totpGenerate', 'totpVerify', 'recoveryCodes', 'recoveryCodeUse', 'passkeyRegisterStart', 'passkeyRegisterFinish', 'passkeyLoginStart', 'passkeyLoginFinish', 'imageSniff', 'objectPut', 'objectGet', 'objectPresignGet', 'objectPresignPut', 'objectDelete', 'encrypt', 'decrypt', 'hashPassword', 'verifyPassword', 'randomToken', 'sha256', 'code']
+const STEP_ORDER: StepType[] = ['publish', 'publishLive', 'sql', 'callRpc', 'branch', 'let', 'log', 'respond', 'fail', 'rateLimit', 'verifyHmac', 'signJwt', 'verifyJwt', 'jwks', 'totpGenerate', 'totpVerify', 'recoveryCodes', 'recoveryCodeUse', 'passkeyRegisterStart', 'passkeyRegisterFinish', 'passkeyLoginStart', 'passkeyLoginFinish', 'imageSniff', 'objectPut', 'objectGet', 'objectPresignGet', 'objectPresignPut', 'objectDelete', 'encrypt', 'decrypt', 'hashPassword', 'verifyPassword', 'randomToken', 'sha256', 'code']
 
 export function StepList({ steps, base, scope, ctx, locate }: ListProps) {
   const project = useStore((s) => s.project)
@@ -94,6 +95,8 @@ export function StepList({ steps, base, scope, ctx, locate }: ListProps) {
 
 function AddStep(props: { allowRespond: boolean; allowFail: boolean; allowSignature: boolean; onAdd: (t: StepType) => void }) {
   const [open, setOpen] = useState(false)
+  // Pushing to the browsers goes through a real-time service: without one there is nothing to choose.
+  const hasRealtime = useStore((s) => s.project.services.some((x) => x.kind === 'realtime'))
   return (
     <div className="add-step">
       <button type="button" className="add-step-btn" onClick={() => setOpen(!open)} aria-expanded={open}>
@@ -101,7 +104,7 @@ function AddStep(props: { allowRespond: boolean; allowFail: boolean; allowSignat
       </button>
       {open && (
         <div className="widget-grid" role="menu">
-          {STEP_ORDER.filter((t) => (t !== 'respond' || props.allowRespond) && ((t !== 'fail' && t !== 'rateLimit') || props.allowFail) && (t !== 'verifyHmac' || props.allowSignature) && (t !== 'verifyJwt' || props.allowFail) && ((t !== 'totpVerify' && t !== 'recoveryCodeUse' && !t.startsWith('passkey')) || props.allowFail) && (t !== 'imageSniff' || props.allowFail)).map((t) => (
+          {STEP_ORDER.filter((t) => (t !== 'publishLive' || hasRealtime) && (t !== 'respond' || props.allowRespond) && ((t !== 'fail' && t !== 'rateLimit') || props.allowFail) && (t !== 'verifyHmac' || props.allowSignature) && (t !== 'verifyJwt' || props.allowFail) && ((t !== 'totpVerify' && t !== 'recoveryCodeUse' && !t.startsWith('passkey')) || props.allowFail) && (t !== 'imageSniff' || props.allowFail)).map((t) => (
             <button
               key={t}
               type="button"
@@ -157,6 +160,8 @@ function summary(step: Step): string {
       return `${step.name} : ${step.valueType.kind}`
     case 'publish':
       return step.topic
+    case 'publishLive':
+      return step.event
     case 'callRpc':
       return `${step.service}.${step.method}`
     case 'branch':
@@ -458,6 +463,9 @@ function StepBody(props: {
         </div>
       )
     }
+
+    case 'publishLive':
+      return <PublishLiveBody step={step} update={as<'publishLive'>(props.update)} scope={scope} />
 
     case 'callRpc': {
       const u = as<'callRpc'>(props.update)

@@ -817,6 +817,36 @@ pub enum Step {
         #[serde(default)]
         payload: Vec<Assignment>,
     },
+    /// Pushes an event to the browsers through a real-time service: a JSON message on its channel, handed to the open
+    /// streams it is for. Sent once the flow has committed (never for a run that fails), best effort: the database is
+    /// the truth and the browser reads its state again, so a lost event never fails the request.
+    ///
+    /// The audience is explicit, as the real-time service requires: `accountId` (every stream of that account), or
+    /// `permission` (`module.view` or `module.manage`) and/or `accountIds`, narrowed to one company by `tenantId`
+    /// (without it, the streams that have no company). `data` holds a few identifiers, never content.
+    #[serde(rename_all = "camelCase")]
+    PublishLive {
+        id: String,
+        /// The real-time service whose channel the event goes to.
+        service: String,
+        /// `domain.action`, written as is on the `event:` line of the stream.
+        event: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_id: Option<Expr>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tenant_id: Option<Expr>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permission: Option<String>,
+        /// A list of account ids (`Vec<String>`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_ids: Option<Expr>,
+        /// The tab that made the change (the `X-Client-Id` header): it does not get the event back.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<Expr>,
+        /// Up to 4 entries: the field is the key, the value a text of 64 characters at most.
+        #[serde(default)]
+        data: Vec<Assignment>,
+    },
     /// Call an RPC of another service.
     #[serde(rename_all = "camelCase")]
     CallRpc {
@@ -1302,6 +1332,7 @@ impl Step {
             Step::Log { id, .. }
             | Step::Let { id, .. }
             | Step::Publish { id, .. }
+            | Step::PublishLive { id, .. }
             | Step::CallRpc { id, .. }
             | Step::Branch { id, .. }
             | Step::Respond { id, .. }

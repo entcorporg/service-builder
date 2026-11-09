@@ -17,6 +17,7 @@ const RUNTIME_JOBS: &str = include_str!("../templates/runtime/jobs.rs");
 const RUNTIME_CRYPTO: &str = include_str!("../templates/runtime/crypto.rs");
 const RUNTIME_VALIDATION: &str = include_str!("../templates/runtime/validation.rs");
 const RUNTIME_TOTP: &str = include_str!("../templates/runtime/totp.rs");
+const RUNTIME_LIVE: &str = include_str!("../templates/runtime/live.rs");
 const RUNTIME_S3: &str = include_str!("../templates/runtime/s3.rs");
 const RUNTIME_WEBAUTHN: &str = include_str!("../templates/runtime/webauthn.rs");
 const RUNTIME_WEBHOOK: &str = include_str!("../templates/runtime/webhook.rs");
@@ -46,6 +47,7 @@ pub fn files(project: &Project) -> Vec<GeneratedFile> {
         GeneratedFile::new("runtime/src/jobs.rs", RUNTIME_JOBS),
         GeneratedFile::new("runtime/src/jwt.rs", RUNTIME_JWT),
         GeneratedFile::new("runtime/src/rate_limit.rs", RUNTIME_RATE_LIMIT),
+        GeneratedFile::new("runtime/src/live.rs", RUNTIME_LIVE),
         GeneratedFile::new("runtime/src/s3.rs", RUNTIME_S3),
         GeneratedFile::new("runtime/src/totp.rs", RUNTIME_TOTP),
         GeneratedFile::new("runtime/src/validation.rs", RUNTIME_VALIDATION),
@@ -318,7 +320,8 @@ fn readme(project: &Project) -> String {
          a flow picks the status with `return Err(eda_runtime::http::HttpError::not_found(\"...\").into());`, any other error is a 500 \
          whose details only go to the logs. Browsers may call the API from the origins of `CORS_ORIGINS` (`*` by default, set it in production).\n\
          - Environment: `KAFKA_BROKERS`, `<SERVICE>_PORT` (gRPC), `<SERVICE>_HTTP_PORT`, `CORS_ORIGINS`, `<SERVICE>_URL` (address used to call \
-         another service), `<SERVICE>_DATABASE_URL`, `OUTBOX_MAX_ATTEMPTS`.\n\
+         another service), `<SERVICE>_DATABASE_URL`, `OUTBOX_MAX_ATTEMPTS`, and `DRAGONFLY_URL` for a service that pushes events to the browsers \
+         (a `publishLive` step: sent right after the commit, best effort).\n\
          - Everything here is regenerated on export: edit the project in Service Builder, not these files.\n",
     );
     s

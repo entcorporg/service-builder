@@ -178,6 +178,9 @@ fn cargo_toml(service: &Service) -> String {
     if !bucket_envs(service).is_empty() {
         features.push("\"s3\"");
     }
+    if uses_live(service) {
+        features.push("\"live\"");
+    }
     let passkeys = if features.is_empty() {
         String::new()
     } else {
@@ -374,6 +377,10 @@ fn config_rs(project: &Project, service: &Service, publishes: bool) -> String {
     if uses_passkeys(service) {
         c.line("// The relying party of the passkeys is the site: a service that does not know its address does not start.");
         c.line("eda_runtime::webauthn::check_config()?;");
+    }
+    if uses_live(service) {
+        c.line("// The events for the browsers go through DragonflyDB: in production the service must know where it is.");
+        c.line("eda_runtime::live::check_config()?;");
     }
     let buckets = bucket_envs(service);
     if !buckets.is_empty() {
@@ -1142,9 +1149,32 @@ fn flows_header(doc: &str) -> Code {
 
 /// Every run is one transaction: what a flow writes through `tx` and the events it publishes
 /// (queued in the outbox) commit together, or not at all.
-fn begin(c: &mut Code) {
+fn begin(c: &mut Code, service: &Service) {
     c.line("// One transaction per run: state written through `tx` and the events published below commit together.");
     c.line("let mut tx = ctx.db.begin().await?;");
+    if uses_live(service) {
+        c.line("// Events for the browsers wait here, and are sent once the transaction has committed (never before, never on failure).");
+        c.line("let mut live = eda_runtime::live::Live::default();");
+    }
+}
+
+/// The commit of a run. The events for the browsers are sent right after it, so that a run that fails sends none, and the
+/// browser never hears of a change the database does not have.
+fn commit(c: &mut Code, service: &Service) {
+    c.line("tx.commit().await?;");
+    if uses_live(service) {
+        c.line("live.flush().await;");
+    }
+}
+
+/// Whether a handler of the service pushes an event to the browsers (`publishLive`): it then holds a `live` buffer, and the
+/// runtime brings the Redis client in.
+fn uses_live(service: &Service) -> bool {
+    let mut used = false;
+    for step in service.handler_steps() {
+        step.walk(&mut |s| used |= matches!(s, Step::PublishLive { .. }));
+    }
+    used
 }
 
 fn rpc_flows_rs(project: &Project, service: &Service) -> Result<String, CodegenError> {
@@ -1157,7 +1187,7 @@ fn rpc_flows_rs(project: &Project, service: &Service) -> Result<String, CodegenE
             r.request,
             r.response
         ));
-        begin(&mut c);
+        begin(&mut c, service);
         let mut scope = Scope::with_input(&r.request);
         steps(
             &mut c,
@@ -1168,7 +1198,7 @@ fn rpc_flows_rs(project: &Project, service: &Service) -> Result<String, CodegenE
             Some(&r.response),
             false,
         )?;
-        c.line("tx.commit().await?;");
+        commit(&mut c, service);
         c.line(format!("Ok(pb::{}::default())", r.response));
         c.close();
     }
@@ -1445,7 +1475,7 @@ fn api_flows_rs(project: &Project, service: &Service) -> Result<String, CodegenE
             "pub async fn {}(ctx: &Ctx, input: pb::{}) -> anyhow::Result<{returns}>",
             r.name, r.request
         ));
-        begin(&mut c);
+        begin(&mut c, service);
         let mut scope = Scope::with_input(&r.request);
         steps(
             &mut c,
@@ -1456,7 +1486,7 @@ fn api_flows_rs(project: &Project, service: &Service) -> Result<String, CodegenE
             Some(&r.response),
             reply,
         )?;
-        c.line("tx.commit().await?;");
+        commit(&mut c, service);
         c.line(if reply {
             format!(
                 "Ok(eda_runtime::http::Reply::new(pb::{}::default()))",
@@ -1486,7 +1516,7 @@ fn consumer_flows_rs(project: &Project, service: &Service) -> Result<String, Cod
             "pub async fn {}(ctx: &Ctx, input: pb::{}) -> anyhow::Result<()>",
             cons.name, topic.message
         ));
-        begin(&mut c);
+        begin(&mut c, service);
         if let Some(field) = &cons.idempotent_on {
             // Recorded in this transaction: a handling that fails leaves no trace, and the retry does the work.
             c.open(format!(
@@ -1497,7 +1527,7 @@ fn consumer_flows_rs(project: &Project, service: &Service) -> Result<String, Cod
                 "tracing::info!(consumer = {:?}, event = %input.{field}, \"duplicate event skipped\");",
                 cons.name
             ));
-            c.line("tx.commit().await?;");
+            commit(&mut c, service);
             c.line("return Ok(());");
             c.close();
         }
@@ -1511,7 +1541,7 @@ fn consumer_flows_rs(project: &Project, service: &Service) -> Result<String, Cod
             None,
             false,
         )?;
-        c.line("tx.commit().await?;");
+        commit(&mut c, service);
         c.line("Ok(())");
         c.close();
     }
@@ -1527,13 +1557,13 @@ fn job_flows_rs(project: &Project, service: &Service) -> Result<String, CodegenE
             "pub async fn {}(ctx: &Ctx) -> anyhow::Result<()>",
             job.name
         ));
-        begin(&mut c);
+        begin(&mut c, service);
         // No request, no event: there is no `input`.
         let mut scope = Scope::default();
         steps(
             &mut c, project, service, &mut scope, &job.steps, None, false,
         )?;
-        c.line("tx.commit().await?;");
+        commit(&mut c, service);
         c.line("Ok(())");
         c.close();
     }
@@ -1650,6 +1680,73 @@ fn steps(
                 ));
                 c.close();
             }
+            Step::PublishLive {
+                service: realtime,
+                event,
+                account_id,
+                tenant_id,
+                permission,
+                account_ids,
+                origin,
+                data,
+                ..
+            } => {
+                let target = project
+                    .service(realtime)
+                    .and_then(|s| s.realtime.as_ref())
+                    .ok_or_else(|| {
+                        CodegenError::Internal(format!("`{realtime}` is not a real-time service"))
+                    })?;
+                let id = TypeRef::scalar(FieldType::Uuid);
+                // A path or a literal of any text type: the message carries them as text.
+                let text = |e: &Expr| -> Result<String, CodegenError> {
+                    Ok(format!("({}).to_string()", lower(project, scope, e, &id)?))
+                };
+                let some = |e: &Option<Expr>| -> Result<String, CodegenError> {
+                    Ok(match e {
+                        Some(e) => format!("Some({})", text(e)?),
+                        None => "None".to_string(),
+                    })
+                };
+                let ids = match account_ids {
+                    Some(e) => {
+                        let list = TypeRef {
+                            repeated: true,
+                            ..id.clone()
+                        };
+                        format!(
+                            "({}).iter().map(|id| id.to_string()).collect()",
+                            lower(project, scope, e, &list)?
+                        )
+                    }
+                    None => "Vec::new()".to_string(),
+                };
+                let permission = match permission {
+                    Some(p) => format!("Some({p:?})"),
+                    None => "None".to_string(),
+                };
+                let string = TypeRef::scalar(FieldType::String);
+                let mut entries = Vec::new();
+                for a in data {
+                    entries.push(format!(
+                        "({:?}, ({}).to_string())",
+                        a.field,
+                        lower(project, scope, &a.value, &string)?
+                    ));
+                }
+                c.line(format!(
+                    "live.push({:?}, eda_runtime::live::Event {{",
+                    target.channel
+                ));
+                c.line(format!("    kind: {event:?},"));
+                c.line(format!("    account_id: {},", some(account_id)?));
+                c.line(format!("    tenant_id: {},", some(tenant_id)?));
+                c.line(format!("    permission: {permission},"));
+                c.line(format!("    account_ids: {ids},"));
+                c.line(format!("    origin: {},", some(origin)?));
+                c.line(format!("    data: vec![{}],", entries.join(", ")));
+                c.line("});");
+            }
             Step::CallRpc {
                 service,
                 method,
@@ -1720,7 +1817,7 @@ fn steps(
                 })?;
                 let literal = struct_literal(project, scope, response, fields)?;
                 c.line(format!("let reply = {literal};"));
-                c.line("tx.commit().await?;");
+                commit(c, service);
                 if reply {
                     let mut out = "eda_runtime::http::Reply::new(reply)".to_string();
                     if let Some(status) = status {
@@ -2488,6 +2585,7 @@ fn describe(step: &Step) -> String {
         Step::Log { .. } => "log".into(),
         Step::Let { name, .. } => format!("let {name}"),
         Step::Publish { topic, .. } => format!("publish to {topic}"),
+        Step::PublishLive { event, .. } => format!("push `{event}` to the browsers"),
         Step::CallRpc {
             service, method, ..
         } => format!("call {service}.{method}"),

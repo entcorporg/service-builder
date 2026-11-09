@@ -2144,6 +2144,29 @@ impl<'a> Checker<'a> {
                 }
                 false
             }
+            Step::PublishLive {
+                service,
+                event,
+                account_id,
+                tenant_id,
+                permission,
+                account_ids,
+                origin,
+                data,
+                ..
+            } => {
+                self.publish_live(
+                    scope,
+                    path,
+                    service,
+                    event,
+                    permission.as_deref(),
+                    [account_id, tenant_id, origin],
+                    account_ids,
+                    data,
+                );
+                false
+            }
             Step::CallRpc {
                 service,
                 method,
@@ -3106,6 +3129,124 @@ impl<'a> Checker<'a> {
             };
             let ty = TypeRef::of_field(field);
             self.check_expr(scope, &a.value, Some(&ty), &format!("{path}/value"));
+        }
+    }
+
+    /// The step `publishLive`: the service must be a real-time one, and the event something that service accepts (the same
+    /// rules as `events.rs` of its template, so that a refusal is seen here and not in the logs of a running service).
+    #[allow(clippy::too_many_arguments)]
+    fn publish_live(
+        &mut self,
+        scope: &Scope,
+        path: &str,
+        service: &str,
+        event: &str,
+        permission: Option<&str>,
+        [account_id, tenant_id, origin]: [&Option<Expr>; 3],
+        account_ids: &Option<Expr>,
+        data: &[Assignment],
+    ) {
+        match self.project.service(service) {
+            Some(s) if s.kind == ServiceKind::Realtime => {}
+            Some(_) => self.error(
+                "E_LIVE_SERVICE",
+                format!("{path}/service"),
+                format!("`{service}` is not a real-time service"),
+            ),
+            None => self.error(
+                "E_LIVE_SERVICE",
+                format!("{path}/service"),
+                format!("unknown service `{service}`: pick a real-time service"),
+            ),
+        }
+        let segments = || event.split('.');
+        let plain =
+            |t: &str| !t.is_empty() && t.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
+        if event.len() > 64 || segments().count() < 2 || !segments().all(plain) {
+            self.error(
+                "E_LIVE_EVENT",
+                format!("{path}/event"),
+                "the event is `domain.action`: two segments or more of lowercase letters and `_`, separated by dots (64 characters at most)",
+            );
+        } else if event == "grants.updated" || event == "resync" {
+            self.error(
+                "E_LIVE_EVENT",
+                format!("{path}/event"),
+                format!("`{event}` is a control event of the real-time service: pick another name"),
+            );
+        }
+        if let Some(permission) = permission {
+            let ok = permission
+                .split_once('.')
+                .is_some_and(|(module, level)| plain(module) && matches!(level, "view" | "manage"));
+            if !ok {
+                self.error(
+                    "E_LIVE_PERMISSION",
+                    format!("{path}/permission"),
+                    "a permission is `module.view` or `module.manage`",
+                );
+            }
+        }
+        if account_id.is_some() {
+            if tenant_id.is_some() || permission.is_some() || account_ids.is_some() {
+                self.error(
+                    "E_LIVE_AUDIENCE",
+                    path,
+                    "`accountId` is for every stream of one account: leave out the company, the permission and the list of accounts",
+                );
+            }
+        } else if permission.is_none() && account_ids.is_none() {
+            self.error(
+                "E_LIVE_AUDIENCE",
+                path,
+                "an event needs an audience: an account, a permission, or a list of accounts",
+            );
+        }
+        let id = TypeRef::scalar(FieldType::Uuid);
+        for (name, e) in [
+            ("accountId", account_id),
+            ("tenantId", tenant_id),
+            ("origin", origin),
+        ] {
+            if let Some(e) = e {
+                self.check_expr(scope, e, Some(&id), &format!("{path}/{name}"));
+            }
+        }
+        if let Some(e) = account_ids {
+            let list = TypeRef {
+                repeated: true,
+                ..id
+            };
+            self.check_expr(scope, e, Some(&list), &format!("{path}/accountIds"));
+        }
+        if data.len() > 4 {
+            self.error(
+                "E_LIVE_DATA",
+                format!("{path}/data"),
+                "an event carries 4 entries at most: a few identifiers, not content",
+            );
+        }
+        let text = TypeRef::scalar(FieldType::String);
+        let mut seen = HashSet::new();
+        for (i, a) in data.iter().enumerate() {
+            let at = format!("{path}/data/{i}");
+            if a.field.is_empty()
+                || a.field.len() > 64
+                || !a.field.bytes().all(|b| b.is_ascii_alphanumeric())
+            {
+                self.error(
+                    "E_LIVE_DATA",
+                    &at,
+                    format!("`{}` is not a key: 1 to 64 letters or digits", a.field),
+                );
+            } else if !seen.insert(a.field.as_str()) {
+                self.error(
+                    "E_LIVE_DATA",
+                    &at,
+                    format!("key `{}` is set twice", a.field),
+                );
+            }
+            self.check_expr(scope, &a.value, Some(&text), &format!("{at}/value"));
         }
     }
 
@@ -6267,5 +6408,109 @@ mod tests {
         let c = codes(&p);
         assert!(c.contains(&"W_TOPIC_NO_PRODUCER".into()));
         assert!(c.contains(&"W_TOPIC_NO_CONSUMER".into()));
+    }
+
+    // ---- publishLive ---------------------------------------------------------------------
+
+    fn live_step(p: &mut Project) -> &mut Step {
+        p.services
+            .iter_mut()
+            .find(|s| s.name == "Orders")
+            .unwrap()
+            .rpcs
+            .iter_mut()
+            .find(|r| r.name == "CreateOrder")
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|s| matches!(s, Step::PublishLive { .. }))
+            .expect("a publishLive step")
+    }
+
+    #[test]
+    fn a_step_that_pushes_an_event_to_the_browsers_is_valid() {
+        let mut p = sample::orders();
+        sample::add_live_events(&mut p);
+        assert_eq!(errors(&p), Vec::<String>::new(), "{:?}", validate(&p));
+    }
+
+    /// Changes some fields of a step, by their JSON names (`null` removes one).
+    fn patch(step: &mut Step, changes: serde_json::Value) {
+        let mut value = serde_json::to_value(&*step).unwrap();
+        for (key, new) in changes.as_object().unwrap() {
+            if new.is_null() {
+                value.as_object_mut().unwrap().remove(key);
+            } else {
+                value[key] = new.clone();
+            }
+        }
+        *step = serde_json::from_value(value).unwrap();
+    }
+
+    #[test]
+    fn what_a_live_event_says_and_who_it_is_for_is_checked() {
+        use serde_json::json;
+        let uuid = "2f0b2b50-6a5c-4d52-9d7b-0a1c5c0f9a11";
+        let key = |i: usize| json!({"field": format!("k{i}"), "value": {"kind": "path", "path": "order_id"}});
+        let cases = [
+            ("E_LIVE_SERVICE", json!({"service": "Orders"})),
+            ("E_LIVE_SERVICE", json!({"service": "Nowhere"})),
+            ("E_LIVE_EVENT", json!({"event": "created"})),
+            ("E_LIVE_EVENT", json!({"event": "Orders.Created"})),
+            ("E_LIVE_EVENT", json!({"event": "orders.created\nx"})),
+            // The two names the real-time service keeps for itself.
+            ("E_LIVE_EVENT", json!({"event": "grants.updated"})),
+            ("E_LIVE_PERMISSION", json!({"permission": "orders"})),
+            ("E_LIVE_PERMISSION", json!({"permission": "orders.edit"})),
+            // An event is never "for everybody".
+            ("E_LIVE_AUDIENCE", json!({"permission": null})),
+            // An account is the whole audience: the service would ignore the rest.
+            (
+                "E_LIVE_AUDIENCE",
+                json!({"accountId": {"kind": "literal", "value": uuid}}),
+            ),
+            (
+                "E_LIVE_DATA",
+                json!({"data": [key(0), key(1), key(2), key(3), key(4)]}),
+            ),
+            (
+                "E_LIVE_DATA",
+                json!({"data": [{"field": "bad key", "value": {"kind": "path", "path": "order_id"}}]}),
+            ),
+            ("E_LIVE_DATA", json!({"data": [key(0), key(0)]})),
+            (
+                "E_TYPE_MISMATCH",
+                json!({"tenantId": {"kind": "literal", "value": "not a uuid"}}),
+            ),
+            (
+                "E_UNKNOWN_PATH",
+                json!({"origin": {"kind": "path", "path": "nowhere"}}),
+            ),
+        ];
+        for (code, change) in cases {
+            let mut p = sample::orders();
+            sample::add_live_events(&mut p);
+            patch(live_step(&mut p), change.clone());
+            assert!(
+                errors(&p).contains(&code.to_string()),
+                "{code} {change}: {:?}",
+                validate(&p)
+            );
+        }
+        // An account alone is an audience; so are accounts of a company.
+        for change in [
+            json!({"permission": null, "accountId": {"kind": "literal", "value": uuid}}),
+            json!({"permission": null, "tenantId": {"kind": "literal", "value": uuid}, "accountIds": {"kind": "raw", "code": "vec![]"}}),
+        ] {
+            let mut p = sample::orders();
+            sample::add_live_events(&mut p);
+            patch(live_step(&mut p), change.clone());
+            assert_eq!(
+                errors(&p),
+                Vec::<String>::new(),
+                "{change}: {:?}",
+                validate(&p)
+            );
+        }
     }
 }
