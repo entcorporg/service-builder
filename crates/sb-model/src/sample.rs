@@ -186,6 +186,7 @@ pub fn orders() -> Project {
         position: Position { x: 0.0, y: 120.0 },
         kind: ServiceKind::Standard,
         templates: vec![],
+        realtime: None,
         rpcs: vec![
             Rpc {
                 name: "CreateOrder".into(),
@@ -390,6 +391,7 @@ pub fn orders() -> Project {
         position: Position { x: 460.0, y: 120.0 },
         kind: ServiceKind::Standard,
         templates: vec![],
+        realtime: None,
         rpcs: vec![],
         http_port: None,
         routes: vec![],
@@ -445,6 +447,7 @@ pub fn orders() -> Project {
         position: Position { x: 920.0, y: 120.0 },
         kind: ServiceKind::Standard,
         templates: vec![],
+        realtime: None,
         rpcs: vec![],
         http_port: None,
         routes: vec![],
@@ -824,6 +827,7 @@ pub fn showcase() -> Project {
     add_avatars(&mut p);
     add_notes(&mut p);
     add_mailer(&mut p);
+    add_realtime(&mut p);
     p
 }
 
@@ -1337,6 +1341,7 @@ pub fn add_passkeys(p: &mut Project) {
                 id: "p2".into(),
                 account: path("claims.sub"),
                 name: path("input.name"),
+                app_url: None,
                 bind: "challenge".into(),
             },
             challenge_back("p3"),
@@ -1354,6 +1359,7 @@ pub fn add_passkeys(p: &mut Project) {
                 state_id: path("input.state_id"),
                 credential: path("input.credential"),
                 account: path("claims.sub"),
+                app_url: None,
             },
             Step::Respond {
                 id: "p6".into(),
@@ -1379,6 +1385,7 @@ pub fn add_passkeys(p: &mut Project) {
             Step::PasskeyLoginStart {
                 id: "p8".into(),
                 account: Some(path("input.account")),
+                app_url: None,
                 bind: "challenge".into(),
             },
             challenge_back("p9"),
@@ -1394,6 +1401,7 @@ pub fn add_passkeys(p: &mut Project) {
                 id: "p10".into(),
                 state_id: path("input.state_id"),
                 credential: path("input.credential"),
+                app_url: None,
                 bind: "account".into(),
             },
             Step::SignJwt {
@@ -1431,6 +1439,7 @@ pub fn add_passkeys(p: &mut Project) {
             Step::PasskeyLoginStart {
                 id: "p14".into(),
                 account: None,
+                app_url: None,
                 bind: "challenge".into(),
             },
             challenge_back("p15"),
@@ -1922,5 +1931,25 @@ pub fn add_mailer(p: &mut Project) {
                 .into(),
             text: "Hello {{ name }},\n\nYour account {{ email }} is ready.\n".into(),
         }],
+        realtime: None,
+    });
+}
+
+/// Adds a ready-made real-time service (`kind: realtime`): the browsers open `GET /v1/events` and the API's events,
+/// published on a channel of DragonflyDB, are pushed to the ones they are for.
+pub fn add_realtime(p: &mut Project) {
+    p.services.push(Service {
+        name: "Realtime".into(),
+        port: 50055,
+        rpcs: vec![],
+        http_port: Some(8085),
+        routes: vec![],
+        tables: vec![],
+        consumers: vec![],
+        jobs: vec![],
+        position: Position { x: 920.0, y: 640.0 },
+        kind: ServiceKind::Realtime,
+        templates: vec![],
+        realtime: Some(RealtimeConfig::default()),
     });
 }

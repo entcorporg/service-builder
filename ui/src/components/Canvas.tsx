@@ -47,7 +47,7 @@ function ServiceNode({ data, selected }: NodeProps<Node<ServiceData, 'service'>>
       <header>
         <Icon name="service" size={15} />
         <strong>{service.name}</strong>
-        <span className="node-port mono">{service.kind === 'mta' ? 'mta' : `:${service.port}`}</span>
+        <span className="node-port mono">{service.kind === 'mta' ? 'mta' : service.kind === 'realtime' ? 'sse' : `:${service.port}`}</span>
         {data.errors > 0 && <Badge kind="error" count={data.errors} />}
         {data.errors === 0 && data.warnings > 0 && <Badge kind="warning" count={data.warnings} />}
       </header>

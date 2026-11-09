@@ -4,6 +4,7 @@ import { useStore } from '../store'
 import type { MessageKind, Project } from '../types'
 import { MessageSelect, SchemaFields } from './SchemaFields'
 import { MtaInspector } from './MtaInspector'
+import { RealtimeInspector } from './RealtimeInspector'
 import { type HandlerCtx, StepList } from './StepList'
 import { Collapsible, CommitInput, Empty, IconButton, NumberInput, Row, Section } from './ui'
 
@@ -55,6 +56,7 @@ function ServiceInspector({ name }: { name: string }) {
   if (!service) return <Empty>Service introuvable.</Empty>
   const svc = (p: Project) => p.services[index]!
   if (service.kind === 'mta') return <MtaInspector index={index} />
+  if (service.kind === 'realtime') return <RealtimeInspector index={index} />
 
   return (
     <div className="inspector">

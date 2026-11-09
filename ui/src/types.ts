@@ -166,13 +166,13 @@ export type Step =
   /** Spends a recovery code of the account, once. A refused code is a 401. */
   | { type: 'recoveryCodeUse'; id: string; account: Expr; code: Expr }
   /** First request of registering a passkey: a challenge for the browser, into a variable of the schema `PasskeyChallenge`. */
-  | { type: 'passkeyRegisterStart'; id: string; account: Expr; name: Expr; bind: string }
+  | { type: 'passkeyRegisterStart'; id: string; account: Expr; name: Expr; appUrl?: Expr | null; bind: string }
   /** Second request: checks the browser's answer against the challenge and stores the passkey. A refusal is a 400. */
-  | { type: 'passkeyRegisterFinish'; id: string; stateId: Expr; credential: Expr; account: Expr }
+  | { type: 'passkeyRegisterFinish'; id: string; stateId: Expr; credential: Expr; account: Expr; appUrl?: Expr | null }
   /** First request of a login with a passkey: a challenge for the passkeys of the account. Without `account` (absent or `null`), a discoverable login: the challenge names nobody and the account is the one of the passkey the device signs with. */
-  | { type: 'passkeyLoginStart'; id: string; account?: Expr | null; bind: string }
+  | { type: 'passkeyLoginStart'; id: string; account?: Expr | null; appUrl?: Expr | null; bind: string }
   /** Second request: checks the answer and binds the account (a text) the challenge was started for. A refusal is a 401. */
-  | { type: 'passkeyLoginFinish'; id: string; stateId: Expr; credential: Expr; bind: string }
+  | { type: 'passkeyLoginFinish'; id: string; stateId: Expr; credential: Expr; appUrl?: Expr | null; bind: string }
   /** Recognises an image (base64) from its first bytes, within a size; binds its media type. A refusal is a 400. */
   | { type: 'imageSniff'; id: string; input: Expr; allow: ImageKind[]; maxBytes: number; bind: string }
   /** Stores an object (base64) in the bucket named by an environment variable. */
@@ -259,7 +259,7 @@ export interface Consumer {
   steps: Step[]
 }
 
-export type ServiceKind = 'standard' | 'mta'
+export type ServiceKind = 'standard' | 'mta' | 'realtime'
 export type DedupFallback = 'recipient' | 'topicAndRecipient' | 'reject'
 
 /** What a mail service does with an event: the fields of the event it reads the address, the identity, the sender from. */
@@ -278,6 +278,23 @@ export interface MailTemplate {
   subject: string
   html: string
   text: string
+}
+
+/**
+ * What the project decides about a real-time service (SSE): the rest is fixed code, set by the environment. The access token is an
+ * EdDSA JWT (claims `sub`, `sid`, `exp`, and optionally `tid` and `permissions`: a system without companies leaves them out) whose public key is read from `JWKS_URL`.
+ */
+export interface RealtimeConfig {
+  /** The pub/sub channel the API publishes its events on. */
+  channel: string
+  /** The path the browsers open the stream on. */
+  path: string
+  /** The cookie that holds the access token. */
+  accessCookie: string
+  /** The issuer (`iss`) the access tokens must have. */
+  issuer: string
+  /** Prefix of the keys where the API leaves the trace of each session: `<prefix>:<session id>`. */
+  sessionKeyPrefix: string
 }
 
 /** A task a service runs every `everySecs` seconds, from its start-up, on every instance. */
@@ -302,6 +319,8 @@ export interface Service {
   /** A `mta` is a ready-made mail service: its consumers carry a mail rule and its `templates` are the mails. */
   kind?: ServiceKind
   templates?: MailTemplate[]
+  /** A `realtime` service is a ready-made SSE service: these are its settings. */
+  realtime?: RealtimeConfig
 }
 
 export interface Project {

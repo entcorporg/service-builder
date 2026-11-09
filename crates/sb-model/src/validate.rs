@@ -548,7 +548,7 @@ impl<'a> Checker<'a> {
                     format!("port {} is already used by `{other}`", s.port),
                 );
             }
-            if !s.routes.is_empty() || s.kind == ServiceKind::Mta {
+            if !s.routes.is_empty() || s.kind != ServiceKind::Standard {
                 match s.http_port {
                     None | Some(0) => self.error(
                         "E_HTTP_PORT",
@@ -573,6 +573,7 @@ impl<'a> Checker<'a> {
                 && s.consumers.is_empty()
                 && s.routes.is_empty()
                 && s.jobs.is_empty()
+                && s.kind == ServiceKind::Standard
             {
                 self.warn(
                     "W_EMPTY_SERVICE",
@@ -587,6 +588,7 @@ impl<'a> Checker<'a> {
             self.tables(s, &base);
             self.table_constraints(s, &base);
             self.mta_service(s, &base);
+            self.realtime_service(s, &base);
 
             let mut rpc_names = HashSet::new();
             for (j, r) in s.rpcs.iter().enumerate() {
@@ -1125,6 +1127,108 @@ impl<'a> Checker<'a> {
                     format!("the event `{}` has no mail: add its template", c.topic),
                 );
             }
+        }
+    }
+
+    /// A real-time service is fixed code with five settings: it has nothing of its own to draw, and what it reads (a
+    /// channel, the keys of the sessions, a cookie) is a name that must not break the places it ends up in.
+    fn realtime_service(&mut self, s: &Service, base: &str) {
+        if s.kind != ServiceKind::Realtime {
+            if s.realtime.is_some() {
+                self.error(
+                    "E_REALTIME_OUTSIDE",
+                    format!("{base}/realtime"),
+                    format!("`{}` is not a real-time service: these settings belong to a service of kind `realtime`", s.name),
+                );
+            }
+            return;
+        }
+        for (what, empty) in [
+            ("RPCs", s.rpcs.is_empty()),
+            ("HTTP routes", s.routes.is_empty()),
+            ("tables", s.tables.is_empty()),
+            ("jobs", s.jobs.is_empty()),
+            ("consumers", s.consumers.is_empty()),
+            ("mail templates", s.templates.is_empty()),
+        ] {
+            if !empty {
+                self.error(
+                    "E_RT_CONTENT",
+                    base,
+                    format!(
+                        "`{}` is a real-time service (fixed code, with no database): it has no {what} to draw",
+                        s.name
+                    ),
+                );
+            }
+        }
+        let Some(config) = &s.realtime else {
+            self.error(
+                "E_RT_CONFIG",
+                format!("{base}/realtime"),
+                format!("`{}` is a real-time service: give it its settings (channel, path, cookie, issuer, session key prefix)", s.name),
+            );
+            return;
+        };
+        let rp = format!("{base}/realtime");
+        // Names that go into a Redis command, a key, a route and a cookie header: a short, plain alphabet.
+        let word = |text: &str, extra: &str| {
+            !text.is_empty()
+                && text.len() <= 128
+                && text
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
+        };
+        if !word(&config.channel, "-_.:") {
+            self.error(
+                "E_RT_CHANNEL",
+                format!("{rp}/channel"),
+                "the channel is 1 to 128 letters, digits, `-`, `_`, `.` or `:`",
+            );
+        }
+        if !word(&config.session_key_prefix, "-_.:") {
+            self.error(
+                "E_RT_PREFIX",
+                format!("{rp}/sessionKeyPrefix"),
+                "the key prefix is 1 to 128 letters, digits, `-`, `_`, `.` or `:`",
+            );
+        }
+        if !word(&config.access_cookie, "-_.") {
+            self.error(
+                "E_RT_COOKIE",
+                format!("{rp}/accessCookie"),
+                "the cookie name is 1 to 128 letters, digits, `-`, `_` or `.`",
+            );
+        }
+        if config.issuer.trim().is_empty()
+            || config.issuer.len() > 256
+            || config.issuer.chars().any(char::is_control)
+        {
+            self.error(
+                "E_RT_ISSUER",
+                format!("{rp}/issuer"),
+                "the issuer is the `iss` the access tokens carry: 1 to 256 characters, no control character",
+            );
+        }
+        let path = &config.path;
+        let plain = path.starts_with('/')
+            && path.len() <= 256
+            && !path.contains("//")
+            && path
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "/-_.".contains(c));
+        if !plain {
+            self.error(
+                "E_RT_PATH",
+                format!("{rp}/path"),
+                "the path starts with `/` and holds letters, digits, `/`, `-`, `_` and `.` (no parameter)",
+            );
+        } else if ["/livez", "/readyz", "/metrics"].contains(&path.trim_end_matches('/')) {
+            self.error(
+                "E_RT_PATH",
+                format!("{rp}/path"),
+                format!("`{path}` is taken by the health and metrics endpoints of the service"),
+            );
         }
     }
 
@@ -2345,6 +2449,7 @@ impl<'a> Checker<'a> {
             Step::PasskeyRegisterStart {
                 account,
                 name,
+                app_url,
                 bind,
                 ..
             } => {
@@ -2353,6 +2458,7 @@ impl<'a> Checker<'a> {
                 let text = TypeRef::scalar(FieldType::String);
                 self.check_expr(scope, account, Some(&text), &format!("{path}/account"));
                 self.check_expr(scope, name, Some(&text), &format!("{path}/name"));
+                self.check_app_url(scope, app_url, path);
                 self.passkey_schema(path);
                 scope.bind(bind.clone(), TypeRef::message("PasskeyChallenge"));
                 false
@@ -2361,6 +2467,7 @@ impl<'a> Checker<'a> {
                 state_id,
                 credential,
                 account,
+                app_url,
                 ..
             } => {
                 self.passkey_in_route(env, path);
@@ -2372,15 +2479,22 @@ impl<'a> Checker<'a> {
                 ] {
                     self.check_expr(scope, e, Some(&text), &format!("{path}/{name}"));
                 }
+                self.check_app_url(scope, app_url, path);
                 false
             }
-            Step::PasskeyLoginStart { account, bind, .. } => {
+            Step::PasskeyLoginStart {
+                account,
+                app_url,
+                bind,
+                ..
+            } => {
                 self.passkey_in_route(env, path);
                 self.check_var_name(bind, &format!("{path}/bind"));
                 let text = TypeRef::scalar(FieldType::String);
                 if let Some(account) = account {
                     self.check_expr(scope, account, Some(&text), &format!("{path}/account"));
                 }
+                self.check_app_url(scope, app_url, path);
                 self.passkey_schema(path);
                 scope.bind(bind.clone(), TypeRef::message("PasskeyChallenge"));
                 false
@@ -2388,6 +2502,7 @@ impl<'a> Checker<'a> {
             Step::PasskeyLoginFinish {
                 state_id,
                 credential,
+                app_url,
                 bind,
                 ..
             } => {
@@ -2401,6 +2516,7 @@ impl<'a> Checker<'a> {
                     Some(&text),
                     &format!("{path}/credential"),
                 );
+                self.check_app_url(scope, app_url, path);
                 scope.bind(bind.clone(), text);
                 false
             }
@@ -2751,6 +2867,14 @@ impl<'a> Checker<'a> {
                 path,
                 format!("{what} is a 401: this step only makes sense in an HTTP route"),
             );
+        }
+    }
+
+    /// The optional `app_url` of a passkey step: a text.
+    fn check_app_url(&mut self, scope: &Scope, app_url: &Option<Expr>, path: &str) {
+        if let Some(app_url) = app_url {
+            let text = TypeRef::scalar(FieldType::String);
+            self.check_expr(scope, app_url, Some(&text), &format!("{path}/appUrl"));
         }
     }
 
@@ -5301,6 +5425,136 @@ mod tests {
     fn a_mail_service_mails_the_events_it_listens_to() {
         let p = with_mailer();
         assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+    }
+
+    fn with_realtime() -> Project {
+        let mut p = sample::orders();
+        sample::add_realtime(&mut p);
+        p
+    }
+
+    fn realtime(p: &mut Project) -> &mut Service {
+        p.services
+            .iter_mut()
+            .find(|s| s.kind == ServiceKind::Realtime)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_realtime_service_is_valid_with_its_five_settings_and_nothing_else() {
+        let p = with_realtime();
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+        // No `W_EMPTY_SERVICE`: it is fixed code, it has nothing to draw.
+        assert!(validate(&p).iter().all(|d| d.code != "W_EMPTY_SERVICE"));
+        // The settings are optional in the JSON (the defaults are the usual ones), but the service needs them.
+        let json = serde_json::to_value(&p).unwrap();
+        let service = json["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["kind"] == "realtime")
+            .expect("a realtime service");
+        assert_eq!(service["realtime"]["sessionKeyPrefix"], "sess");
+        let bare: RealtimeConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(bare, RealtimeConfig::default());
+    }
+
+    #[test]
+    fn what_a_realtime_service_is_made_of_is_checked() {
+        type Case<'a> = (&'a str, &'a dyn Fn(&mut Project));
+        let cases: [Case; 20] = [
+            ("E_RT_CONFIG", &|p| realtime(p).realtime = None),
+            ("E_HTTP_PORT", &|p| realtime(p).http_port = None),
+            // Fixed code, with no database: nothing of its own to draw.
+            ("E_RT_CONTENT", &|p| {
+                realtime(p).jobs.push(Job {
+                    name: "j".into(),
+                    every_secs: 60,
+                    steps: vec![],
+                })
+            }),
+            ("E_RT_CONTENT", &|p| {
+                realtime(p)
+                    .tables
+                    .push(Table::new("t", vec![Column::new("a", ColumnType::String)]))
+            }),
+            ("E_RT_CONTENT", &|p| {
+                realtime(p).templates.push(MailTemplate {
+                    event_type: "x".into(),
+                    subject: "s".into(),
+                    html: "h".into(),
+                    text: "t".into(),
+                })
+            }),
+            // The names end up in a Redis command, a key, a route and a Cookie header.
+            ("E_RT_CHANNEL", &|p| {
+                realtime(p).realtime.as_mut().unwrap().channel = "".into()
+            }),
+            ("E_RT_CHANNEL", &|p| {
+                realtime(p).realtime.as_mut().unwrap().channel = "live events".into()
+            }),
+            ("E_RT_CHANNEL", &|p| {
+                realtime(p).realtime.as_mut().unwrap().channel = "live*".into()
+            }),
+            ("E_RT_CHANNEL", &|p| {
+                realtime(p).realtime.as_mut().unwrap().channel = "a".repeat(129)
+            }),
+            ("E_RT_PREFIX", &|p| {
+                realtime(p).realtime.as_mut().unwrap().session_key_prefix = "".into()
+            }),
+            ("E_RT_PREFIX", &|p| {
+                realtime(p).realtime.as_mut().unwrap().session_key_prefix = "sess:\r\n".into()
+            }),
+            ("E_RT_COOKIE", &|p| {
+                realtime(p).realtime.as_mut().unwrap().access_cookie = "".into()
+            }),
+            ("E_RT_COOKIE", &|p| {
+                realtime(p).realtime.as_mut().unwrap().access_cookie = "a=b".into()
+            }),
+            ("E_RT_COOKIE", &|p| {
+                realtime(p).realtime.as_mut().unwrap().access_cookie = "a; Path=/".into()
+            }),
+            ("E_RT_ISSUER", &|p| {
+                realtime(p).realtime.as_mut().unwrap().issuer = "  ".into()
+            }),
+            ("E_RT_ISSUER", &|p| {
+                realtime(p).realtime.as_mut().unwrap().issuer = "a\nb".into()
+            }),
+            ("E_RT_PATH", &|p| {
+                realtime(p).realtime.as_mut().unwrap().path = "v1/events".into()
+            }),
+            ("E_RT_PATH", &|p| {
+                realtime(p).realtime.as_mut().unwrap().path = "/v1/{id}".into()
+            }),
+            ("E_RT_PATH", &|p| {
+                realtime(p).realtime.as_mut().unwrap().path = "/v1//events".into()
+            }),
+            // Taken by the health and metrics endpoints of the same service.
+            ("E_RT_PATH", &|p| {
+                realtime(p).realtime.as_mut().unwrap().path = "/metrics".into()
+            }),
+        ];
+        for (code, change) in cases {
+            let mut p = with_realtime();
+            change(&mut p);
+            assert!(
+                errors(&p).contains(&code.to_string()),
+                "{code}: {:?}",
+                errors(&p)
+            );
+        }
+    }
+
+    #[test]
+    fn realtime_settings_belong_to_a_realtime_service_and_it_has_its_own_port() {
+        let mut p = with_realtime();
+        p.services[0].realtime = Some(RealtimeConfig::default());
+        assert!(errors(&p).contains(&"E_REALTIME_OUTSIDE".to_string()));
+        // Its HTTP port is checked against the others like any.
+        let mut p = with_realtime();
+        let taken = p.services[0].port;
+        realtime(&mut p).http_port = Some(taken);
+        assert!(errors(&p).contains(&"E_DUPLICATE_PORT".to_string()));
     }
 
     #[test]

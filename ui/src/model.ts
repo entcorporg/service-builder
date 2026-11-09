@@ -1,7 +1,7 @@
 // Editing helpers on the project document: factories and rename cascades.
 // All mutate a draft (immer), never the live state.
 import { candidates, columnType, fits, type Scope, type TypeRef, typeOfField } from './scope'
-import type { Assignment, Column, Consumer, MailRule, MailTemplate, Expr, ForeignKey, HttpMethod, Index, Job, Message, MessageKind, Project, Route, Service, Step, StepType, Table, UniqueConstraint } from './types'
+import type { Assignment, Column, Consumer, MailRule, MailTemplate, Expr, ForeignKey, HttpMethod, Index, Job, Message, MessageKind, Project, RealtimeConfig, Route, Service, Step, StepType, Table, UniqueConstraint } from './types'
 
 export function newId(): string {
   return crypto.randomUUID().slice(0, 8)
@@ -209,6 +209,25 @@ export function addMtaService(p: Project, position: { x: number; y: number }): S
   svc.httpPort = Math.max(8080, ...p.services.map((s) => s.httpPort ?? 0)) + 1
   svc.kind = 'mta'
   svc.templates = []
+  return svc
+}
+
+/** The settings a real-time service starts with; the author sets the issuer and the cookie of their API. */
+export const DEFAULT_REALTIME: RealtimeConfig = {
+  channel: 'live-events',
+  path: '/v1/events',
+  accessCookie: 'access_token',
+  issuer: 'api',
+  sessionKeyPrefix: 'sess',
+}
+
+/** A ready-made real-time service (SSE): it has nothing to draw, only five names to set. */
+export function addRealtimeService(p: Project, position: { x: number; y: number }): Service {
+  const svc = addService(p, position)
+  svc.name = uniqueName('Realtime', p.services.filter((s) => s !== svc).map((s) => s.name))
+  svc.httpPort = Math.max(8080, ...p.services.map((s) => s.httpPort ?? 0)) + 1
+  svc.kind = 'realtime'
+  svc.realtime = { ...DEFAULT_REALTIME }
   return svc
 }
 

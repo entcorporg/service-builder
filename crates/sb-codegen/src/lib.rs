@@ -6,6 +6,7 @@ mod expr;
 mod mta;
 mod proto;
 pub mod rawcheck;
+mod realtime;
 mod service;
 mod workspace;
 mod writer;
@@ -62,6 +63,7 @@ pub fn generate(project: &Project) -> Result<Vec<GeneratedFile>, CodegenError> {
         files.extend(match svc.kind {
             sb_model::ServiceKind::Standard => service::generate(project, svc)?,
             sb_model::ServiceKind::Mta => mta::generate(project, svc)?,
+            sb_model::ServiceKind::Realtime => realtime::generate(project, svc)?,
         });
     }
     // Safety net: a generator bug must surface here, not as a cryptic compiler error later.
@@ -1049,6 +1051,47 @@ mod tests {
     }
 
     #[test]
+    fn a_passkey_step_may_name_the_origin_of_the_request() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_passkeys(&mut p);
+        let origin = sb_model::Expr::Literal {
+            value: serde_json::json!("https://admin.example.com"),
+        };
+        for route in &mut p.services[0].routes {
+            for step in &mut route.steps {
+                match step {
+                    sb_model::Step::PasskeyRegisterStart { app_url, .. }
+                    | sb_model::Step::PasskeyRegisterFinish { app_url, .. }
+                    | sb_model::Step::PasskeyLoginStart { app_url, .. }
+                    | sb_model::Step::PasskeyLoginFinish { app_url, .. } => {
+                        *app_url = Some(origin.clone())
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&p)),
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        // It goes through the JSON as `appUrl`.
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains("\"appUrl\""), "{json}");
+        assert_eq!(serde_json::from_str::<sb_model::Project>(&json).unwrap(), p);
+        // And reaches the runtime as an `Option<&str>` in the four steps (five calls: the login starts twice).
+        let api = file(&generate(&p).unwrap(), "services/orders/src/flows/api.rs").to_string();
+        let flat = api.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.matches("Some((").count() >= 5, "{flat}");
+        assert!(!flat.contains(", None).await?"), "{flat}");
+        assert!(
+            !flat.contains("login_discoverable_start(&mut tx, None)"),
+            "{flat}"
+        );
+    }
+
+    #[test]
     fn passkeys_need_the_site_address_the_feature_and_their_tables() {
         let mut p = sample::orders();
         sample::add_jwt(&mut p);
@@ -1061,18 +1104,20 @@ mod tests {
         let files = generate(&p).unwrap();
         let api = file(&files, "services/orders/src/flows/api.rs");
         let flat = api.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(flat.contains("let challenge: pb::PasskeyChallenge = { let challenge = eda_runtime::webauthn::register_start(&mut tx, &claims.sub.clone(), &input.name.clone()).await?;"), "{flat}");
-        assert!(flat.contains("eda_runtime::webauthn::register_finish(&mut tx, &input.state_id.clone(), &input.credential.clone(), &claims.sub.clone()).await?;"), "{flat}");
+        assert!(flat.contains("let challenge: pb::PasskeyChallenge = { let challenge = eda_runtime::webauthn::register_start(&mut tx, &claims.sub.clone(), &input.name.clone(), None).await?;"), "{flat}");
+        assert!(flat.contains("eda_runtime::webauthn::register_finish(&mut tx, &input.state_id.clone(), &input.credential.clone(), &claims.sub.clone(), None).await?;"), "{flat}");
         assert!(
-            flat.contains("eda_runtime::webauthn::login_start(&mut tx, &input.account.clone())"),
+            flat.contains(
+                "eda_runtime::webauthn::login_start(&mut tx, &input.account.clone(), None)"
+            ),
             "{flat}"
         );
         // A login that names nobody starts a challenge that names nobody; its second request is the same step.
         assert!(
-            flat.contains("eda_runtime::webauthn::login_discoverable_start(&mut tx).await?"),
+            flat.contains("eda_runtime::webauthn::login_discoverable_start(&mut tx, None).await?"),
             "{flat}"
         );
-        assert!(flat.contains("let account: String = eda_runtime::webauthn::login_finish(&mut tx, &input.state_id.clone(), &input.credential.clone()).await?;"), "{flat}");
+        assert!(flat.contains("let account: String = eda_runtime::webauthn::login_finish(&mut tx, &input.state_id.clone(), &input.credential.clone(), None).await?;"), "{flat}");
         // The runtime module is built with its feature, which only this service turns on.
         assert!(
             file(&files, "services/orders/Cargo.toml")
@@ -1086,6 +1131,7 @@ mod tests {
         let schema = file(&files, "services/orders/src/app/schema.rs");
         for table in [
             "CREATE_STATES_TABLE",
+            "ADD_STATES_ORIGIN",
             "CREATE_CREDENTIALS_TABLE",
             "CREATE_CREDENTIALS_INDEX",
         ] {
@@ -1191,6 +1237,126 @@ mod tests {
         let plain = generate(&sample::orders()).unwrap();
         let plain = file(&plain, "services/orders/src/flows/api.rs");
         assert!(!plain.contains("IS NULL") && !plain.contains("tenant"));
+    }
+
+    fn with_realtime() -> sb_model::Project {
+        let mut p = sample::orders();
+        sample::add_realtime(&mut p);
+        p
+    }
+
+    #[test]
+    fn a_realtime_service_is_fixed_code_with_five_settings_in_its_contract() {
+        let mut p = with_realtime();
+        // Settings that need escaping to be Rust string literals.
+        let rt = p
+            .services
+            .iter_mut()
+            .find(|s| s.kind == sb_model::ServiceKind::Realtime)
+            .unwrap();
+        rt.realtime = Some(sb_model::RealtimeConfig {
+            channel: "events:v2".into(),
+            path: "/sse/stream".into(),
+            access_cookie: "tok".into(),
+            issuer: "my \"api\" \\ ✓".into(),
+            session_key_prefix: "session".into(),
+        });
+        let files = generate(&p).unwrap();
+        for path in [
+            "services/realtime/Cargo.toml",
+            "services/realtime/src/main.rs",
+            "services/realtime/src/registry.rs",
+            "services/realtime/src/http.rs",
+            "services/realtime/src/hub.rs",
+            "services/realtime/src/sweeper.rs",
+            "services/realtime/src/sessions.rs",
+            "services/realtime/src/jwt.rs",
+            "services/realtime/examples/load.rs",
+            "services/realtime/tests/dragonfly.rs",
+            "services/realtime/tests/http.rs",
+        ] {
+            assert!(files.iter().any(|f| f.path == path), "{path}");
+        }
+        // The project decides five names, and they are Rust literals (the generator checked the file parses).
+        let contract = file(&files, "services/realtime/src/contract.rs");
+        for line in [
+            "pub const CHANNEL: &str = \"events:v2\";",
+            "pub const PATH: &str = \"/sse/stream\";",
+            "pub const ACCESS_COOKIE: &str = \"tok\";",
+            "pub const SESSION_PREFIX: &str = \"session\";",
+        ] {
+            assert!(contract.contains(line), "{line}\n{contract}");
+        }
+        assert!(
+            contract.contains("pub const ISSUER: &str = \"my \\\"api\\\" \\\\ ✓\";"),
+            "{contract}"
+        );
+        // The port is the one of the service; nothing is left to fill in.
+        assert!(
+            file(&files, "services/realtime/src/config.rs")
+                .contains("number(\"SERVER_PORT\", 8085)")
+        );
+        for f in files
+            .iter()
+            .filter(|f| f.path.starts_with("services/realtime/"))
+        {
+            assert!(
+                !f.content.contains("::")
+                    || !f.content.contains("::SERVER_PORT::") && !f.content.contains("::CHANNEL::"),
+                "{}",
+                f.path
+            );
+        }
+        // It is a workspace member with its own dependencies, none of them Kafka, a database or the runtime of the others.
+        let cargo = file(&files, "services/realtime/Cargo.toml");
+        assert!(
+            cargo.contains("name = \"realtime\"") && cargo.contains("name = \"realtime_service\""),
+            "{cargo}"
+        );
+        for dep in ["eda-runtime", "contracts", "sqlx", "rdkafka"] {
+            assert!(!cargo.contains(dep), "{dep}");
+        }
+        // The fixed code does not depend on a general HTTP server: that is where 28 KiB a stream went.
+        assert!(
+            !cargo.contains("axum") && !cargo.contains("hyper"),
+            "{cargo}"
+        );
+        let workspace = file(&files, "Cargo.toml");
+        for dep in ["redis = ", "httparse = ", "rlimit = ", "bytes = "] {
+            assert!(workspace.contains(dep), "{dep}");
+        }
+        assert!(file(&files, "Cargo.toml").contains("\"services/realtime\""));
+        // DragonflyDB for development, and the README tells what to set.
+        let compose = file(&files, "docker-compose.yml");
+        assert!(
+            compose.contains("dragonfly:") && compose.contains("6379:6379"),
+            "{compose}"
+        );
+        let readme = file(&files, "README.md");
+        assert!(
+            readme.contains("### Realtime (real-time service, HTTP port 8085)"),
+            "{readme}"
+        );
+        for word in [
+            "GET /sse/stream",
+            "events:v2",
+            "REALTIME_MAX_CONNECTIONS",
+            "DRAGONFLY_URL",
+            "--example load",
+        ] {
+            assert!(readme.contains(word), "{word}");
+        }
+    }
+
+    #[test]
+    fn a_project_without_a_realtime_service_has_no_dragonfly_and_none_of_its_dependencies() {
+        let files = generate(&sample::orders()).unwrap();
+        assert!(!file(&files, "docker-compose.yml").contains("dragonfly"));
+        assert!(
+            !files
+                .iter()
+                .any(|f| f.path.starts_with("services/realtime"))
+        );
     }
 
     fn with_mailer() -> sb_model::Project {

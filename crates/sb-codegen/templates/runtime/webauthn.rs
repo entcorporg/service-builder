@@ -5,7 +5,19 @@
 //! by one `DELETE ... RETURNING`, so a `start` can be finished once and an answer cannot be replayed.
 //!
 //! The relying party is the site itself: the domain (RP ID) and the origin come from the environment variable
-//! `APP_URL`, the same one the links of the e-mails are built from, so they cannot drift apart.
+//! `APP_URL`, the same one the links of the e-mails are built from, so they cannot drift apart. Two more variables
+//! open that up for a service that has several frontends:
+//!
+//! - `WEBAUTHN_RP_ID`: the RP ID, when it is not the host of the origin. It is the registrable parent domain
+//!   (`example.com`), so that a passkey created on `example.com` also works on `app.example.com`, and the other way
+//!   round. Every origin must be that domain or one of its subdomains.
+//! - `WEBAUTHN_ALLOWED_ORIGINS`: the other origins, separated by commas, a request may use. A step can name the origin
+//!   of the request (`app_url`, evaluated per request, for example from a header naming the frontend): it is used
+//!   only when it is `APP_URL` or in this list, and anything else is a 400. The origins of the list are also accepted
+//!   when a device answers, next to the one the challenge was started for.
+//!
+//! The origin a challenge was started for is kept with it (`webauthn_states.origin`): the second request is checked
+//! against that one, and a different `app_url` there is refused.
 //!
 //! Needs the cargo feature `webauthn` (it brings OpenSSL in); the generator turns it on for the services that use it.
 //!
@@ -24,6 +36,10 @@ use crate::http::HttpError;
 
 /// The challenges that were started and not finished yet.
 pub const CREATE_STATES_TABLE: &str = "CREATE TABLE IF NOT EXISTS webauthn_states (id TEXT PRIMARY KEY, kind TEXT NOT NULL, account TEXT NOT NULL, state TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL)";
+
+/// The origin a challenge was started for, empty for a challenge from before this column existed (then: `APP_URL`).
+/// Run after [`CREATE_STATES_TABLE`], on a new table as well as on an existing one.
+pub const ADD_STATES_ORIGIN: &str = "ALTER TABLE webauthn_states ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT ''";
 
 /// The passkeys of the accounts. A credential is on one account only: `credential_id` is unique for the whole table.
 pub const CREATE_CREDENTIALS_TABLE: &str = "CREATE TABLE IF NOT EXISTS webauthn_credentials (credential_id TEXT PRIMARY KEY, account TEXT NOT NULL, passkey TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now())";
@@ -46,28 +62,109 @@ pub struct Challenge {
     pub options: String,
 }
 
-/// The relying party, from `APP_URL` (and `APP_NAME`, which defaults to the host).
-fn webauthn() -> Result<Webauthn> {
+/// Where the passkeys may be used, from the environment.
+struct Site {
+    app_url: String,
+    app_name: Option<String>,
+    rp_id: Option<String>,
+    allowed: Vec<String>,
+}
+
+fn site() -> Result<Site> {
     let app_url = std::env::var("APP_URL").map_err(|_| anyhow!("APP_URL is not set: passkeys need the address of the site"))?;
-    build(&app_url, std::env::var("APP_NAME").ok().as_deref())
+    let optional = |name: &str| std::env::var(name).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    Ok(Site {
+        app_url,
+        app_name: std::env::var("APP_NAME").ok(),
+        rp_id: optional("WEBAUTHN_RP_ID"),
+        allowed: optional("WEBAUTHN_ALLOWED_ORIGINS")
+            .map(|list| list.split(',').map(|o| o.trim().to_string()).filter(|o| !o.is_empty()).collect())
+            .unwrap_or_default(),
+    })
 }
 
-fn build(app_url: &str, app_name: Option<&str>) -> Result<Webauthn> {
-    let origin = Url::parse(app_url).map_err(|e| anyhow!("APP_URL is not a URL: {e}"))?;
-    if !matches!(origin.scheme(), "https" | "http") {
-        anyhow::bail!("APP_URL must be an http(s) URL");
+/// The origin of an address: scheme, host and port, with no path. That is what a browser puts in its answer.
+fn parse_origin(address: &str) -> Result<Url> {
+    let url = Url::parse(address).map_err(|e| anyhow!("{address:?} is not a URL: {e}"))?;
+    if !matches!(url.scheme(), "https" | "http") {
+        anyhow::bail!("{address:?} must be an http(s) URL");
     }
-    let rp_id = origin
-        .host_str()
-        .ok_or_else(|| anyhow!("APP_URL has no host: no RP ID for WebAuthn"))?;
-    WebauthnBuilder::new(rp_id, &origin)
-        .and_then(|b| b.rp_name(app_name.unwrap_or(rp_id)).build())
-        .map_err(|e| anyhow!("WebAuthn: {e}"))
+    if url.host_str().is_none() {
+        anyhow::bail!("{address:?} has no host: no RP ID for WebAuthn");
+    }
+    Url::parse(&url.origin().ascii_serialization()).map_err(|e| anyhow!("{address:?} has no usable origin: {e}"))
 }
 
-/// A service that uses passkeys fails at start-up when the address of the site is missing or unusable.
+/// Whether `host` is the RP ID or one of its subdomains.
+fn under(host: &str, rp_id: &str) -> bool {
+    host == rp_id || host.strip_suffix(rp_id).is_some_and(|front| front.ends_with('.'))
+}
+
+/// The relying party for a request: `requested` is the origin a step asks for (`None`: `APP_URL`). Gives back the
+/// instance and the origin it was built for, or `None` when that origin is neither `APP_URL` nor in
+/// `WEBAUTHN_ALLOWED_ORIGINS`: it is the caller's to refuse, the client chose it. A misconfiguration is an error.
+fn build(site: &Site, requested: Option<&str>) -> Result<Option<(Webauthn, String)>> {
+    let app = parse_origin(&site.app_url).map_err(|e| anyhow!("APP_URL: {e}"))?;
+    let allowed = site
+        .allowed
+        .iter()
+        .map(|o| parse_origin(o).map_err(|e| anyhow!("WEBAUTHN_ALLOWED_ORIGINS: {e}")))
+        .collect::<Result<Vec<_>>>()?;
+    let origin = match requested {
+        None => app.clone(),
+        Some(wanted) => match parse_origin(wanted) {
+            Ok(wanted) if wanted == app || allowed.contains(&wanted) => wanted,
+            _ => return Ok(None),
+        },
+    };
+    let host = origin.host_str().expect("checked by parse_origin");
+    let rp_id = site.rp_id.as_deref().unwrap_or(host);
+    let mut builder = WebauthnBuilder::new(rp_id, &origin).map_err(|e| anyhow!("WebAuthn: {e}"))?;
+    // A passkey made on one of the other origins of the same RP ID is accepted too.
+    for other in std::iter::once(&app).chain(&allowed) {
+        if *other != origin && other.host_str().is_some_and(|h| under(h, rp_id)) {
+            builder = builder.append_allowed_origin(other);
+        }
+    }
+    let wa = builder
+        .rp_name(site.app_name.as_deref().unwrap_or(rp_id))
+        .build()
+        .map_err(|e| anyhow!("WebAuthn: {e}"))?;
+    Ok(Some((wa, origin.origin().ascii_serialization())))
+}
+
+/// The relying party for the start of a challenge, from the `app_url` of the step.
+fn webauthn(requested: Option<&str>) -> Result<Option<(Webauthn, String)>> {
+    build(&site()?, requested)
+}
+
+/// The relying party for the end of a challenge: the origin it was started for (`stored`, empty before this was kept:
+/// `APP_URL`). The `app_url` of the finishing step, when it has one, must be that origin. `None` when it is not or when
+/// the origin is not allowed any more.
+fn webauthn_for_state(requested: Option<&str>, stored: &str) -> Result<Option<Webauthn>> {
+    let site = site()?;
+    let used = if stored.is_empty() {
+        parse_origin(&site.app_url).map_err(|e| anyhow!("APP_URL: {e}"))?.origin().ascii_serialization()
+    } else {
+        stored.to_string()
+    };
+    if let Some(wanted) = requested {
+        if !parse_origin(wanted).is_ok_and(|w| w.origin().ascii_serialization() == used) {
+            return Ok(None);
+        }
+    }
+    Ok(build(&site, Some(&used))?.map(|(wa, _)| wa))
+}
+
+/// A service that uses passkeys fails at start-up when the address of the site, the RP ID or an allowed origin is
+/// missing or unusable.
 pub fn check_config() -> Result<()> {
-    webauthn().map(|_| ())
+    let site = site()?;
+    build(&site, None)?;
+    for origin in &site.allowed {
+        build(&site, Some(origin))?.ok_or_else(|| anyhow!("WEBAUTHN_ALLOWED_ORIGINS: {origin:?} is not usable"))?;
+    }
+    Ok(())
 }
 
 fn refused(status: u16) -> anyhow::Error {
@@ -95,16 +192,17 @@ async fn passkeys(tx: &mut sqlx::PgConnection, account: &str) -> Result<Vec<Pass
         .collect()
 }
 
-async fn keep_state(tx: &mut sqlx::PgConnection, kind: &str, account: &str, state: &str) -> Result<String> {
+async fn keep_state(tx: &mut sqlx::PgConnection, kind: &str, account: &str, state: &str, origin: &str) -> Result<String> {
     // The abandoned challenges go as new ones come.
     sqlx::query("DELETE FROM webauthn_states WHERE expires_at < now()").execute(&mut *tx).await?;
     let id = crate::crypto::random_token();
-    sqlx::query("INSERT INTO webauthn_states (id, kind, account, state, expires_at) VALUES ($1, $2, $3, $4, now() + make_interval(mins => $5))")
+    sqlx::query("INSERT INTO webauthn_states (id, kind, account, state, origin, expires_at) VALUES ($1, $2, $3, $4, $6, now() + make_interval(mins => $5))")
         .bind(&id)
         .bind(kind)
         .bind(account)
         .bind(state)
         .bind(STATE_TTL_MINUTES)
+        .bind(origin)
         .execute(tx)
         .await?;
     Ok(id)
@@ -112,16 +210,16 @@ async fn keep_state(tx: &mut sqlx::PgConnection, kind: &str, account: &str, stat
 
 /// Takes the state of a challenge: one statement, so two answers to the same challenge cannot both find it. `kinds` are
 /// the kinds of challenge the caller accepts; `account` restricts it to the account it was started for, when the caller
-/// knows who is answering. Gives back the kind, the account and the state.
+/// knows who is answering. Gives back the kind, the account, the state and the origin it was started for.
 async fn take_state(
     tx: &mut sqlx::PgConnection,
     kinds: &[&str],
     state_id: &str,
     account: Option<&str>,
-) -> Result<Option<(String, String, String)>> {
+) -> Result<Option<(String, String, String, String)>> {
     let kinds: Vec<String> = kinds.iter().map(|k| k.to_string()).collect();
     Ok(sqlx::query_as(
-        "DELETE FROM webauthn_states WHERE id = $1 AND kind = ANY($2) AND expires_at > now() AND ($3::text IS NULL OR account = $3) RETURNING kind, account, state",
+        "DELETE FROM webauthn_states WHERE id = $1 AND kind = ANY($2) AND expires_at > now() AND ($3::text IS NULL OR account = $3) RETURNING kind, account, state, origin",
     )
     .bind(state_id)
     .bind(kinds)
@@ -131,13 +229,17 @@ async fn take_state(
 }
 
 /// The step `passkeyRegisterStart`: a challenge to register a device for `account`, who is already authenticated. A
-/// device the account has already registered is excluded.
-pub async fn register_start(tx: &mut sqlx::PgConnection, account: &str, name: &str) -> Result<Challenge> {
+/// device the account has already registered is excluded. `app_url` is the origin to register for (`None`: `APP_URL`);
+/// one that is not allowed is a 400.
+pub async fn register_start(tx: &mut sqlx::PgConnection, account: &str, name: &str, app_url: Option<&str>) -> Result<Challenge> {
+    let Some((wa, origin)) = webauthn(app_url)? else {
+        return Err(refused(400));
+    };
     let known: Vec<_> = passkeys(tx, account).await?.iter().map(|p| p.cred_id().clone()).collect();
-    let (options, state) = webauthn()?
+    let (options, state) = wa
         .start_passkey_registration(user_handle(account), name, name, (!known.is_empty()).then_some(known))
         .map_err(|e| anyhow!("WebAuthn: {e}"))?;
-    let state_id = keep_state(tx, REGISTER, account, &serde_json::to_string(&state)?).await?;
+    let state_id = keep_state(tx, REGISTER, account, &serde_json::to_string(&state)?, &origin).await?;
     Ok(Challenge { state_id, options: prefer_discoverable(&options)? })
 }
 
@@ -156,16 +258,26 @@ fn prefer_discoverable(options: &webauthn_rs::prelude::CreationChallengeResponse
 
 /// The step `passkeyRegisterFinish`: checks the answer of the device (`credential`, the JSON of the browser) against
 /// the challenge, which must have been started for `account`, and stores the passkey. A 400 when anything is off,
-/// including a device that is already registered, on this account or another.
-pub async fn register_finish(tx: &mut sqlx::PgConnection, state_id: &str, credential: &str, account: &str) -> Result<()> {
-    let Some((_, _, state)) = take_state(tx, &[REGISTER], state_id, Some(account)).await? else {
+/// including a device that is already registered, on this account or another. The answer is checked against the origin
+/// the challenge was started for; an `app_url` that names another is refused.
+pub async fn register_finish(
+    tx: &mut sqlx::PgConnection,
+    state_id: &str,
+    credential: &str,
+    account: &str,
+    app_url: Option<&str>,
+) -> Result<()> {
+    let Some((_, _, state, origin)) = take_state(tx, &[REGISTER], state_id, Some(account)).await? else {
+        return Err(refused(400));
+    };
+    let Some(wa) = webauthn_for_state(app_url, &origin)? else {
         return Err(refused(400));
     };
     let state: PasskeyRegistration = serde_json::from_str(&state).context("a stored challenge cannot be read")?;
     let Ok(credential) = serde_json::from_str::<RegisterPublicKeyCredential>(credential) else {
         return Err(refused(400));
     };
-    let passkey = match webauthn()?.finish_passkey_registration(&credential, &state) {
+    let passkey = match wa.finish_passkey_registration(&credential, &state) {
         Ok(passkey) => passkey,
         Err(e) => {
             tracing::warn!(error = %e, "a passkey registration was refused");
@@ -183,42 +295,52 @@ pub async fn register_finish(tx: &mut sqlx::PgConnection, state_id: &str, creden
 }
 
 /// The step `passkeyLoginStart`: a challenge for one of the passkeys of `account`. An account without any gets a 401
-/// like a wrong answer; put a `rateLimit` before it, as this tells whether an account has a passkey.
-pub async fn login_start(tx: &mut sqlx::PgConnection, account: &str) -> Result<Challenge> {
+/// like a wrong answer; put a `rateLimit` before it, as this tells whether an account has a passkey. `app_url` is the
+/// origin to log in from (`None`: `APP_URL`); one that is not allowed is a 400.
+pub async fn login_start(tx: &mut sqlx::PgConnection, account: &str, app_url: Option<&str>) -> Result<Challenge> {
+    let Some((wa, origin)) = webauthn(app_url)? else {
+        return Err(refused(400));
+    };
     let keys = passkeys(tx, account).await?;
     if keys.is_empty() {
         return Err(refused(401));
     }
-    let (options, state) = webauthn()?
+    let (options, state) = wa
         .start_passkey_authentication(&keys)
         .map_err(|e| anyhow!("WebAuthn: {e}"))?;
-    let state_id = keep_state(tx, LOGIN, account, &serde_json::to_string(&state)?).await?;
+    let state_id = keep_state(tx, LOGIN, account, &serde_json::to_string(&state)?, &origin).await?;
     Ok(Challenge { state_id, options: serde_json::to_string(&options)? })
 }
 
 /// The step `passkeyLoginStart` without an account: a challenge that names nobody. The browser offers the passkeys it
 /// holds for the site and the user picks one. Nothing is known of the account here, so nothing can be said about it: the
 /// answer is the same for everybody. Each call keeps a state for five minutes: put a `rateLimit` before it.
-pub async fn login_discoverable_start(tx: &mut sqlx::PgConnection) -> Result<Challenge> {
-    let (options, state) = webauthn()?
+pub async fn login_discoverable_start(tx: &mut sqlx::PgConnection, app_url: Option<&str>) -> Result<Challenge> {
+    let Some((wa, origin)) = webauthn(app_url)? else {
+        return Err(refused(400));
+    };
+    let (options, state) = wa
         .start_discoverable_authentication()
         .map_err(|e| anyhow!("WebAuthn: {e}"))?;
-    let state_id = keep_state(tx, DISCOVER, "", &serde_json::to_string(&state)?).await?;
+    let state_id = keep_state(tx, DISCOVER, "", &serde_json::to_string(&state)?, &origin).await?;
     Ok(Challenge { state_id, options: serde_json::to_string(&options)? })
 }
 
 /// The step `passkeyLoginFinish`: checks the answer of the device against the challenge and gives back the account. For
 /// a challenge started for an account, that is the account; for one that named nobody, it is the account that owns the
 /// passkey the device signed with. A 401 for anything else, the same whatever is wrong. The signature counter of the
-/// passkey is kept up to date.
-pub async fn login_finish(tx: &mut sqlx::PgConnection, state_id: &str, credential: &str) -> Result<String> {
-    let Some((kind, account, state)) = take_state(tx, &[LOGIN, DISCOVER], state_id, None).await? else {
+/// passkey is kept up to date. The answer is checked against the origin the challenge was started for; an `app_url`
+/// that names another is a 401 like any wrong answer.
+pub async fn login_finish(tx: &mut sqlx::PgConnection, state_id: &str, credential: &str, app_url: Option<&str>) -> Result<String> {
+    let Some((kind, account, state, origin)) = take_state(tx, &[LOGIN, DISCOVER], state_id, None).await? else {
+        return Err(refused(401));
+    };
+    let Some(wa) = webauthn_for_state(app_url, &origin)? else {
         return Err(refused(401));
     };
     let Ok(credential) = serde_json::from_str::<PublicKeyCredential>(credential) else {
         return Err(refused(401));
     };
-    let wa = webauthn()?;
     if kind == LOGIN {
         let state: PasskeyAuthentication = serde_json::from_str(&state).context("a stored challenge cannot be read")?;
         let result = match wa.finish_passkey_authentication(&credential, &state) {
@@ -294,13 +416,124 @@ mod tests {
         Url::parse(APP_URL).unwrap()
     }
 
+    fn site(app_url: &str, rp_id: Option<&str>, allowed: &[&str]) -> Site {
+        Site {
+            app_url: app_url.into(),
+            app_name: None,
+            rp_id: rp_id.map(String::from),
+            allowed: allowed.iter().map(|o| o.to_string()).collect(),
+        }
+    }
+
+    /// The relying party of the site alone, as a service with one frontend has it.
+    fn plain() -> Webauthn {
+        build(&site(APP_URL, None, &[]), None).unwrap().unwrap().0
+    }
+
     #[test]
     fn the_relying_party_comes_from_the_address_of_the_site() {
-        assert!(build(APP_URL, Some("Example")).is_ok());
-        assert!(build("https://localhost:8443", None).is_ok());
+        assert!(build(&Site { app_name: Some("Example".into()), ..site(APP_URL, None, &[]) }, None).is_ok());
+        assert!(build(&site("https://localhost:8443", None, &[]), None).is_ok());
         for wrong in ["not a url", "data:text/plain,x", "ftp://app.example.com", ""] {
-            assert!(build(wrong, None).is_err(), "{wrong:?}");
+            assert!(build(&site(wrong, None, &[]), None).is_err(), "{wrong:?}");
         }
+        // A path in the address is not part of the origin.
+        let (_, origin) = build(&site("https://app.example.com/login?x=1", None, &[]), None).unwrap().unwrap();
+        assert_eq!(origin, "https://app.example.com");
+    }
+
+    #[test]
+    fn an_origin_that_is_not_allowed_is_for_the_caller_to_refuse() {
+        let site = site(APP_URL, Some("example.com"), &["https://admin.example.com"]);
+        for (asked, used) in [
+            (None, "https://app.example.com"),
+            (Some("https://app.example.com"), "https://app.example.com"),
+            (Some("https://admin.example.com/"), "https://admin.example.com"),
+            (Some("https://admin.example.com/some/page"), "https://admin.example.com"),
+        ] {
+            assert_eq!(build(&site, asked).unwrap().map(|(_, o)| o).as_deref(), Some(used), "{asked:?}");
+        }
+        // Another host, a lookalike, another scheme or port, garbage.
+        for asked in [
+            "https://evil.example.com",
+            "https://example.com",
+            "https://admin.example.com.evil.com",
+            "http://admin.example.com",
+            "https://admin.example.com:8443",
+            "not a url",
+            "",
+            "javascript:alert(1)",
+        ] {
+            assert!(build(&site, Some(asked)).unwrap().is_none(), "{asked:?}");
+        }
+        // With no list, only the site itself.
+        let alone = self::site(APP_URL, None, &[]);
+        assert!(build(&alone, Some("https://admin.example.com")).unwrap().is_none());
+        assert!(build(&alone, Some(APP_URL)).unwrap().is_some());
+    }
+
+    #[test]
+    fn the_configuration_is_checked_as_a_whole() {
+        let check = |site: &Site| -> Result<()> {
+            build(site, None)?;
+            for origin in &site.allowed {
+                build(site, Some(origin))?.ok_or_else(|| anyhow!("not usable"))?;
+            }
+            Ok(())
+        };
+        assert!(check(&site(APP_URL, Some("example.com"), &["https://admin.example.com"])).is_ok());
+        // An RP ID that is not a parent of the site, an origin outside the RP ID, an allowed origin that is not a URL.
+        assert!(check(&site(APP_URL, Some("other.org"), &[])).is_err());
+        assert!(check(&site(APP_URL, Some("example.com"), &["https://admin.other.org"])).is_err());
+        assert!(check(&site(APP_URL, Some("example.com"), &["nope"])).is_err());
+        // Without an RP ID, each origin is its own relying party.
+        assert!(check(&site(APP_URL, None, &["https://elsewhere.org"])).is_ok());
+    }
+
+    #[test]
+    fn a_host_is_under_the_rp_id_only_at_a_label_boundary() {
+        assert!(under("example.com", "example.com"));
+        assert!(under("app.example.com", "example.com"));
+        assert!(under("a.b.example.com", "example.com"));
+        assert!(!under("badexample.com", "example.com"));
+        assert!(!under("example.com.evil.org", "example.com"));
+        assert!(!under("com", "example.com"));
+    }
+
+    #[test]
+    fn a_passkey_made_on_one_subdomain_is_accepted_from_another_of_the_same_rp_id() {
+        let site = site(APP_URL, Some("example.com"), &["https://admin.example.com", "https://example.com"]);
+        let admin = Url::parse("https://admin.example.com").unwrap();
+        let mut device = device();
+
+        // Registered on the admin frontend...
+        let (wa_admin, _) = build(&site, Some("https://admin.example.com")).unwrap().unwrap();
+        let (options, state) = wa_admin.start_passkey_registration(user_handle("a"), "a", "a", None).unwrap();
+        assert_eq!(serde_json::to_value(&options).unwrap()["publicKey"]["rp"]["id"], "example.com");
+        let answer = device.do_registration(admin.clone(), options).unwrap();
+        let passkey = wa_admin.finish_passkey_registration(&answer, &state).unwrap();
+
+        // ...used from the app frontend and from the apex, which the relying party of those requests also accepts.
+        for (asked, from) in [(None, origin()), (Some("https://example.com"), Url::parse("https://example.com").unwrap())] {
+            let (wa, _) = build(&site, asked).unwrap().unwrap();
+            let (options, state) = wa.start_passkey_authentication(&[passkey.clone()]).unwrap();
+            let answer = device.do_authentication(from, options).unwrap();
+            assert!(wa.finish_passkey_authentication(&answer, &state).is_ok(), "{asked:?}");
+        }
+        // An answer signed for an origin outside the list is refused, whatever the RP ID.
+        let (wa, _) = build(&site, None).unwrap().unwrap();
+        let (options, state) = wa.start_passkey_authentication(&[passkey]).unwrap();
+        let answer = device.do_authentication(Url::parse("https://evil.example.com").unwrap(), options).unwrap();
+        assert!(wa.finish_passkey_authentication(&answer, &state).is_err());
+    }
+
+    #[test]
+    fn without_an_rp_id_the_origin_asked_for_is_its_own_relying_party() {
+        let site = site(APP_URL, None, &["https://other.org"]);
+        let (wa, origin) = build(&site, Some("https://other.org")).unwrap().unwrap();
+        let (options, _) = wa.start_passkey_registration(user_handle("a"), "a", "a", None).unwrap();
+        assert_eq!(origin, "https://other.org");
+        assert_eq!(serde_json::to_value(&options).unwrap()["publicKey"]["rp"]["id"], "other.org");
     }
 
     #[test]
@@ -311,7 +544,7 @@ mod tests {
 
     #[test]
     fn a_device_signs_for_the_origin_it_was_asked_about_and_the_server_checks_it_too() {
-        let wa = build(APP_URL, None).unwrap();
+        let wa = plain();
         let mut device = device();
         let (options, state) = wa.start_passkey_registration(user_handle("a"), "a@b.fr", "a@b.fr", None).unwrap();
         // The state and the answer travel as JSON: that is what the tables hold.
@@ -338,7 +571,7 @@ mod tests {
         let db = PgPool::connect(&url).await.unwrap();
         TABLES
             .get_or_init(|| async {
-                for table in [CREATE_STATES_TABLE, CREATE_CREDENTIALS_TABLE, CREATE_CREDENTIALS_INDEX] {
+                for table in [CREATE_STATES_TABLE, ADD_STATES_ORIGIN, CREATE_CREDENTIALS_TABLE, CREATE_CREDENTIALS_INDEX] {
                     sqlx::query(table).execute(&db).await.unwrap();
                 }
             })
@@ -353,12 +586,12 @@ mod tests {
     /// Registers a device for `account` through the steps, as a browser would.
     async fn register(db: &PgPool, device: &mut WebauthnAuthenticator<SoftToken>, account: &str) {
         let mut tx = db.begin().await.unwrap();
-        let challenge = register_start(&mut tx, account, "a@b.fr").await.unwrap();
+        let challenge = register_start(&mut tx, account, "a@b.fr", None).await.unwrap();
         tx.commit().await.unwrap();
         let options = serde_json::from_str(&challenge.options).unwrap();
         let answer = serde_json::to_string(&device.do_registration(origin(), options).unwrap()).unwrap();
         let mut tx = db.begin().await.unwrap();
-        register_finish(&mut tx, &challenge.state_id, &answer, account).await.unwrap();
+        register_finish(&mut tx, &challenge.state_id, &answer, account, None).await.unwrap();
         tx.commit().await.unwrap();
     }
 
@@ -372,30 +605,30 @@ mod tests {
         register(&db, &mut device, account).await;
 
         let mut tx = db.begin().await.unwrap();
-        let challenge = login_start(&mut tx, account).await.unwrap();
+        let challenge = login_start(&mut tx, account, None).await.unwrap();
         tx.commit().await.unwrap();
         let options = serde_json::from_str(&challenge.options).unwrap();
         let answer = serde_json::to_string(&device.do_authentication(origin(), options).unwrap()).unwrap();
 
         // Another state id, or none: nothing to answer.
         let mut tx = db.begin().await.unwrap();
-        assert_eq!(status_of(login_finish(&mut tx, "nope", &answer).await), Some(401));
+        assert_eq!(status_of(login_finish(&mut tx, "nope", &answer, None).await), Some(401));
         tx.rollback().await.unwrap();
         // The answer goes with its challenge, once.
         let mut tx = db.begin().await.unwrap();
-        assert_eq!(login_finish(&mut tx, &challenge.state_id, &answer).await.unwrap(), account);
+        assert_eq!(login_finish(&mut tx, &challenge.state_id, &answer, None).await.unwrap(), account);
         tx.commit().await.unwrap();
         let mut tx = db.begin().await.unwrap();
-        assert_eq!(status_of(login_finish(&mut tx, &challenge.state_id, &answer).await), Some(401));
+        assert_eq!(status_of(login_finish(&mut tx, &challenge.state_id, &answer, None).await), Some(401));
         tx.rollback().await.unwrap();
 
         // Logging in again works, with a new challenge: the counter moved on and was kept.
         let mut tx = db.begin().await.unwrap();
-        let challenge = login_start(&mut tx, account).await.unwrap();
+        let challenge = login_start(&mut tx, account, None).await.unwrap();
         tx.commit().await.unwrap();
         let answer = serde_json::to_string(&device.do_authentication(origin(), serde_json::from_str(&challenge.options).unwrap()).unwrap()).unwrap();
         let mut tx = db.begin().await.unwrap();
-        assert_eq!(login_finish(&mut tx, &challenge.state_id, &answer).await.unwrap(), account);
+        assert_eq!(login_finish(&mut tx, &challenge.state_id, &answer, None).await.unwrap(), account);
         tx.commit().await.unwrap();
     }
 
@@ -413,7 +646,7 @@ mod tests {
             let db = db.clone();
             async move {
                 let mut tx = db.begin().await.unwrap();
-                let c = login_start(&mut tx, account).await.unwrap();
+                let c = login_start(&mut tx, account, None).await.unwrap();
                 tx.commit().await.unwrap();
                 c
             }
@@ -422,21 +655,21 @@ mod tests {
         let answer_to_first = serde_json::to_string(&alice_device.do_authentication(origin(), serde_json::from_str(&first.options).unwrap()).unwrap()).unwrap();
         // The answer to one challenge does not open the other.
         let mut tx = db.begin().await.unwrap();
-        assert_eq!(status_of(login_finish(&mut tx, &second.state_id, &answer_to_first).await), Some(401));
+        assert_eq!(status_of(login_finish(&mut tx, &second.state_id, &answer_to_first, None).await), Some(401));
         tx.commit().await.unwrap();
         // Bob's device cannot answer Alice's challenge.
         let alice_challenge = start(alice).await;
         let bob_answer = serde_json::to_string(&bob_device.do_authentication(origin(), serde_json::from_str(&start(bob).await.options).unwrap()).unwrap()).unwrap();
         let mut tx = db.begin().await.unwrap();
-        assert_eq!(status_of(login_finish(&mut tx, &alice_challenge.state_id, &bob_answer).await), Some(401));
+        assert_eq!(status_of(login_finish(&mut tx, &alice_challenge.state_id, &bob_answer, None).await), Some(401));
         tx.commit().await.unwrap();
         // An account without a passkey, and the garbage of a client, are 401 too.
         let mut tx = db.begin().await.unwrap();
-        assert_eq!(status_of(login_start(&mut tx, "passkey-nobody").await), Some(401));
+        assert_eq!(status_of(login_start(&mut tx, "passkey-nobody", None).await), Some(401));
         tx.rollback().await.unwrap();
         let fresh = start(alice).await;
         let mut tx = db.begin().await.unwrap();
-        assert_eq!(status_of(login_finish(&mut tx, &fresh.state_id, "{not json").await), Some(401));
+        assert_eq!(status_of(login_finish(&mut tx, &fresh.state_id, "{not json", None).await), Some(401));
         tx.commit().await.unwrap();
     }
 
@@ -451,19 +684,19 @@ mod tests {
 
         // A second registration for the same account names the device it already has.
         let mut tx = db.begin().await.unwrap();
-        let again = register_start(&mut tx, owner, "a@b.fr").await.unwrap();
+        let again = register_start(&mut tx, owner, "a@b.fr", None).await.unwrap();
         tx.commit().await.unwrap();
         let options: serde_json::Value = serde_json::from_str(&again.options).unwrap();
         assert_eq!(options["publicKey"]["excludeCredentials"].as_array().map(Vec::len), Some(1));
 
         // A challenge started for one account cannot be finished as another; it stays there for the one it is for.
         let mut tx = db.begin().await.unwrap();
-        let theirs = register_start(&mut tx, other, "t@b.fr").await.unwrap();
+        let theirs = register_start(&mut tx, other, "t@b.fr", None).await.unwrap();
         tx.commit().await.unwrap();
         let answer = serde_json::to_string(&device.do_registration(origin(), serde_json::from_str(&theirs.options).unwrap()).unwrap()).unwrap();
         let mut tx = db.begin().await.unwrap();
-        assert_eq!(status_of(register_finish(&mut tx, &theirs.state_id, &answer, owner).await), Some(400));
-        register_finish(&mut tx, &theirs.state_id, &answer, other).await.unwrap();
+        assert_eq!(status_of(register_finish(&mut tx, &theirs.state_id, &answer, owner, None).await), Some(400));
+        register_finish(&mut tx, &theirs.state_id, &answer, other, None).await.unwrap();
         tx.commit().await.unwrap();
         let on_other: i64 = sqlx::query_scalar("SELECT count(*) FROM webauthn_credentials WHERE account = $1").bind(other).fetch_one(&db).await.unwrap();
         assert_eq!(on_other, 1);
@@ -476,16 +709,81 @@ mod tests {
         let mut device = device();
         let account = "passkey-late";
         let mut tx = db.begin().await.unwrap();
-        let challenge = register_start(&mut tx, account, "a@b.fr").await.unwrap();
+        let challenge = register_start(&mut tx, account, "a@b.fr", None).await.unwrap();
         let answer = serde_json::to_string(&device.do_registration(origin(), serde_json::from_str(&challenge.options).unwrap()).unwrap()).unwrap();
         sqlx::query("UPDATE webauthn_states SET expires_at = now() - interval '1 second' WHERE id = $1").bind(&challenge.state_id).execute(&mut *tx).await.unwrap();
-        assert_eq!(status_of(register_finish(&mut tx, &challenge.state_id, &answer, account).await), Some(400));
+        assert_eq!(status_of(register_finish(&mut tx, &challenge.state_id, &answer, account, None).await), Some(400));
         tx.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs EDA_TEST_DATABASE_URL"]
+    async fn a_challenge_keeps_the_origin_it_was_started_for() {
+        let db = database().await;
+        unsafe {
+            std::env::set_var("WEBAUTHN_RP_ID", "example.com");
+            std::env::set_var("WEBAUTHN_ALLOWED_ORIGINS", "https://admin.example.com");
+        }
+        let admin = Url::parse("https://admin.example.com").unwrap();
+        let (mut device, account) = (device(), "passkey-origin");
+        sqlx::query("DELETE FROM webauthn_credentials WHERE account = $1").bind(account).execute(&db).await.unwrap();
+
+        // An origin the site does not allow is a 400, and nothing is kept.
+        let mut tx = db.begin().await.unwrap();
+        assert_eq!(status_of(register_start(&mut tx, account, "a@b.fr", Some("https://evil.example.com")).await), Some(400));
+        assert_eq!(status_of(login_discoverable_start(&mut tx, Some("https://example.org")).await), Some(400));
+        tx.rollback().await.unwrap();
+
+        // Started for the admin frontend: the origin is kept, and the device signs for it.
+        let mut tx = db.begin().await.unwrap();
+        let challenge = register_start(&mut tx, account, "a@b.fr", Some("https://admin.example.com")).await.unwrap();
+        tx.commit().await.unwrap();
+        let kept: String = sqlx::query_scalar("SELECT origin FROM webauthn_states WHERE id = $1").bind(&challenge.state_id).fetch_one(&db).await.unwrap();
+        assert_eq!(kept, "https://admin.example.com");
+        let answer = serde_json::to_string(&device.do_registration(admin.clone(), serde_json::from_str(&challenge.options).unwrap()).unwrap()).unwrap();
+
+        // Finishing as another origin of the list is refused, and the challenge is spent.
+        let mut tx = db.begin().await.unwrap();
+        assert_eq!(status_of(register_finish(&mut tx, &challenge.state_id, &answer, account, Some("https://app.example.com")).await), Some(400));
+        assert_eq!(status_of(register_finish(&mut tx, &challenge.state_id, &answer, account, None).await), Some(400));
+        tx.commit().await.unwrap();
+
+        // Started again: with no origin at the end, or the same one, it works.
+        let mut tx = db.begin().await.unwrap();
+        let challenge = register_start(&mut tx, account, "a@b.fr", Some("https://admin.example.com")).await.unwrap();
+        tx.commit().await.unwrap();
+        let answer = serde_json::to_string(&device.do_registration(admin.clone(), serde_json::from_str(&challenge.options).unwrap()).unwrap()).unwrap();
+        let mut tx = db.begin().await.unwrap();
+        register_finish(&mut tx, &challenge.state_id, &answer, account, None).await.unwrap();
+        tx.commit().await.unwrap();
+
+        // The passkey made on the admin frontend logs in from the app frontend (the site), and from admin with the origin named.
+        for (asked, from) in [(None, origin()), (Some("https://admin.example.com"), admin.clone())] {
+            let mut tx = db.begin().await.unwrap();
+            let challenge = login_start(&mut tx, account, asked).await.unwrap();
+            tx.commit().await.unwrap();
+            let answer = serde_json::to_string(&device.do_authentication(from, serde_json::from_str(&challenge.options).unwrap()).unwrap()).unwrap();
+            let mut tx = db.begin().await.unwrap();
+            assert_eq!(login_finish(&mut tx, &challenge.state_id, &answer, asked).await.unwrap(), account, "{asked:?}");
+            tx.commit().await.unwrap();
+        }
+        // A login finished as another origin than the one it started for is a 401.
+        let mut tx = db.begin().await.unwrap();
+        let challenge = login_start(&mut tx, account, None).await.unwrap();
+        tx.commit().await.unwrap();
+        let answer = serde_json::to_string(&device.do_authentication(origin(), serde_json::from_str(&challenge.options).unwrap()).unwrap()).unwrap();
+        let mut tx = db.begin().await.unwrap();
+        assert_eq!(status_of(login_finish(&mut tx, &challenge.state_id, &answer, Some("https://admin.example.com")).await), Some(401));
+        tx.commit().await.unwrap();
+        unsafe {
+            std::env::remove_var("WEBAUTHN_RP_ID");
+            std::env::remove_var("WEBAUTHN_ALLOWED_ORIGINS");
+        }
     }
 
     #[test]
     fn a_registration_asks_the_device_for_a_passkey_it_can_offer_without_an_account() {
-        let wa = build(APP_URL, None).unwrap();
+        let wa = plain();
         let (options, _) = wa.start_passkey_registration(user_handle("a"), "a@b.fr", "a@b.fr", None).unwrap();
         let json: serde_json::Value = serde_json::from_str(&prefer_discoverable(&options).unwrap()).unwrap();
         let selection = &json["publicKey"]["authenticatorSelection"];
@@ -526,7 +824,7 @@ mod tests {
             let db = db.clone();
             async move {
                 let mut tx = db.begin().await.unwrap();
-                let c = login_discoverable_start(&mut tx).await.unwrap();
+                let c = login_discoverable_start(&mut tx, None).await.unwrap();
                 tx.commit().await.unwrap();
                 c
             }
@@ -535,7 +833,7 @@ mod tests {
             let db = db.clone();
             async move {
                 let mut tx = db.begin().await.unwrap();
-                let result = login_finish(&mut tx, &challenge.state_id, &answer).await;
+                let result = login_finish(&mut tx, &challenge.state_id, &answer, None).await;
                 tx.commit().await.unwrap();
                 result
             }
@@ -577,14 +875,14 @@ mod tests {
 
         // A challenge that names the account still works, next to the others.
         let mut tx = db.begin().await.unwrap();
-        let named = login_start(&mut tx, alice).await.unwrap();
+        let named = login_start(&mut tx, alice, None).await.unwrap();
         tx.commit().await.unwrap();
         let answer = serde_json::to_string(&alice_device.do_authentication(origin(), serde_json::from_str(&named.options).unwrap()).unwrap()).unwrap();
         assert_eq!(finish(named, answer).await.unwrap(), alice);
 
         // A passkey the server never stored: the device signs, the server cannot find the passkey.
         let mut stranger = device();
-        let (options, _) = build(APP_URL, None).unwrap().start_passkey_registration(user_handle("nobody"), "n", "n", None).unwrap();
+        let (options, _) = plain().start_passkey_registration(user_handle("nobody"), "n", "n", None).unwrap();
         let registered = stranger.do_registration(origin(), options).unwrap();
         let unknown = start().await;
         let answer = discoverable_answer(&mut stranger, &unknown, &credential_key(registered.raw_id.as_ref()), user_handle("nobody"));

@@ -94,32 +94,45 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                 expr(code, &format!("{path}/code"), out);
                 expr(account, &format!("{path}/account"), out);
             }
-            Step::PasskeyRegisterStart { account, name, .. } => {
+            Step::PasskeyRegisterStart {
+                account,
+                name,
+                app_url,
+                ..
+            } => {
                 expr(account, &format!("{path}/account"), out);
                 expr(name, &format!("{path}/name"), out);
+                app_url_expr(app_url, &path, out);
             }
             Step::PasskeyRegisterFinish {
                 state_id,
                 credential,
                 account,
+                app_url,
                 ..
             } => {
                 expr(state_id, &format!("{path}/stateId"), out);
                 expr(credential, &format!("{path}/credential"), out);
                 expr(account, &format!("{path}/account"), out);
+                app_url_expr(app_url, &path, out);
             }
-            Step::PasskeyLoginStart { account, .. } => {
+            Step::PasskeyLoginStart {
+                account, app_url, ..
+            } => {
                 if let Some(account) = account {
                     expr(account, &format!("{path}/account"), out)
                 }
+                app_url_expr(app_url, &path, out);
             }
             Step::PasskeyLoginFinish {
                 state_id,
                 credential,
+                app_url,
                 ..
             } => {
                 expr(state_id, &format!("{path}/stateId"), out);
                 expr(credential, &format!("{path}/credential"), out);
+                app_url_expr(app_url, &path, out);
             }
             Step::ImageSniff { input, .. } => expr(input, &format!("{path}/input"), out),
             Step::ObjectPut {
@@ -204,6 +217,13 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
 fn assignments(list: &[sb_model::Assignment], base: &str, out: &mut Vec<Diagnostic>) {
     for (i, a) in list.iter().enumerate() {
         expr(&a.value, &format!("{base}/{i}/value"), out);
+    }
+}
+
+/// The optional `app_url` of a passkey step.
+fn app_url_expr(app_url: &Option<Expr>, path: &str, out: &mut Vec<Diagnostic>) {
+    if let Some(app_url) = app_url {
+        expr(app_url, &format!("{path}/appUrl"), out);
     }
 }
 

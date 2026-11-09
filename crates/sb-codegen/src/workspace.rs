@@ -120,6 +120,12 @@ subtle = "2"
 tera = "1"
 tokio-native-tls = "0.3"
 tower = {{ version = "0.5", features = ["util"] }}
+redis = {{ version = "1.7", features = ["tokio-comp", "connection-manager"] }}
+reqwest = {{ version = "0.13", default-features = false, features = ["json", "native-tls"] }}
+rlimit = "0.10"
+bytes = "1"
+httparse = "1"
+thiserror = "2"
 webauthn-rs = {{ version = "0.5", features = ["danger-allow-state-serialisation", "conditional-ui"] }}
 webauthn-authenticator-rs = {{ version = "0.5", default-features = false, features = ["softtoken"] }}
 "#,
@@ -256,6 +262,25 @@ fn docker_compose(project: &Project) -> String {
             1,
         );
     }
+    // A real-time service reads the channel its events come on, and the traces of the sessions, from DragonflyDB (any server
+    // that speaks the Redis protocol would do: Valkey, Redis).
+    if project
+        .services
+        .iter()
+        .any(|s| s.kind == sb_model::ServiceKind::Realtime)
+    {
+        compose = compose.replacen(
+            "\nvolumes:\n",
+            "\n\x20 dragonfly:\n\
+             \x20   image: docker.dragonflydb.io/dragonflydb/dragonfly\n\
+             \x20   ulimits:\n\
+             \x20     memlock: -1\n\
+             \x20   ports:\n\
+             \x20     - \"6379:6379\"\n\
+             volumes:\n",
+            1,
+        );
+    }
     compose
 }
 
@@ -329,9 +354,46 @@ fn mta_doc(svc: &Service) -> String {
     s
 }
 
+/// What the operator of a real-time service has to set: the project holds the five names, the environment the rest.
+fn realtime_doc(svc: &Service) -> String {
+    let config = svc.realtime.clone().unwrap_or_default();
+    format!(
+        "### {} (real-time service, HTTP port {})\n\n\
+         Pushes events to browsers over SSE. `GET {}` opens a stream, authenticated by the access token in the cookie `{}` \
+         (EdDSA, issuer `{}`, claims `sub`, `sid`, `exp`, and optionally `tid` and `permissions`). The API publishes each event as JSON on the \
+         channel `{}` of DragonflyDB (or Valkey, or Redis): `{{\"type\": \"contact.updated\", \"tenantId\": \"...\", \"permission\": \
+         \"contacts.view\", \"data\": {{\"id\": \"...\"}}}}`; it reaches the streams whose rights hold the permission, \
+         `accountIds` without it, or every stream of `accountId`. `tenantId` is optional: a system with no companies leaves it out of the \
+         tokens (`tid`) and of the events, and everything happens in one scope; a scope never leaks into another. A stream lives while its session does: the API \
+         leaves `{}:<session id>` = `{{\"accountId\", \"tenantId\" (optional), \"exp\"}}` with each token it issues. `/livez`, `/readyz` and \
+         `/metrics` are on the HTTP port.\n\n\
+         Built for tens of thousands of streams on one instance: an event is looked up by account and by (company, permission) and \
+         handed to its recipients only, a stream holds no task and no timer, and its memory is bounded by `REALTIME_MAX_CONNECTIONS`. \
+         `cargo run --release -p {} --example load` measures it on your hardware.\n\n\
+         Environment: `DRAGONFLY_URL` and `JWKS_URL` (required in production), `CORS_ALLOWED_ORIGINS` (the origins of the front, \
+         required in production, never `*`), `SERVER_PORT`, `SERVER_HOST`, `REALTIME_MAX_CONNECTIONS` (60000: beyond it a stream is \
+         refused with a 503 and the memory stays bounded; size the container for it), `REALTIME_MAX_PER_ACCOUNT` (20: the oldest \
+         stream of the account is closed), `REALTIME_QUEUE` (256 frames before a stream that does not read is closed), \
+         `REALTIME_RESYNC_SPREAD_SECS` (10: after the channel was lost the open streams are told, over that time, to read their \
+         state again), `REALTIME_RENEW_GRACE_SECS` (120), `METRICS_TOKEN` (or `METRICS_ALLOW_OPEN=true`). The limit of open files \
+         (`ulimit -n`) is raised at start-up as far as the system allows.\n\n",
+        svc.name,
+        svc.http_port.unwrap_or_default(),
+        config.path,
+        config.access_cookie,
+        config.issuer,
+        config.channel,
+        config.session_key_prefix,
+        service::crate_name(svc),
+    )
+}
+
 fn service_doc(project: &Project, svc: &Service) -> String {
     if svc.kind == sb_model::ServiceKind::Mta {
         return mta_doc(svc);
+    }
+    if svc.kind == sb_model::ServiceKind::Realtime {
+        return realtime_doc(svc);
     }
     let mut s = format!("### {} (gRPC port {})\n\n", svc.name, svc.port);
     if let Some(port) = svc.http_port.filter(|_| !svc.routes.is_empty()) {

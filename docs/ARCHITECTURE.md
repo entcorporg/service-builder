@@ -376,7 +376,8 @@ workspace généré (avec ses propres tests : `cargo test -p eda-runtime`), et v
 - **Passkeys (WebAuthn)** : quatre étapes, deux requêtes pour s'enregistrer et deux pour se connecter (routes seulement,
   `E_PASSKEY_OUTSIDE_ROUTE`). Le navigateur fait le travail cryptographique, le runtime (`webauthn.rs`, sur `webauthn-rs`)
   vérifie. Le domaine (RP ID) et l'origine viennent de la variable d'environnement `APP_URL` (et `APP_NAME` pour le nom
-  affiché), la même que celle des liens des e-mails : le service ne démarre pas sans elle (`check_config`).
+  affiché), la même que celle des liens des e-mails : le service ne démarre pas sans elle (`check_config`), sauf à nommer
+  l'origine par requête (voir « Plusieurs frontends »).
   - `passkeyRegisterStart` (compte déjà authentifié : le prendre d'un jeton vérifié, `claims.sub`, jamais du corps) et
     `passkeyLoginStart` remplissent le schéma API `PasskeyChallenge` (créé par l'éditeur) : `state_id`, à rendre à l'étape de
     fin, et `options`, le JSON de `navigator.credentials.create` ou `.get`. Un appareil déjà enregistré par le compte est exclu.
@@ -404,6 +405,24 @@ workspace généré (avec ses propres tests : `cargo test -p eda-runtime`), et v
     ne peut pas s'enregistre quand même, mais ne sera pas retrouvé sans compte. Les passkeys déjà enregistrées avant ce
     changement ne sont découvrables que si l'appareil les avait créées ainsi (les clés des gestionnaires de mots de passe et
     des téléphones le sont en général ; une clé de sécurité matérielle non).
+  - **Plusieurs frontends (sous-domaines)** : par défaut le RP ID et l'origine sont ceux d'`APP_URL`, donc un seul frontend.
+    Pour en servir plusieurs, deux ajouts, indépendants :
+    - **Origine par requête** : les quatre étapes ont un champ optionnel `appUrl` (une expression, évaluée à chaque requête, par
+      exemple depuis un en-tête qui nomme le frontend). Elle n'est acceptée que si elle est `APP_URL` ou figure dans la variable
+      d'environnement **`WEBAUTHN_ALLOWED_ORIGINS`** (origines séparées par des virgules, comparées exactement : schéma, hôte et
+      port ; un chemin est ignoré) ; sinon `400 invalid passkey` (au début, et à la fin d'un enregistrement), `401` à la fin
+      d'une connexion. Pas de joker : une origine arbitraire ne peut pas être choisie par le client. **L'origine d'un défi est
+      gardée avec lui** (colonne `webauthn_states.origin`, ajoutée par `ADD_STATES_ORIGIN` aussi sur une table existante) et la
+      fin vérifie la réponse contre celle-là ; un `appUrl` à la fin qui en nomme une autre est refusé, et sans `appUrl` à la fin
+      c'est celle du début. Un défi d'avant la colonne (origine vide) vaut `APP_URL`.
+    - **Origines liées, un seul RP ID** : **`WEBAUTHN_RP_ID`** fixe le domaine parent (`exemple.fr`). Toutes les origines
+      (`APP_URL` et la liste) doivent alors en être ou en dépendre (`check_config` refuse sinon, au démarrage), et la réponse d'un
+      appareil est acceptée de n'importe laquelle : une passkey créée sur `exemple.fr` sert sur `app.exemple.fr`, et
+      inversement. Un hôte dépend du RP ID à une frontière de label (`badexemple.fr` n'est pas sous `exemple.fr`).
+      Sans `WEBAUTHN_RP_ID`, chaque origine demandée est son propre RP ID (ses passkeys ne servent pas ailleurs).
+    Vérifié avec l'authentificateur logiciel et PostgreSQL : origine refusée, origine gardée avec le défi, fin avec une autre
+    origine refusée, passkey créée sur `admin.exemple.fr` et utilisée depuis `app.exemple.fr`, réponse signée pour une origine
+    hors liste refusée.
   - La fonctionnalité Cargo `webauthn` du runtime (qui apporte OpenSSL) n'est activée que dans le `Cargo.toml` des services
     qui ont une étape passkey ; `webauthn-tests` ajoute l'authentificateur logiciel des tests.
   Vérifié avec un authentificateur logiciel (vraies signatures, sans navigateur) puis sur le code généré avec PostgreSQL :
@@ -548,6 +567,101 @@ indépendant** avec la clé publiée, rebonds sur une vraie session SMTP, dédup
 lancé pour de bon : un message inséré dans la file est livré à un serveur SMTP, signé DKIM, rendu depuis le mail du projet (HTML
 échappé), la ligne quitte la file, les métriques comptent la livraison. **Non vérifié** : une livraison vers un vrai MX sur Internet,
 le STARTTLS contre un vrai serveur, le débit sous charge, la lecture de Kafka (les consommateurs sont ceux des autres services).
+
+### Service temps réel (SSE)
+
+Un service peut être **prêt à l'emploi** (`kind: "realtime"`, tuile « Service temps réel ») : il pousse vers les navigateurs, en
+SSE, les événements que l'API publie sur un canal de **DragonflyDB** (ou Valkey, ou Redis : tout serveur qui parle le protocole).
+Comme le service mail, c'est du **code fixe** (`crates/sb-codegen/templates/realtime`, repris tel quel) avec une entrée de données
+de **cinq noms** (`RealtimeConfig`) : le canal (`live-events`), le chemin du flux (`/v1/events`), le cookie qui porte le jeton, l'émetteur
+(`iss`) attendu, et le préfixe des clés de session (`sess`). Tout le reste (adresse de DragonflyDB, JWKS, limites) est dans
+l'environnement, jamais dans le projet. Pas de base, pas de Kafka, pas de `eda-runtime`.
+
+**Le contrat**, repris du `svc-realtime` de Clairtyx dont il est issu : le navigateur ouvre `GET <chemin>?client=<id de l'onglet>` avec
+le cookie du jeton d'accès (EdDSA, clé publique lue sur `JWKS_URL`, claims `sub`, `sid`, `exp`, et facultativement `tid` et
+`permissions`). L'API publie `{"type": "contact.updated", "tenantId", "permission": "contacts.view", "data": {"id"}}` : l'événement va
+aux flux **de cette entreprise dont les droits contiennent la permission**, plus ceux des `accountIds` nommés, ou à tous les flux d'un
+`accountId`. **Les entreprises sont facultatives** : une architecture sans multi-tenant omet `tid` dans les jetons et `tenantId` dans les
+événements, et tout se passe dans une seule portée (« sans entreprise »). Les portées sont étanches : un flux avec entreprise ne reçoit
+jamais un événement sans `tenantId`, ni l'inverse. Sans permissions non plus, on adresse des comptes (`accountId`, `accountIds`) ; un
+événement sans destinataire explicite reste refusé. Un événement sans
+destinataire explicite est refusé ; le type (`domaine.action`) devient la ligne `event:` et ne peut pas contenir de retour à la ligne ;
+l'onglet auteur (`origin`) est exclu. `grants.updated` met à jour les droits d'un flux en cours de route, ou le ferme (membre retiré).
+Un flux vit **tant que sa session vit** : l'API laisse `<préfixe>:<session>` = `{accountId, tenantId, exp}` à chaque jeton émis, et à
+l'échéance du jeton le service relit cette trace au lieu de fermer.
+
+**Pourquoi il n'est pas une copie de `svc-realtime`.** Ce service-là envoie chaque événement à un `broadcast` que *chacun* des flux
+ouverts lit pour décider s'il le concerne : le coût d'un événement est le nombre de flux ouverts. À 50 000 flux et 1 000 événements par
+seconde, ce sont 50 millions de réveils et de tests par seconde, et un flux qui prend 256 messages de retard est fermé (son navigateur
+rouvre, vérifie un jeton, relit son état : la charge s'ajoute à la charge). Chaque flux porte aussi ses 28 Kio. Mesuré, même banc :
+
+| 50 000 flux ouverts, 1 000 événements/s, ~10 destinataires chacun | `svc-realtime` | service généré |
+|---|---|---|
+| Mémoire résidente | 1 446 Mio (29,5 Kio/flux) | **208 Mio (4,0 Kio/flux)** |
+| CPU moyen | **13,6 cœurs** | **0,14 cœur** |
+| Événements livrés | **70,0 %** (flux fermés parce qu'en retard) | **100 %** |
+| Latence publication → arrivée (p50 / p99 / p99,9) | 24 ms / 161 ms / 253 ms | 0,5 ms / 1,0 ms / 3,1 ms |
+| Ouverture des 50 000 flux | 4,8 s | 1,8 s |
+
+Ce qui change, et pourquoi :
+
+- **Un index de routage** (`registry.rs`) : les flux sont indexés par compte et par (entreprise, permission). Un événement est cherché
+  puis remis à ses destinataires seulement : le coût suit le nombre de destinataires, pas le nombre de flux. Un test le vérifie (le
+  temps d'un événement ne dépend pas du nombre de flux ouverts). La trame SSE est construite **une fois** et partagée (`Arc`) par les
+  files qui la reçoivent.
+- **Une file bornée par flux, jamais d'attente** : l'envoi ne bloque personne. Un flux qui ne lit pas (file pleine, ou impossible à
+  écrire en 10 s) est fermé, les autres ne le sentent pas. La file est de 256 trames (`REALTIME_QUEUE`) : c'est un nombre de places,
+  pas de la mémoire réservée. Elle doit absorber une rafale (un import en masse publie des centaines d'événements d'une entreprise
+  d'un coup), et la boucle du relais cède la main tous les 64 messages pour que les écritures se vident ; un test a trouvé le cas.
+- **Pas une tâche et un minuteur par flux** : un seul balayeur (`sweeper.rs`) visite 1/15 des flux chaque seconde, envoie le heartbeat
+  (qui démasque une connexion morte) et regroupe les sessions à relire en `MGET` de 256 sur **une** connexion partagée (l'ancien code
+  en ouvrait une par lecture). 50 000 flux qui se renouvellent toutes les 5 minutes sont 170 clés par seconde. Une session qu'on
+  **ne peut pas vérifier** (Dragonfly injoignable) garde son flux 120 s (`REALTIME_RENEW_GRACE_SECS`) au lieu de fermer tout le monde.
+- **Un événement `resync`, pas une fermeture générale.** Quand l'abonnement revient après une coupure, des événements ont pu être perdus
+  (le pub/sub ne rejoue rien). L'ancien code fermait **tous** les flux d'un coup : 50 000 navigateurs rouvrent en même temps, chacun
+  fait vérifier un jeton puis relit son état. Ici les flux reçoivent `event: resync` (étalé sur `REALTIME_RESYNC_SPREAD_SECS`, 10 s)
+  et restent ouverts. **Le front doit traiter `resync` comme `grants.updated` : relire l'état qu'il affiche.**
+- **Un petit serveur HTTP/1.1 dédié** (`http.rs`, parseur `httparse`) à la place d'axum/hyper. Première version, avec axum : 28,6 Kio par
+  flux, dont 16 Kio de tampons que hyper alloue par connexion (8 Kio de lecture, 8 Kio d'en-tête de réponse : `INIT_BUFFER_SIZE`, aucun
+  réglage ne les réduit) et la machine à états de la requête suivante, qu'un flux SSE n'a jamais. Un flux est ici une socket et une
+  tâche qui attend la trame suivante. Une requête par connexion, toujours `Connection: close` : pas de keep-alive, pas de pipelining,
+  donc pas de contrebande de requêtes, et un flux qui se termine emporte sa connexion (avec axum elle restait ouverte et inactive : un
+  test l'a révélé). Requête de 8 Kio au plus lue en 10 s, une écriture qui dure plus de 10 s coupe le flux, un client qui envoie plus de
+  1 Kio à un flux ouvert est coupé. Le TLS est l'affaire du proxy devant (Traefik, nginx).
+- **Une mémoire bornée, donc pas d'OOMKill** : `REALTIME_MAX_CONNECTIONS` (60 000) refuse le flux suivant par un `503` avec un
+  `Retry-After` qui varie un peu d'un refus à l'autre ; `REALTIME_MAX_PER_ACCOUNT` (20) ferme le plus ancien flux du compte plutôt
+  que de refuser un navigateur qui se reconnecte avant que le serveur ait vu mourir l'ancienne connexion. Dimensionner le conteneur
+  pour la limite : environ 15 Mio + 4 Kio × flux, plus les structures du noyau pour chaque socket (quelques Kio, hors RSS, comptées
+  dans la limite d'un conteneur : estimation non mesurée, de l'ordre de 150 Mio pour 50 000). Le service relève lui-même la limite de
+  descripteurs (`RLIMIT_NOFILE`) et l'écrit dans les journaux si elle reste trop basse.
+
+Santé et métriques sont sur le même port : `/livez`, `/readyz` (503 tant que l'abonnement n'est pas actif), `/metrics` (Prometheus, jeton
+`METRICS_TOKEN` ou `METRICS_ALLOW_OPEN=true` : flux ouverts, ouvertures, fermetures par raison, trames livrées, lots de sessions, `resync`).
+
+Validation : un service temps réel n'a ni RPC, ni route, ni table, ni tâche, ni consommateur, ni mail (`E_RT_CONTENT`), un port HTTP
+(`E_HTTP_PORT`) et ses réglages (`E_RT_CONFIG`) dont les noms ont un alphabet restreint (`E_RT_CHANNEL`, `E_RT_PREFIX`, `E_RT_COOKIE`,
+`E_RT_ISSUER`, `E_RT_PATH`, qui refuse aussi `/livez`, `/readyz` et `/metrics`) ; ces réglages hors d'un service temps réel sont refusés
+(`E_REALTIME_OUTSIDE`). `docker-compose.yml` ajoute DragonflyDB (port 6379).
+
+**Vérifié**, sur le service généré et un vrai DragonflyDB (image officielle) : 48 tests unitaires (index, files, balayeur, jetons, parseur
+HTTP) ; 8 tests sur de vraies sockets sans serveur de clés (réponse sans longueur, connexion fermée avec le flux, flux qui ne lit pas,
+refus 401/503/405/404/400/431, CORS, préflight, santé et métriques) ; 5 tests contre DragonflyDB (événement publié → flux concernés
+seulement, abonnement coupé → `resync` sans fermeture, session renouvelée ou révoquée, droits changés en cours de route) ; et l'outil de
+charge `cargo run --release -p <service> --example load`, qui lance le binaire et mesure **ce processus** (RSS, CPU, latence). Sur une
+machine de 16 threads, client et serveur sur la même machine (bouclage), un DragonflyDB dans Docker :
+
+- 50 000 flux, 1 000 événements/s : le tableau ci-dessus ;
+- **entreprises de 1 000 flux**, 500 événements/s, soit 500 000 trames/s : 15 005 000 trames livrées, 100 %, p99 9,4 ms, 3,7 cœurs (les
+  écritures), 220 Mio ;
+- **jetons de 20 s**, 60 s de test : 210 lots de sessions relus, aucun flux fermé, 0,14 cœur ;
+- **redémarrage de DragonflyDB avec 50 000 flux ouverts** : abonnement perdu puis rétabli, aucun flux fermé, 49 993 `resync` comptés par
+  les clients, mémoire et latence inchangées ; les événements publiés pendant la coupure sont perdus (le pub/sub ne rejoue rien), c'est
+  ce que `resync` fait relire.
+
+**Non vérifié** : un vrai navigateur (`EventSource`) ; Traefik ou nginx devant (en particulier le délai d'inactivité des réponses, que
+le heartbeat de 15 s est censé tenir) ; la mémoire sous une vraie limite de conteneur (cgroup) ; plus de 50 000 flux ; une tenue de
+plusieurs heures (fuites) ; DragonflyDB en cluster ; la reprise des événements perdus (les Streams `XADD`/`XREAD` avec `Last-Event-ID`
+la permettraient, ce n'est pas fait) ; une entrée Kafka (seul le pub/sub est lu).
 
 ### Persistance et outbox
 

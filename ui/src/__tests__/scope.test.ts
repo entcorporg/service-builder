@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { exampleJson, exampleQuery } from '../json'
-import { addColumn, addForeignKey, addJob, addMtaService, addMailEvent, mailFields, removeMailEvent, setMailTopic, ensureJwksSchemas, ensurePasskeySchema, setSoftDelete, tenantCandidates, ensureTotpSchema, eventKeys, addIndex, addTable, addUnique, makeStep, retargetForeignKey, renameColumn, renameTable, selectionForPath, addMessage, addRoute, addRpc, defaultStatus, pathParams, addTopic, autoMap, canConsume, canProduce, connectConsumer, consumersOf, declareProducer, removeService, renameService, renameField, renameMessage, renameTopic, nestable } from '../model'
+import { addColumn, addForeignKey, addJob, addMtaService, addRealtimeService, addMailEvent, mailFields, removeMailEvent, setMailTopic, ensureJwksSchemas, ensurePasskeySchema, setSoftDelete, tenantCandidates, ensureTotpSchema, eventKeys, addIndex, addTable, addUnique, makeStep, retargetForeignKey, renameColumn, renameTable, selectionForPath, addMessage, addRoute, addRpc, defaultStatus, pathParams, addTopic, autoMap, canConsume, canProduce, connectConsumer, consumersOf, declareProducer, removeService, renameService, renameField, renameMessage, renameTopic, nestable } from '../model'
 import { sqlPreview } from '../components/SqlStep'
 import { everyLabel } from '../components/Inspector'
 import { createTableSql } from '../components/TablesView'
@@ -916,5 +916,21 @@ describe('mail service', () => {
     renameTopic(p, 'accounts.registered', 'users.registered')
     expect(mailer.consumers[0]!.topic).toBe('users.registered')
     expect(mailer.templates![0]!.eventType).toBe('users.registered')
+  })
+})
+
+describe('real-time service', () => {
+  it('is a ready-made service with its five settings and nothing to draw', () => {
+    const p = project()
+    const rt = addRealtimeService(p, { x: 0, y: 0 })
+    expect(rt).toMatchObject({ name: 'Realtime', kind: 'realtime', consumers: [], rpcs: [], routes: [], tables: [], jobs: [] })
+    expect(rt.realtime).toEqual({ channel: 'live-events', path: '/v1/events', accessCookie: 'access_token', issuer: 'api', sessionKeyPrefix: 'sess' })
+    expect(rt.httpPort).toBeGreaterThan(8080)
+    // A second one gets its own name and port, and its own copy of the settings.
+    const other = addRealtimeService(p, { x: 0, y: 0 })
+    expect(other.name).toBe('Realtime2')
+    expect(other.httpPort).not.toBe(rt.httpPort)
+    other.realtime!.channel = 'other'
+    expect(rt.realtime!.channel).toBe('live-events')
   })
 })

@@ -116,6 +116,37 @@ jobs:
           # runner.temp is wiped between jobs; the tool cache is not, so librdkafka is built once.
           CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
 
+  generated-realtime:
+    # The real-time service is tested for real: its own tests, then the whole of it against a DragonflyDB, over real sockets.
+    # It needs neither Kafka nor a database, so none of the C toolchain of the other services is built here.
+    runs-on: ubuntu-24.04
+    services:
+      dragonfly:
+        image: docker.dragonflydb.io/dragonflydb/dragonfly
+        ports:
+          - 6379:6379
+        options: --ulimit memlock=-1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: ${{ runner.environment == 'github-hosted' }}
+      - uses: dtolnay/rust-toolchain@stable
+        if: runner.environment == 'github-hosted'
+      - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo run -p sb-codegen --example dump -- "$RUNNER_TEMP/generated"
+      - run: cargo test -p realtime -- --test-threads=4
+        working-directory: ${{ runner.temp }}/generated
+        env:
+          CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-realtime-target
+      - run: cargo test -p realtime --test dragonfly -- --ignored --test-threads=1
+        working-directory: ${{ runner.temp }}/generated
+        env:
+          CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-realtime-target
+          REALTIME_TEST_DRAGONFLY_URL: redis://localhost:6379
+
   ui:
     runs-on: ubuntu-24.04
     steps:

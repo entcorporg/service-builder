@@ -1,4 +1,4 @@
-import { addMessage, addMtaService, addService, addTopic, KIND_LABELS, KINDS } from '../model'
+import { addMessage, addMtaService, addRealtimeService, addService, addTopic, KIND_LABELS, KINDS } from '../model'
 import { useStore } from '../store'
 import { DND_TYPE } from './Canvas'
 import { Icon, type IconName } from './Icon'
@@ -53,6 +53,14 @@ export function Palette() {
     select({ kind: 'service', name })
   }
 
+  const addRealtime = () => {
+    let name = ''
+    edit((p) => {
+      name = addRealtimeService(p, spot()).name
+    })
+    select({ kind: 'service', name })
+  }
+
   return (
     <aside className="palette" aria-label="Éléments">
       {!apiMode && (
@@ -60,6 +68,7 @@ export function Palette() {
           <h2>Éléments</h2>
           <Tile kind="service" icon="service" label="Service" hint="gRPC, HTTP + consumers Kafka" onAdd={() => add('service')} />
           <Tile kind="service" icon="publish" label="Service mail" hint="MTA prêt à l’emploi : événements → mails" onAdd={addMta} draggable={false} />
+          <Tile kind="service" icon="publish" label="Service temps réel" hint="SSE prêt à l’emploi : événements → navigateurs (DragonflyDB)" onAdd={addRealtime} draggable={false} />
           <Tile kind="topic" icon="topic" label="Topic" hint="Flux d’événements Kafka" onAdd={() => add('topic')} />
         </>
       )}

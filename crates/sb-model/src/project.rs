@@ -295,6 +295,10 @@ pub struct Service {
     /// afterwards (the worker reads them on every cycle).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub templates: Vec<MailTemplate>,
+    /// The settings of a `realtime` service: the channel its events come on, the path of the stream and how the access
+    /// token is read. Required for that kind, refused for the others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realtime: Option<RealtimeConfig>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -305,11 +309,78 @@ pub enum ServiceKind {
     Standard,
     /// A ready-made mail transfer agent: queue, worker, DKIM, SMTP delivery, bounces, health and metrics.
     Mta,
+    /// A ready-made service that pushes events to browsers over SSE (server-sent events): the API publishes an event on a
+    /// channel of DragonflyDB (or Valkey, or Redis) and this service hands it to the browsers it is for. Built to hold
+    /// tens of thousands of open streams on one instance in a bounded amount of memory.
+    Realtime,
 }
 
 impl ServiceKind {
     pub fn is_standard(&self) -> bool {
         *self == ServiceKind::Standard
+    }
+}
+
+/// What the project decides about a `realtime` service. The rest of it (the index of the streams, the limits, the sessions,
+/// the health and the metrics) is fixed code, set by the environment of the deployment.
+///
+/// The access token is a JWT signed with EdDSA, whose public key is read from the `JWKS_URL` of the environment. Its claims
+/// are `sub` (the account), `sid` (the session), `exp`, and optionally `tid` (the company) and `permissions` (the rights of
+/// the account, `module.view` or `module.manage`). A system with no companies leaves `tid` out; one with no permissions
+/// leaves `permissions` out and addresses accounts.
+///
+/// The events are published by the API on the channel as JSON: `{"type": "contact.updated", "tenantId": "…",
+/// "permission": "contacts.view", "data": {"id": "…"}}`. An event is for the streams that have a permission (`permission`),
+/// for named accounts (`accountIds`), or for every stream of an account (`accountId`). `tenantId` narrows the first two to
+/// one company; without it they are for the streams that have no company, and a scope never leaks into the other. The
+/// service does not know what a type means.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RealtimeConfig {
+    /// The pub/sub channel the events are published on.
+    #[serde(default = "default_realtime_channel")]
+    pub channel: String,
+    /// The path the browsers open the stream on (`GET`).
+    #[serde(default = "default_realtime_path")]
+    pub path: String,
+    /// The cookie that holds the access token.
+    #[serde(default = "default_realtime_cookie")]
+    pub access_cookie: String,
+    /// The issuer (`iss`) the access tokens must have.
+    #[serde(default = "default_realtime_issuer")]
+    pub issuer: String,
+    /// The prefix of the keys where the API leaves the trace of each session: `<prefix>:<session id>` holds
+    /// `{"accountId", "tenantId", "exp"}` and expires with the access token it was written for. A stream lives while its
+    /// session does.
+    #[serde(default = "default_realtime_session_prefix")]
+    pub session_key_prefix: String,
+}
+
+fn default_realtime_channel() -> String {
+    "live-events".into()
+}
+fn default_realtime_path() -> String {
+    "/v1/events".into()
+}
+fn default_realtime_cookie() -> String {
+    "access_token".into()
+}
+fn default_realtime_issuer() -> String {
+    "api".into()
+}
+fn default_realtime_session_prefix() -> String {
+    "sess".into()
+}
+
+impl Default for RealtimeConfig {
+    fn default() -> Self {
+        Self {
+            channel: default_realtime_channel(),
+            path: default_realtime_path(),
+            access_cookie: default_realtime_cookie(),
+            issuer: default_realtime_issuer(),
+            session_key_prefix: default_realtime_session_prefix(),
+        }
     }
 }
 
@@ -959,7 +1030,18 @@ pub enum Step {
     /// First request of registering a passkey (WebAuthn) for `account`, who is already authenticated: a challenge for the
     /// browser. `bind` receives the API schema `PasskeyChallenge`: `state_id` (given back to `passkeyRegisterFinish`) and
     /// `options` (JSON for `navigator.credentials.create`). A device the account already has is excluded. The site
-    /// address, which is the relying party, is read from the environment variable `APP_URL`. Routes only.
+    /// address, which is the relying party, is read from the environment variable `APP_URL`, unless `app_url` names the
+    /// origin of the request (see below). Routes only.
+    ///
+    /// **Several frontends.** `app_url`, on this step and the three others, is an optional expression for the origin
+    /// the request comes from (`https://app.example.com`), evaluated per request, for example from a header or a field
+    /// that names the frontend. It is used only when it is `APP_URL` or listed in the environment variable
+    /// `WEBAUTHN_ALLOWED_ORIGINS` (origins separated by commas): any other value is a `400` (`401` on a login's end). The
+    /// origin a challenge was started for is kept with it and the end step checks the answer against that one; an
+    /// `app_url` there that names another origin is refused. To share passkeys between subdomains, set
+    /// `WEBAUTHN_RP_ID` to their parent domain (`example.com`): every origin must then be that domain or one of its
+    /// subdomains, and an answer from any of the listed origins is accepted. Without it, each origin is its own relying
+    /// party.
     #[serde(rename_all = "camelCase")]
     PasskeyRegisterStart {
         id: String,
@@ -967,6 +1049,9 @@ pub enum Step {
         account: Expr,
         /// What the device shows for the account: an e-mail address or a user name.
         name: Expr,
+        /// The origin of the request; absent: `APP_URL`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        app_url: Option<Expr>,
         bind: String,
     },
     /// Second request: checks the answer of the browser (`credential`, the JSON it produced, as a text) against the
@@ -978,6 +1063,9 @@ pub enum Step {
         state_id: Expr,
         credential: Expr,
         account: Expr,
+        /// The origin of the request; absent: the one the challenge was started for. When given, it must be that one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        app_url: Option<Expr>,
     },
     /// First request of logging in with a passkey, into a variable of the schema `PasskeyChallenge` (`options` is for
     /// `navigator.credentials.get`). With an `account`, the challenge is for the passkeys of that account; an account
@@ -990,6 +1078,9 @@ pub enum Step {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         account: Option<Expr>,
+        /// The origin of the request; absent: `APP_URL`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        app_url: Option<Expr>,
         bind: String,
     },
     /// Second request: checks the answer of the browser against the challenge `state_id` (once, within five minutes)
@@ -1001,6 +1092,9 @@ pub enum Step {
         id: String,
         state_id: Expr,
         credential: Expr,
+        /// The origin of the request; absent: the one the challenge was started for. When given, it must be that one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        app_url: Option<Expr>,
         bind: String,
     },
     /// Recognises an image from its first bytes (never from the `Content-Type` a client sends, which decides what is

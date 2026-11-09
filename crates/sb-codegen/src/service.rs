@@ -593,6 +593,7 @@ fn schema_rs(service: &Service) -> String {
     }
     if uses_passkeys(service) {
         c.line("eda_runtime::webauthn::CREATE_STATES_TABLE,");
+        c.line("eda_runtime::webauthn::ADD_STATES_ORIGIN,");
         c.line("eda_runtime::webauthn::CREATE_CREDENTIALS_TABLE,");
         c.line("eda_runtime::webauthn::CREATE_CREDENTIALS_INDEX,");
     }
@@ -1357,6 +1358,22 @@ fn bucket_envs(service: &Service) -> BTreeSet<&str> {
     envs
 }
 
+/// The `app_url` of a passkey step as the argument of the runtime, an `Option<&str>`: the origin of the request, or
+/// `None` for the address of the site (`APP_URL`).
+fn lower_app_url(
+    project: &Project,
+    scope: &Scope,
+    app_url: &Option<Expr>,
+) -> Result<String, CodegenError> {
+    Ok(match app_url {
+        Some(app_url) => format!(
+            "Some(({}).as_str())",
+            lower(project, scope, app_url, &TypeRef::scalar(FieldType::String))?
+        ),
+        None => "None".to_string(),
+    })
+}
+
 /// Whether a service has a passkey step: it then needs the address of the site and the `webauthn` feature of the runtime.
 fn uses_passkeys(service: &Service) -> bool {
     let mut used = false;
@@ -1915,14 +1932,16 @@ fn steps(
             Step::PasskeyRegisterStart {
                 account,
                 name,
+                app_url,
                 bind,
                 ..
             } => {
                 let text = TypeRef::scalar(FieldType::String);
                 let account = lower(project, scope, account, &text)?;
                 let name = lower(project, scope, name, &text)?;
+                let app_url = lower_app_url(project, scope, app_url)?;
                 c.line(format!(
-                    "let {bind}: pb::PasskeyChallenge = {{ let challenge = eda_runtime::webauthn::register_start(&mut tx, &{account}, &{name}).await?; pb::PasskeyChallenge {{ state_id: challenge.state_id, options: challenge.options, ..Default::default() }} }};"
+                    "let {bind}: pb::PasskeyChallenge = {{ let challenge = eda_runtime::webauthn::register_start(&mut tx, &{account}, &{name}, {app_url}).await?; pb::PasskeyChallenge {{ state_id: challenge.state_id, options: challenge.options, ..Default::default() }} }};"
                 ));
                 scope.bind(bind.clone(), TypeRef::message("PasskeyChallenge"));
             }
@@ -1930,25 +1949,33 @@ fn steps(
                 state_id,
                 credential,
                 account,
+                app_url,
                 ..
             } => {
                 let text = TypeRef::scalar(FieldType::String);
                 let state_id = lower(project, scope, state_id, &text)?;
                 let credential = lower(project, scope, credential, &text)?;
                 let account = lower(project, scope, account, &text)?;
+                let app_url = lower_app_url(project, scope, app_url)?;
                 c.line(format!(
-                    "eda_runtime::webauthn::register_finish(&mut tx, &{state_id}, &{credential}, &{account}).await?;"
+                    "eda_runtime::webauthn::register_finish(&mut tx, &{state_id}, &{credential}, &{account}, {app_url}).await?;"
                 ));
             }
-            Step::PasskeyLoginStart { account, bind, .. } => {
+            Step::PasskeyLoginStart {
+                account,
+                app_url,
+                bind,
+                ..
+            } => {
                 let text = TypeRef::scalar(FieldType::String);
+                let app_url = lower_app_url(project, scope, app_url)?;
                 // Without an account the challenge names nobody (a discoverable login).
                 let start = match account {
                     Some(account) => format!(
-                        "login_start(&mut tx, &{})",
+                        "login_start(&mut tx, &{}, {app_url})",
                         lower(project, scope, account, &text)?
                     ),
-                    None => "login_discoverable_start(&mut tx)".to_string(),
+                    None => format!("login_discoverable_start(&mut tx, {app_url})"),
                 };
                 c.line(format!(
                     "let {bind}: pb::PasskeyChallenge = {{ let challenge = eda_runtime::webauthn::{start}.await?; pb::PasskeyChallenge {{ state_id: challenge.state_id, options: challenge.options, ..Default::default() }} }};"
@@ -1958,14 +1985,16 @@ fn steps(
             Step::PasskeyLoginFinish {
                 state_id,
                 credential,
+                app_url,
                 bind,
                 ..
             } => {
                 let text = TypeRef::scalar(FieldType::String);
                 let state_id = lower(project, scope, state_id, &text)?;
                 let credential = lower(project, scope, credential, &text)?;
+                let app_url = lower_app_url(project, scope, app_url)?;
                 c.line(format!(
-                    "let {bind}: String = eda_runtime::webauthn::login_finish(&mut tx, &{state_id}, &{credential}).await?;"
+                    "let {bind}: String = eda_runtime::webauthn::login_finish(&mut tx, &{state_id}, &{credential}, {app_url}).await?;"
                 ));
                 scope.bind(bind.clone(), text);
             }
