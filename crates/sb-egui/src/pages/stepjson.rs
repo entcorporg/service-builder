@@ -14,7 +14,7 @@ use sb_model::{
 use serde_json::Value;
 
 use super::assignments::expr_editor;
-use super::common::{choice, commit_entry, icon_btn, link};
+use super::common::{commit_entry, icon_btn, link};
 use crate::app::App;
 use crate::theme::*;
 use crate::widgets;
@@ -171,7 +171,7 @@ fn schema_pick(
     } else {
         text.to_string()
     };
-    choice(ui, id.with("schema"), &options, &current)
+    super::assignments::pick(ui, id.with("schema"), &current, &options, f32::MAX)
         .map(|v| if v == none { String::new() } else { v })
 }
 
@@ -202,8 +202,7 @@ fn pairs(
     let mut changed = false;
     let mut remove = None;
     ui.spacing_mut().item_spacing.y = 6.0;
-    for i in 0..list.len() {
-        let a = list[i].clone();
+    for (i, a) in list.clone().into_iter().enumerate() {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             if let Some(v) = widgets::text_field_hint(ui, (id, "name", i), &a.field, 110.0, "nom")
@@ -317,23 +316,13 @@ fn conditions(
         .unwrap_or_default();
     let names = op_names();
     ui.spacing_mut().item_spacing.y = 6.0;
-    for i in 0..list.len() {
-        let c = list[i].clone();
+    for (i, c) in list.clone().into_iter().enumerate() {
         let column = table.and_then(|t| t.columns.iter().find(|x| x.name == c.column));
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            if let Some(v) = widgets::choice(ui, (id, "column", i), &c.column, &columns, 120.0) {
-                list[i].column = v;
-                changed = true;
-            }
-            if let Some(v) = widgets::choice(ui, (id, "op", i), op_name(c.op), &names, 52.0)
-                && let Some((_, o)) = OPS.iter().find(|(n, _)| *n == v)
-            {
-                list[i].op = *o;
-                changed = true;
-            }
-            let target = column.map(|x| Field::new(&x.name, x.ty.field_type()));
-            let edited = fill(ui, 32.0, |ui| {
+        // In a narrow column the value goes under the column and the operator.
+        let narrow = ui.available_width() < 440.0;
+        let target = column.map(|x| Field::new(&x.name, x.ty.field_type()));
+        let mut value = |ui: &mut Ui, reserve: f32| -> Option<Expr> {
+            let edited = fill(ui, reserve, |ui| {
                 expr_editor(
                     app,
                     ui,
@@ -344,14 +333,38 @@ fn conditions(
                     vars,
                 )
             });
-            if let Some(Some(e)) = edited {
-                list[i].value = e;
+            edited.flatten()
+        };
+        let mut new_value = None;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if let Some(v) =
+                super::assignments::pick(ui, (id, "column", i), &c.column, &columns, 120.0)
+            {
+                list[i].column = v;
                 changed = true;
+            }
+            if let Some(v) =
+                super::assignments::pick(ui, (id, "op", i), op_name(c.op), &names, 52.0)
+                && let Some((_, o)) = OPS.iter().find(|(n, _)| *n == v)
+            {
+                list[i].op = *o;
+                changed = true;
+            }
+            if !narrow {
+                new_value = value(ui, 32.0);
             }
             if icon_btn(ui, "trash", "Retirer la condition", true).clicked() {
                 remove = Some(i);
             }
         });
+        if narrow {
+            new_value = value(ui, 0.0);
+        }
+        if let Some(e) = new_value {
+            list[i].value = e;
+            changed = true;
+        }
     }
     if let Some(i) = remove {
         list.remove(i);
@@ -401,7 +414,7 @@ fn missing(ui: &mut Ui, id: egui::Id, text: &str) -> Option<String> {
             .map_or(m.status.to_string(), |(c, w)| format!("{c} · {w}"));
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            if let Some(v) = widgets::choice(ui, id.with("status"), &now, &words, 170.0) {
+            if let Some(v) = super::assignments::pick(ui, id.with("status"), &now, &words, 170.0) {
                 let status = v
                     .split(' ')
                     .next()
@@ -438,8 +451,7 @@ fn cookies(app: &mut App, ui: &mut Ui, id: egui::Id, text: &str, vars: &[Var]) -
     let mut remove = None;
     let sites = ["lax".to_string(), "strict".to_string(), "none".to_string()];
     ui.spacing_mut().item_spacing.y = 6.0;
-    for i in 0..list.len() {
-        let c = list[i].clone();
+    for (i, c) in list.clone().into_iter().enumerate() {
         Frame::new()
             .fill(PANEL2)
             .stroke(Stroke::new(1.0, BORDER))
@@ -502,7 +514,7 @@ fn cookies(app: &mut App, ui: &mut Ui, id: egui::Id, text: &str, vars: &[Var]) -
                         small(ui, "secondes");
                     }
                 });
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 10.0;
                     if let Some(on) = widgets::check(ui, c.http_only, "HttpOnly") {
                         list[i].http_only = on;
@@ -518,7 +530,9 @@ fn cookies(app: &mut App, ui: &mut Ui, id: egui::Id, text: &str, vars: &[Var]) -
                         SameSite::Strict => "strict",
                         SameSite::None => "none",
                     };
-                    if let Some(v) = widgets::choice(ui, (id, "site", i), shown, &sites, 90.0) {
+                    if let Some(v) =
+                        super::assignments::pick(ui, (id, "site", i), shown, &sites, 90.0)
+                    {
                         list[i].same_site = match v.as_str() {
                             "strict" => SameSite::Strict,
                             "none" => SameSite::None,
@@ -560,7 +574,7 @@ fn jwks_source(ui: &mut Ui, id: egui::Id, text: &str) -> Option<String> {
         JwksSource::Url { .. } => &kinds[1],
     };
     let mut out = None;
-    if let Some(v) = choice(ui, id.with("kind"), &kinds, shown) {
+    if let Some(v) = super::assignments::pick(ui, id.with("kind"), shown, &kinds, f32::MAX) {
         out = Some(push(&if v == kinds[1] {
             JwksSource::Url {
                 url_env: "AUTH_JWKS_URL".into(),
@@ -585,8 +599,7 @@ fn jwks_source(ui: &mut Ui, id: egui::Id, text: &str) -> Option<String> {
             let mut changed = false;
             let mut remove = None;
             ui.spacing_mut().item_spacing.y = 6.0;
-            for i in 0..list.len() {
-                let value = list[i].clone();
+            for (i, value) in list.clone().into_iter().enumerate() {
                 ui.horizontal(|ui| {
                     let reserve = if list.len() > 1 { 32.0 } else { 0.0 };
                     fill(ui, reserve, |ui| {

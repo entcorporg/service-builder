@@ -10,10 +10,10 @@ use sb_app::stepform::{self, Kind};
 use sb_model::{Assignment, CmpOp, Condition, Expr, Field, FieldType, Project, Step};
 
 use super::assignments::{assignments, expr_editor};
-use super::common::{choice, commit_entry, icon_btn};
+use super::common::{commit_entry, icon_btn};
 use super::steps::{Flow, Loc, list_mut, new_id, step_move, vars_at};
-use crate::fonts::Weight;
 use crate::app::App;
+use crate::fonts::Weight;
 use crate::icons;
 use crate::theme::*;
 use crate::widgets;
@@ -241,7 +241,7 @@ fn condition_widget(
             } else {
                 "comparaison"
             };
-            if let Some(m) = choice(ui, id.with("mode"), &kinds, now)
+            if let Some(m) = super::assignments::pick(ui, id.with("mode"), now, &kinds, f32::MAX)
                 && m != now
             {
                 next = Some(if m == "Rust" {
@@ -266,7 +266,7 @@ fn condition_widget(
                 }
                 let names: Vec<String> = OPS.iter().map(|(n, _)| (*n).to_string()).collect();
                 let shown = OPS.iter().find(|(_, o)| o == op).map_or("=", |(n, _)| *n);
-                if let Some(v) = widgets::choice(ui, id.with("op"), shown, &names, 60.0)
+                if let Some(v) = super::assignments::pick(ui, id.with("op"), shown, &names, 60.0)
                     && let Some((_, o)) = OPS.iter().find(|(n, _)| *n == v)
                 {
                     next = Some(Condition::Compare {
@@ -412,12 +412,12 @@ fn form(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, index: usize) {
                     .iter()
                     .find(|(c, _)| c.to_string() == *text)
                     .map_or(text.clone(), |(c, w)| format!("{c} · {w}"));
-                if let Some(v) = choice(ui, fid, &words, &now) {
+                if let Some(v) = super::assignments::pick(ui, fid, &now, &words, f32::MAX) {
                     pending = Some((i, v.split(' ').next().unwrap_or("400").to_string()));
                 }
             }
             Kind::Choice(words) => {
-                if let Some(v) = choice(ui, fid, words, text) {
+                if let Some(v) = super::assignments::pick(ui, fid, text, words, f32::MAX) {
                     pending = Some((i, v));
                 }
             }
@@ -425,7 +425,7 @@ fn form(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, index: usize) {
                 let mut options: Vec<String> =
                     stepform::SCALARS.iter().map(|s| (*s).to_string()).collect();
                 options.extend(p.messages.iter().map(|m| m.name.clone()));
-                if let Some(v) = choice(ui, fid, &options, text) {
+                if let Some(v) = super::assignments::pick(ui, fid, text, &options, f32::MAX) {
                     pending = Some((i, v));
                 }
             }
@@ -965,7 +965,6 @@ fn step_card(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, i: usize, len: 
 
 /// A list of steps: the cards, then a dashed button to add one.
 pub fn steps_box(app: &mut App, ui: &mut Ui, list: &[Step], loc: &Loc) {
-    if std::env::var_os("SB_DBG_NOSTEPS").is_some() { return; }
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = 8.0;
         if list.is_empty() && !loc.nest.is_empty() {
