@@ -117,16 +117,20 @@ pub fn page(app: &mut App, ui: &mut Ui) {
                 .inner_margin(egui::Margin::symmetric(16, 6)),
         )
         .show(ui, |ui| {
-            // The panel keeps its 410 px whatever the steps inside ask for (GTK's `External` policy).
-            let width = ui.available_width();
-            ui.set_max_width(width);
+            // The panel keeps its 410 px whatever the steps inside ask for (GTK's `External` policy): the
+            // inspector is drawn in a child of a fixed rectangle, whose size does not reach the panel.
+            let rect = ui.available_rect_before_wrap();
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+            child.set_clip_rect(rect.expand2(egui::vec2(16.0, 0.0)).intersect(ui.clip_rect()));
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .max_width(width)
-                .show(ui, |ui| {
-                    ui.set_max_width(width);
+                .max_width(rect.width())
+                .show(&mut child, |ui| {
+                    // Room for the scroll bar on the right.
+                    ui.set_max_width(rect.width() - 12.0);
                     super::inspector::show(app, ui)
                 });
+            ui.allocate_rect(rect, egui::Sense::hover());
         });
     egui::CentralPanel::no_frame().show(ui, |ui| stage(app, ui));
 }
