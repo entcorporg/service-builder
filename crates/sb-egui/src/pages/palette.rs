@@ -111,7 +111,7 @@ fn line(ui: &Ui, text: &str, font: egui::FontId, color: Color32, max: f32) -> Ar
 }
 
 fn wrapped(ui: &Ui, text: &str, font: egui::FontId, color: Color32, width: f32) -> Arc<Galley> {
-    let mut job = LayoutJob::simple(text.to_string(), font, color, width.max(1.0));
+    let job = LayoutJob::simple(text.to_string(), font, color, width.max(1.0));
     ui.painter().layout_job(job)
 }
 
