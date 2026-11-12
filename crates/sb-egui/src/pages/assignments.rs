@@ -12,7 +12,6 @@ use super::common::{commit_entry, link};
 use crate::app::App;
 use crate::icons::icon;
 use crate::theme::*;
-use crate::widgets;
 
 /// A change to a list of assignments, returned by [`assignments`]; apply it inside `app.edit`.
 pub type Change = Box<dyn FnOnce(&mut Vec<Assignment>)>;
@@ -85,6 +84,30 @@ fn mode_of(e: &Option<Expr>) -> &'static str {
     }
 }
 
+/// A drop-down of `options` (`width` at most, never more than the room left): the text is truncated, so that a long
+/// value never widens the column it is in. Returns the option picked when it differs from `current`.
+pub fn pick(
+    ui: &mut Ui,
+    id: impl egui::AsIdSalt,
+    current: &str,
+    options: &[String],
+    width: f32,
+) -> Option<String> {
+    let mut picked = None;
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(if current.is_empty() { "—" } else { current })
+        .width(width.min(ui.available_width()).max(30.0))
+        .truncate()
+        .show_ui(ui, |ui| {
+            for o in options {
+                if ui.selectable_label(o == current, o).clicked() && o != current {
+                    picked = Some(o.clone());
+                }
+            }
+        });
+    picked
+}
+
 /// One value: a source (—, Champ, Valeur, Rust) and what goes with it. Returns `Some(new value)` when the user
 /// changed it (`Some(None)`: unset, when `allow_unset`).
 pub fn expr_editor(
@@ -125,7 +148,7 @@ pub fn expr_editor(
     let mut out: Option<Option<Expr>> = None;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        if let Some(m) = widgets::choice(ui, id.with("mode"), mode_of(&current), &modes, 78.0) {
+        if let Some(m) = pick(ui, id.with("mode"), mode_of(&current), &modes, 78.0) {
             out = Some(match m.as_str() {
                 "Champ" => Some(Expr::Path {
                     path: first_path.clone(),
@@ -162,8 +185,8 @@ pub fn expr_editor(
                     },
                     |v| format!("{} · {}", v.path, v.ty),
                 );
-                let width = (ui.available_width() - 28.0).max(80.0);
-                if let Some(v) = widgets::choice(ui, id.with("path"), &shown, &names, width)
+                let width = ui.available_width();
+                if let Some(v) = pick(ui, id.with("path"), &shown, &names, width)
                     && let Some(v) = options
                         .iter()
                         .find(|o| v.starts_with(&format!("{} · ", o.path)))
@@ -211,8 +234,8 @@ fn literal(ui: &mut Ui, id: egui::Id, kind: Literal, value: &Value) -> Option<Va
             } else {
                 "faux"
             };
-            let width = (ui.available_width() - 28.0).max(80.0);
-            widgets::choice(
+            let width = ui.available_width();
+            pick(
                 ui,
                 id,
                 now,
