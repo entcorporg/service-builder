@@ -75,11 +75,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           clean: ${{ runner.environment == 'github-hosted' }}
-      - name: GTK 4 system dependencies
-        if: runner.environment == 'github-hosted'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-4-dev pkg-config build-essential
       - uses: dtolnay/rust-toolchain@stable
         if: runner.environment == 'github-hosted'
         with:
@@ -188,11 +183,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.bump.outputs.tag }}
-      - name: GTK 4 system dependencies
+      - name: AppImage tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-4-dev pkg-config build-essential \
-            libfuse2t64 file desktop-file-utils librsvg2-dev
+          sudo apt-get install -y --no-install-recommends libfuse2t64 file desktop-file-utils
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p service-builder
@@ -200,7 +194,7 @@ jobs:
         run: scripts/appimage.sh "${{ needs.bump.outputs.tag }}"
       - name: Sign
         # The key is the one of the earlier releases (a base64 minisign secret key file): the public key in
-        # crates/sb-gtk/src/updater.rs is unchanged, so installed builds keep updating.
+        # crates/sb-egui/src/updater.rs is unchanged, so installed builds keep updating.
         env:
           KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}

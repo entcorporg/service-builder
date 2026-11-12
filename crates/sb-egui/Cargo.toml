@@ -1,11 +1,15 @@
 [package]
-name = "sb-egui"
-description = "Visual builder for event-driven Rust backends (gRPC + Kafka): the egui desktop app"
+name = "service-builder"
+description = "Visual builder for event-driven Rust backends (gRPC + Kafka)"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "sb_egui"
+path = "src/lib.rs"
+
 [[bin]]
-name = "service-builder-egui"
+name = "service-builder"
 path = "src/main.rs"
 
 [dependencies]

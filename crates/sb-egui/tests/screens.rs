@@ -1,7 +1,7 @@
 //! Development aid: renders the window headless (wgpu, software Vulkan is fine) and writes one PNG per page.
 //!
 //! ```sh
-//! SB_SHOTS=/tmp/shots cargo test -p sb-egui --test screens -- --ignored --nocapture
+//! SB_SHOTS=/tmp/shots cargo test -p service-builder --test screens -- --ignored --nocapture
 //! ```
 //!
 //! * `SB_SHOTS`: the folder of the PNGs (default `target/shots`).

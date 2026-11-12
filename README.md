@@ -5,7 +5,7 @@ vous dessinez des services, des topics Kafka, des schémas protobuf et la logiqu
 handler avec des blocs ; l'application génère un workspace Cargo complet
 (**gRPC** avec tonic pour les RPC, **Kafka** avec rdkafka pour les événements).
 
-Application de bureau Linux : **GTK 4** (gtk4-rs). 
+Application de bureau Linux : **egui** (eframe, rendu GPU par wgpu).
 
 ![Architecture et inspecteur](docs/screenshots/architecture.png)
 
@@ -34,12 +34,13 @@ Ce qui est vérifié en continu pendant que vous éditez (et qui bloque l'export
 
 ## Démarrer
 
-Prérequis : Rust stable. Sous Ubuntu/Debian, GTK 4 : `sudo apt install libgtk-4-dev pkg-config build-essential`.
+Prérequis : Rust stable (aucune bibliothèque système à installer pour compiler ; à l'exécution, un pilote Vulkan, Metal
+ou OpenGL, et la police Inter si possible, sinon la police système la plus proche).
 Node 22 n'est utile que pour les scripts de release (`scripts/`).
 
 ```sh
 cargo run -p service-builder     # lance l'application
-SB_SCREENSHOT=/tmp/captures cargo run -p service-builder   # écrit une capture PNG par onglet, puis quitte
+SB_SHOTS=/tmp/captures cargo test -p service-builder --test screens -- --ignored   # une capture PNG par page, sans écran
 ```
 
 Un projet d'exemple (Orders → Payments → Notifications) est chargé au démarrage.
@@ -89,7 +90,7 @@ lancement et signalée quand on clique. Sous Linux, seul l'AppImage se met à jo
 
 Réglage unique, à faire une fois : ajouter la clé privée de signature aux secrets du dépôt
 (`gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/service-builder.key`, nom conservé pour garder la même clé). La clé publique correspondante est dans
-`crates/sb-gtk/src/updater.rs` ; sans la clé privée, les mises à jour ne peuvent pas être signées. Si `main` est protégée,
+`crates/sb-egui/src/updater.rs` ; sans la clé privée, les mises à jour ne peuvent pas être signées. Si `main` est protégée,
 autorisez `github-actions[bot]` à y pousser le commit de version.
 
 ### Où tourne la CI
@@ -103,7 +104,7 @@ testé qu'une fois (pas de double exécution push + PR), et seul `main` est test
 Installer le runner sur une machine : télécharger le runner officiel, puis
 `./config.sh --url https://github.com/<org>/service-builder --token <jeton> --labels service-builder` et `./run.sh`
 (le jeton vient de `gh api -X POST repos/<org>/service-builder/actions/runners/registration-token`). La machine
-doit avoir Rust stable (rustfmt, clippy), Node 22, cmake et GTK 4 (`libgtk-4-dev`) ; son
+doit avoir Rust stable (rustfmt, clippy), Node 22, et cmake ; son
 fichier `.env` doit contenir le `PATH` qui les trouve. Pour qu'il survive à la session, un service `systemd --user`
 suffit (`ExecStart=<dossier du runner>/run.sh`, `systemctl --user enable --now …`). Hors ligne, les jobs attendent :
 désenregistrer le runner et remettre `ubuntu-24.04` dans `runs-on` suffit pour revenir aux runners GitHub.
@@ -171,7 +172,7 @@ La CI le fait.
   (`input.ancien_nom`) : la validation les signale.
 - Les événements sont du protobuf brut, sans schema registry.
 - L'interface est en français uniquement.
-- L'interface GTK 4 édite tout le projet : architecture (canvas, flèches à tracer depuis la poignée de sortie d'un
+- L'interface (egui) édite tout le projet : architecture (canvas, flèches à tracer depuis la poignée de sortie d'un
   nœud), services (standard, mail, temps réel), messages et leurs champs (règles et sources des schémas d'API), topics,
   flows (RPC, routes, consommateurs, jobs, avec étapes et branches) et tables SQL (colonnes, uniques, index, clés
   étrangères). Annuler/rétablir (Ctrl+Z / Ctrl+Maj+Z), enregistrer (Ctrl+S), ouvrir (Ctrl+O). Les formulaires

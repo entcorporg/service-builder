@@ -4,8 +4,8 @@
 
 ```mermaid
 flowchart LR
-  subgraph app["Application de bureau (GTK 4)"]
-    UI["crates/sb-gtk — fenêtre GTK 4"]
+  subgraph app["Application de bureau (egui)"]
+    UI["crates/sb-egui — fenêtre egui"]
   end
   UI --> APP["sb-app<br/>analyze · open · save · export"]
   CLI["sb (CLI)"] --> APP
@@ -20,7 +20,7 @@ flowchart LR
 | `crates/sb-model` | Le document : `Project`, `Service`, `Topic`, `Message`, `Step`… (JSON camelCase), règles de nommage, typage léger des mappings, validation avec diagnostics. Aucune dépendance à l'interface ni au générateur. |
 | `crates/sb-codegen` | Du modèle vers un workspace Cargo : `.proto`, crate `contracts`, crate `runtime` embarquée, un crate par service, `docker-compose.yml`. Pur et déterministe. |
 | `crates/sb-app` | Services applicatifs partagés par l'app et le CLI `sb` : `analyze` (validation + génération + rustfmt), ouvrir/sauver, exporter, serveur MCP, et la logique d'édition sans fenêtre : formulaires d'étapes (`stepform`), renommages en cascade (`rename`), portée des variables (`scope`). |
-| `crates/sb-gtk` | L'application GTK 4 (gtk4-rs) au-dessus de `sb-app` : fenêtre (`uis/`), thème (`data/css/*.css`), mise à jour (`updater.rs`). |
+| `crates/sb-egui` | L'application (paquet `service-builder`, egui/eframe sur wgpu) au-dessus de `sb-app` : coque (`app.rs`, `header.rs`), pages (`pages/`), thème (`theme.rs`, `fonts.rs`, `icons.rs`), mise à jour (`updater.rs`). |
 
 ## Le modèle de projet
 
@@ -734,14 +734,16 @@ sur mesure vit dans les étapes *Code Rust* du projet.
 
 ## L'application
 
-La fenêtre est en GTK 4 (`crates/sb-gtk`, dossier `uis/`). Tout ce qui est « intelligent » reste dans `sb-app` et se
-teste sans fenêtre.
+La fenêtre est en egui (`crates/sb-egui`, dossier `pages/`), en mode immédiat : chaque image, chaque page est
+redessinée à partir de l'état (`fn page(app, ui)`), sans widgets à garder ni signaux à brancher. Tout ce qui est
+« intelligent » reste dans `sb-app` et se teste sans fenêtre.
 
 - **Canvas** (`canvas.rs`, graphe pur dans `graph.rs`) : le graphe est *calculé* à partir du projet (producteurs et
   étapes `Publish` pour les flèches orange, consommateurs pour les vertes, étapes `CallRpc` pour les appels). Les
   positions sont stockées dans le projet et écrites au lâcher du nœud (une modification dans l'historique). Une
   flèche tracée depuis la poignée de sortie d'un nœud édite le projet (`graph::connect`) : producteur, consommateur ou mail.
-- **État et historique** (`edit.rs`) : toute modification passe par `edit(ui, |p| …)`, qui garde l'historique
+- **État et historique** (`app.rs`) : les pages lisent un instantané `app.project()` (un `Rc<Project>`, valable pendant
+  qu'on modifie), et toute modification passe par `app.edit(|p| …)`, qui garde l'historique
   (annuler/rétablir, 100 niveaux), fige les numéros de champs et marque le projet comme modifié. Fermer ou ouvrir avec des
   modifications demande quoi en faire. Le fichier est rechargé quand un autre programme (un client MCP) le modifie,
   sauf si des modifications locales sont en cours.
@@ -751,11 +753,15 @@ teste sans fenêtre.
 - **Renommages** (`sb_app::rename`) : message, topic, service, RPC et table se renomment avec toutes leurs références
   (les étapes sont parcourues en JSON, en ne touchant que les champs qui portent vraiment ce genre de nom). Un test
   vérifie, sur les deux exemples, qu'un renommage ne crée aucune erreur de validation.
-- **Boucle d'analyse** : après chaque modification, `analyze(project)` tourne hors du fil graphique
-  (`gio::spawn_blocking`). Les réponses arrivées dans le désordre sont ignorées (compteur de génération).
-- **Thème** : `data/css/*.css`, chargé au démarrage, reprend les couleurs de l'ancienne interface web (fond bleu nuit,
-  accent orange). `SB_SCREENSHOT=<dossier>` écrit une capture PNG par onglet (peinte par GTK, sans outil externe) :
-  c'est ainsi que le rendu se vérifie.
+- **Saisie** : un champ texte n'édite le projet qu'à la validation (Entrée ou perte du focus ; Échap annule) : une
+  entrée d'historique par changement, pas une analyse par touche (`widgets::text_field`, `pages/common.rs`).
+- **Boucle d'analyse** : après chaque modification, `analyze(project)` tourne sur un fil à part, dont le résultat revient
+  par un canal lu à chaque image. Les réponses arrivées dans le désordre sont ignorées (compteur de génération).
+- **Thème** : `theme.rs` reprend les couleurs de l'ancienne interface web (fond bleu nuit, accent orange) ; `fonts.rs`
+  charge Inter (quatre graisses, chacune une famille egui) depuis le système ; `icons.rs` dessine les icônes SVG de la
+  version web. `cargo test -p service-builder --test screens -- --ignored` peint la fenêtre sans écran (wgpu, Vulkan
+  logiciel suffit) et écrit une capture PNG par page : c'est ainsi que le rendu se vérifie. Le test `smoke` dessine
+  toutes les pages des deux exemples avec chaque sélection.
 
 ### Serveur MCP
 
@@ -791,16 +797,16 @@ jamais l'appel : on ne le réécrit pas). `submit_report` valide (1 à 5 suggest
 attente au plus) et range le rapport. Pas de jeton GitHub ni d'envoi automatique, pour deux raisons : un rapport écrit
 par un agent peut contenir, malgré la consigne, un détail du projet, et une issue est publique. L'app construit donc
 une URL « new issue » pré-remplie (corps tronqué pour tenir dans la limite d'URL de GitHub) et l'ouvre dans le
-navigateur par `gtk::UriLauncher`, limité aux pages du dépôt.
+navigateur (`egui::OpenUrl`), limité aux pages du dépôt.
 
 ### Mise à jour automatique
 
-`crates/sb-gtk/src/updater.rs` interroge `releases/latest` de l'API GitHub et compare le tag à la version du binaire.
+`crates/sb-egui/src/updater.rs` interroge `releases/latest` de l'API GitHub et compare le tag à la version du binaire.
 Une release n'est installable que si elle porte un `.AppImage` **et** son `.AppImage.minisig` ; le téléchargement est
 vérifié avec la clé publique minisign du fichier (`PUBLIC_KEY`, la même que celle des builds précédents) avant de
 remplacer `$APPIMAGE` (écriture à côté puis `rename`, donc atomique) et de relancer. Hors AppImage (`.deb`,
 `cargo run`), l'application propose seulement d'ouvrir la page de la release. La recherche tourne hors du fil
-graphique (`gio::spawn_blocking`), la progression passe par un `AtomicI32` lu par un timer.
+graphique (`App::spawn`), la progression revient par le même canal que l'analyse.
 
 La version est écrite dans `Cargo.toml` et suivie par `Cargo.lock` : `scripts/release.mjs` les change ensemble. Le job `bump` de la CI
 s'exécute sur le sommet de `main` et non sur le commit testé (une release précédente a pu le déplacer) ; le job
