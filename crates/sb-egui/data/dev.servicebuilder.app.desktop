@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Service Builder
+Comment=Visual builder for event-driven Rust backends
+Exec=service-builder
+Icon=service-builder
+Categories=Development;
+Terminal=false
