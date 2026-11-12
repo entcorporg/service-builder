@@ -11,6 +11,7 @@ use sb_model::{HttpMethod, MessageKind, Position, Project, Service, ServiceKind,
 use super::canvas::{Sel, select};
 use super::common::{add_message, unique};
 use crate::app::{App, Page};
+use crate::fonts::Weight;
 use crate::icons;
 use crate::theme::{self, *};
 
@@ -110,26 +111,46 @@ fn line(ui: &Ui, text: &str, font: egui::FontId, color: Color32, max: f32) -> Ar
     ui.painter().layout_job(job)
 }
 
+/// Wrapped text with the line height of the GTK labels (1.29 times the font's own line height).
 fn wrapped(ui: &Ui, text: &str, font: egui::FontId, color: Color32, width: f32) -> Arc<Galley> {
-    let job = LayoutJob::simple(text.to_string(), font, color, width.max(1.0));
+    let mut job = LayoutJob::simple(text.to_string(), font.clone(), color, width.max(1.0));
+    let line = lh(font.size);
+    for section in &mut job.sections {
+        section.format.line_height = Some(line);
+    }
     ui.painter().layout_job(job)
 }
 
 /// A title of the panel (`.palette-title`).
 fn heading(ui: &mut Ui, text: &str) {
-    ui.horizontal(|ui| {
-        ui.add_space(4.0);
-        ui.label(RichText::new(text.to_uppercase()).size(11.0).color(FAINT));
+    ui.add_space(7.0);
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size.y = 0.0;
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(text.to_uppercase())
+                    .size(11.0)
+                    .bold()
+                    .extra_letter_spacing(0.9)
+                    .color(FAINT),
+            );
+        });
     });
+    ui.add_space(4.0);
 }
 
 /// A title of the tree (`.tree-title`): written as it is.
 fn subheading(ui: &mut Ui, text: &str) {
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        ui.add_space(4.0);
-        ui.label(RichText::new(text).size(11.0).color(MUTED));
+    ui.add_space(14.0);
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size.y = 0.0;
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            ui.label(RichText::new(text).size(11.0).semibold().color(MUTED));
+        });
     });
+    ui.add_space(9.0);
 }
 
 fn empty(ui: &mut Ui, text: &str) {
@@ -144,8 +165,8 @@ fn tile(ui: &mut Ui, topic: bool, icon_name: &str, title: &str, hint: &str) -> b
     let accent = if topic { TOPIC } else { SERVICE };
     let width = ui.available_width();
     // 1 px border, 8 px of padding; grip, badge, then the text, then the plus.
-    let text_w = width - 2.0 - 16.0 - (14.0 + 8.0 + 34.0 + 8.0) - (8.0 + 16.0);
-    let t = wrapped(ui, title, theme::prop(BASE), TEXT, text_w);
+    let text_w = width - 2.0 - 16.0 - (14.0 + 8.0 + 34.0 + 8.0) - 21.0;
+    let t = wrapped(ui, title, theme::bold(BASE), TEXT, text_w);
     let h = wrapped(ui, hint, theme::prop(11.0), MUTED, text_w);
     let text_h = t.size().y + h.size().y;
     let height = (text_h.max(34.0) + 18.0 + 2.0).ceil();
@@ -229,6 +250,7 @@ pub fn tiles(app: &mut App, ui: &mut Ui) {
         add_topic(app);
     }
     heading(ui, "Structure");
+    ui.add_space(4.0);
 }
 
 /// A row of the tree; `paint` draws the content from the left-centre point, within `max` wide.
@@ -239,7 +261,7 @@ fn tree_row(
     paint: impl FnOnce(&Ui, Pos2, f32),
 ) -> egui::Response {
     let width = ui.available_width();
-    let height = if sub { 26.0 } else { 28.0 };
+    let height = 32.0;
     let (rect, r) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
     let r = r.on_hover_cursor(egui::CursorIcon::PointingHand);
     if active {
@@ -288,17 +310,22 @@ fn route_row(ui: &mut Ui, method: HttpMethod, path: &str, active: bool) -> egui:
             HttpMethod::Put | HttpMethod::Patch => SERVICE,
             HttpMethod::Post => TOPIC,
         };
-        let pill = line(ui, method.as_str(), theme::mono(9.0), color, 200.0);
-        let pw = pill.size().x + 10.0;
-        let pr = Rect::from_center_size(Pos2::new(at.x + pw / 2.0, at.y), Vec2::new(pw, 15.0));
+        let mut job =
+            LayoutJob::simple_singleline(method.as_str().to_string(), theme::bold(9.0), color);
+        for section in &mut job.sections {
+            section.format.extra_letter_spacing = 0.6;
+        }
+        let pill = ui.painter().layout_job(job);
+        let pw = pill.size().x + 12.0;
+        let pr = Rect::from_center_size(Pos2::new(at.x + pw / 2.0, at.y), Vec2::new(pw, 20.0));
         ui.painter()
             .rect_filled(pr, CornerRadius::same(4), alpha(color, 41));
         ui.painter().galley(
-            Pos2::new(pr.left() + 5.0, at.y - pill.size().y / 2.0),
+            Pos2::new(pr.left() + 6.0, at.y - pill.size().y / 2.0),
             pill,
             color,
         );
-        let g = line(ui, path, theme::mono(11.0), TEXT, max - pw - 6.0);
+        let g = line(ui, path, theme::mono(12.0), TEXT, max - pw - 6.0);
         let pos = Pos2::new(at.x + pw + 6.0, at.y - g.size().y / 2.0);
         ui.painter().galley(pos, g, TEXT);
     })
@@ -310,7 +337,7 @@ pub fn tree(app: &mut App, ui: &mut Ui) {
     let api_only = app.page == Page::Endpoint;
     let selected = app.canvas.selected.clone();
     let p = app.project();
-    ui.spacing_mut().item_spacing.y = 2.0;
+    ui.spacing_mut().item_spacing.y = 1.0;
 
     subheading(ui, "Services");
     if p.services.is_empty() {
@@ -366,7 +393,7 @@ pub fn tree(app: &mut App, ui: &mut Ui) {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.add_space(4.0);
-            ui.label(RichText::new(title).size(11.0).color(MUTED));
+            ui.label(RichText::new(title).size(11.0).semibold().color(MUTED));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let (rect, r) = ui.allocate_exact_size(Vec2::splat(19.0), Sense::click());
                 if r.hovered() {

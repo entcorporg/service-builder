@@ -11,8 +11,8 @@ use eframe::egui::{
 };
 use sb_app::Analysis;
 
-use crate::fonts::Weight;
 use crate::app::App;
+use crate::fonts::Weight;
 use crate::theme::{self, BORDER, CODE_BG, FAINT, MUTED, PANEL, RAISED, SERVICE, TEXT, TOPIC};
 use crate::{icons, widgets};
 
@@ -75,7 +75,7 @@ fn row(
     text_color: Color32,
     active: bool,
 ) -> bool {
-    let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::click());
+    let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 25.0), Sense::click());
     let painter = ui.painter();
     if active {
         painter.rect_filled(rect, CornerRadius::same(6), theme::alpha(SERVICE, 46));
@@ -226,9 +226,10 @@ pub fn page(app: &mut App, ui: &mut Ui) {
                 ui.add_space(2.0);
                 ui.label(
                     RichText::new("FICHIERS")
-                        .size(theme::XS)
+                        .size(11.0)
                         .color(FAINT)
-                        .semibold(),
+                        .bold()
+                        .extra_letter_spacing(0.9),
                 );
             });
             ui.add_space(6.0);

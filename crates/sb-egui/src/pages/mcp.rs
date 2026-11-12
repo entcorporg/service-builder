@@ -8,8 +8,8 @@ use eframe::egui::{self, Color32, CornerRadius, Frame, Margin, RichText, Stroke,
 use sb_app::feedback::{Feedback, ReportStatus};
 use sb_app::mcp::{Activation, EntryState};
 
-use crate::fonts::Weight;
 use crate::app::App;
+use crate::fonts::Weight;
 use crate::theme::{self, BORDER, MUTED, OK, PANEL, PANEL2, RAISED, WARN};
 use crate::updater;
 use crate::widgets;
@@ -69,7 +69,8 @@ fn small_title(ui: &mut Ui, text: &str) {
         RichText::new(text.to_uppercase())
             .size(theme::SM)
             .color(MUTED)
-            .semibold(),
+            .bold()
+            .extra_letter_spacing(0.8),
     );
     ui.add_space(2.0);
 }
@@ -95,12 +96,12 @@ fn copy_block(ui: &mut Ui, title: &str, text: &str, copied: &mut bool) {
             .inner_margin(Margin {
                 left: 12,
                 right: 6,
-                top: 4,
-                bottom: 4,
+                top: 6,
+                bottom: 6,
             })
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(title).semibold());
+                    ui.label(RichText::new(title).bold());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if widgets::ghost(ui, "copy", "Copier", "").clicked() {
                             ui.ctx().copy_text(text.to_string());
@@ -117,9 +118,13 @@ fn copy_block(ui: &mut Ui, title: &str, text: &str, copied: &mut bool) {
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.add(
-                    egui::Label::new(RichText::new(text).font(theme::mono(theme::SM)))
-                        .wrap_mode(egui::TextWrapMode::Wrap)
-                        .selectable(true),
+                    egui::Label::new(
+                        RichText::new(text)
+                            .font(theme::mono(theme::SM))
+                            .line_height(Some(19.5)),
+                    )
+                    .wrap_mode(egui::TextWrapMode::Wrap)
+                    .selectable(true),
                 );
             });
     });
@@ -132,7 +137,7 @@ fn pill(ui: &mut Ui, text: &str, color: Color32, fill: Color32) {
         .corner_radius(CornerRadius::same(99))
         .inner_margin(Margin::symmetric(9, 2))
         .show(ui, |ui| {
-            ui.label(RichText::new(text).size(theme::SM).color(color).semibold());
+            ui.label(RichText::new(text).size(theme::SM).color(color).bold());
         });
 }
 
@@ -174,12 +179,12 @@ pub fn page(app: &mut App, ui: &mut Ui) {
                 // ---- heading ----
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 4.0;
-                    ui.label(RichText::new("Serveur MCP").size(theme::XL).semibold());
+                    ui.label(RichText::new("Serveur MCP").size(theme::XL).bold());
                     ui.label(widgets::muted(
                         "Un client IA (Claude Code, Claude Desktop…) lance Service Builder en mode mcp et lit, \
                          modifie, valide et exporte ce projet par le protocole MCP, sur stdio. Le serveur \
                          travaille sur le fichier du projet.",
-                    ));
+                    ).line_height(Some(theme::lh(theme::BASE))));
                 });
 
                 // ---- activation ----
@@ -191,7 +196,7 @@ pub fn page(app: &mut App, ui: &mut Ui) {
                             ui.spacing_mut().item_spacing.y = 4.0;
                             ui.set_max_width(ui.available_width() - 150.0);
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("Activation").semibold());
+                                ui.label(RichText::new("Activation").bold());
                                 match state {
                                     Some(EntryState::On) => {
                                         pill(ui, "Actif", OK, theme::alpha(OK, 30))
@@ -319,7 +324,7 @@ pub fn page(app: &mut App, ui: &mut Ui) {
                                         });
                                         ui.vertical(|ui| {
                                             ui.set_width(ui.available_width());
-                                            ui.label(widgets::muted(tool.description));
+                                            ui.label(widgets::muted(tool.description).line_height(Some(theme::lh(theme::BASE))));
                                         });
                                     });
                                 });

@@ -7,6 +7,7 @@ use sb_model::{
 
 use super::common::{empty, list_card};
 use crate::app::App;
+use crate::fonts::Weight;
 use crate::form::{Input, Kind, Value, ask};
 use crate::widgets::add_row;
 
@@ -121,7 +122,7 @@ pub fn draw_mail(app: &mut App, ui: &mut Ui, p: &Project, si: usize) {
         }
     }
     if svc.consumers.is_empty() {
-        ui.label(eframe::egui::RichText::new("Aucun mail").strong());
+        ui.label(eframe::egui::RichText::new("Aucun mail").bold());
         empty(ui, "Chaque mail répond à un événement : ajoutez-en un.");
     }
 }

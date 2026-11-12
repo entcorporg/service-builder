@@ -11,8 +11,8 @@ use sb_model::{
 };
 
 use super::common::{choice, icon_btn, link, unique};
-use crate::fonts::Weight;
 use crate::app::App;
+use crate::fonts::Weight;
 use crate::icons::{self, icon};
 use crate::theme::*;
 
@@ -190,7 +190,8 @@ fn heading(ui: &mut Ui, text: &str) {
     ui.label(
         RichText::new(text.to_uppercase())
             .size(11.0)
-            .semibold()
+            .bold()
+            .extra_letter_spacing(0.8)
             .color(MUTED),
     );
 }
@@ -211,14 +212,27 @@ fn card_box<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
 }
 
 fn muted_small(ui: &mut Ui, text: &str) {
-    ui.add(egui::Label::new(RichText::new(text).size(11.5).color(MUTED)).wrap());
+    ui.add(
+        egui::Label::new(
+            RichText::new(text)
+                .size(11.5)
+                .line_height(Some(lh(11.5)))
+                .color(MUTED),
+        )
+        .wrap(),
+    );
 }
 
 /// A tiny uppercase label followed by a control.
 fn labelled<R>(ui: &mut Ui, text: &str, control: impl FnOnce(&mut Ui) -> R) -> R {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        ui.label(RichText::new(text.to_uppercase()).size(10.0).color(FAINT));
+        ui.label(
+            RichText::new(text.to_uppercase())
+                .size(10.0)
+                .extra_letter_spacing(0.7)
+                .color(FAINT),
+        );
         control(ui)
     })
     .inner
@@ -226,7 +240,7 @@ fn labelled<R>(ui: &mut Ui, text: &str, control: impl FnOnce(&mut Ui) -> R) -> R
 
 /// A control of a given width.
 fn sized<R>(ui: &mut Ui, width: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
-    ui.allocate_ui(Vec2::new(width, 24.0), add).inner
+    ui.allocate_ui(Vec2::new(width, 30.0), add).inner
 }
 
 /// A text input committed on Enter or when the focus leaves (as `common::commit_entry`), with a font size.
@@ -252,8 +266,12 @@ fn entry(
             .id(id)
             .desired_width(ui.available_width())
             .hint_text(placeholder)
-            .font(mono(size))
-            .margin(Margin::symmetric(8, 5)),
+            .font(if size > 14.0 {
+                crate::theme::mono_bold(size)
+            } else {
+                mono(size)
+            })
+            .margin(Margin::symmetric(8, 7)),
     );
     if r.has_focus() {
         ui.data_mut(|d| d.insert_temp(key, text.clone()));
@@ -601,7 +619,12 @@ fn columns_grid(app: &mut App, ui: &mut Ui, s: &str, t: &str, table: &Table) {
                         ("", w_trash),
                     ] {
                         ui.allocate_ui(Vec2::new(w, 18.0), |ui| {
-                            ui.label(RichText::new(title.to_uppercase()).size(10.0).color(FAINT));
+                            ui.label(
+                                RichText::new(title.to_uppercase())
+                                    .size(10.0)
+                                    .extra_letter_spacing(0.7)
+                                    .color(FAINT),
+                            );
                         });
                     }
                     ui.end_row();
