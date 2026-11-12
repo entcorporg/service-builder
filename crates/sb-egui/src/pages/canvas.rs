@@ -117,9 +117,16 @@ pub fn page(app: &mut App, ui: &mut Ui) {
                 .inner_margin(egui::Margin::symmetric(16, 6)),
         )
         .show(ui, |ui| {
+            // The panel keeps its 410 px whatever the steps inside ask for (GTK's `External` policy).
+            let width = ui.available_width();
+            ui.set_max_width(width);
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .show(ui, |ui| super::inspector::show(app, ui));
+                .max_width(width)
+                .show(ui, |ui| {
+                    ui.set_max_width(width);
+                    super::inspector::show(app, ui)
+                });
         });
     egui::CentralPanel::no_frame().show(ui, |ui| stage(app, ui));
 }

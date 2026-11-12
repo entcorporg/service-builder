@@ -99,9 +99,13 @@ pub fn field<R>(ui: &mut Ui, label: &str, hint: &str, control: impl FnOnce(&mut 
     let r = ui
         .horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
-            ui.add_sized(
-                [84.0, 24.0],
-                egui::Label::new(RichText::new(label).color(MUTED)).truncate(),
+            ui.allocate_ui_with_layout(
+                Vec2::new(84.0, 24.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_min_size(Vec2::new(84.0, 24.0));
+                    ui.add(egui::Label::new(RichText::new(label).color(MUTED)).truncate());
+                },
             );
             control(ui)
         })
@@ -223,10 +227,12 @@ pub fn card(
                 let toggle = Frame::new()
                     .inner_margin(Margin::symmetric(6, 9))
                     .show(ui, |ui| {
+                        // Room for the actions on the right: the summary is cut before them.
+                        ui.set_max_width(ui.available_width() - 70.0);
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 8.0;
                             ui.add(icon(if open { "down" } else { "right" }, 14.0, FAINT));
-                            ui.label(RichText::new(title).font(mono(SM)).semibold());
+                            ui.label(RichText::new(title).font(mono_bold(SM)));
                             ui.add(
                                 egui::Label::new(RichText::new(summary).size(SM).color(MUTED))
                                     .truncate(),

@@ -965,6 +965,7 @@ fn step_card(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, i: usize, len: 
 
 /// A list of steps: the cards, then a dashed button to add one.
 pub fn steps_box(app: &mut App, ui: &mut Ui, list: &[Step], loc: &Loc) {
+    if std::env::var_os("SB_DBG_NOSTEPS").is_some() { return; }
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = 8.0;
         if list.is_empty() && !loc.nest.is_empty() {

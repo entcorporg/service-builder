@@ -394,8 +394,7 @@ fn card(
                 if let Some(s) = status {
                     ui.label(
                         RichText::new(s.to_string())
-                            .font(mono(BASE))
-                            .semibold()
+                            .font(crate::theme::mono_bold(BASE))
                             .color(OK),
                     );
                 }

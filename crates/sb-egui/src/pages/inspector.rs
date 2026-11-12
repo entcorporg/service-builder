@@ -263,7 +263,7 @@ fn rpcs(app: &mut App, ui: &mut Ui, project: &Project, si: usize) {
                     &id,
                     Some(SERVICE),
                     &rpc.name,
-                    &format!("{} -> {}", rpc.request, rpc.response),
+                    &format!("{} → {}", rpc.request, rpc.response),
                     |app, ui| {
                         if icon_btn(ui, "trash", &format!("Supprimer {}", rpc.name), true).clicked()
                         {
@@ -533,7 +533,7 @@ fn consumers(app: &mut App, ui: &mut Ui, project: &Project, si: usize) {
                     &id,
                     Some(OK),
                     &c.name,
-                    &format!("<- {}", c.topic),
+                    &format!("⇠ {}", c.topic),
                     |app, ui| {
                         if icon_btn(ui, "trash", &format!("Supprimer {}", c.name), true).clicked() {
                             app.edit(|p| {
