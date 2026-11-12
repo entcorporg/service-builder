@@ -116,6 +116,7 @@ fn row(
     r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_dir(
     ui: &mut Ui,
     state: &mut CodeState,

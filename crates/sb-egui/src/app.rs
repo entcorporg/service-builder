@@ -62,12 +62,18 @@ pub struct State {
     pub redo: Vec<Project>,
 }
 
+/// Work for the app, run later on the UI thread.
+pub type Action = Box<dyn FnOnce(&mut App)>;
+
+/// A button of a confirmation: (label, primary?, action).
+pub type ConfirmButton = (String, bool, Option<Action>);
+
 /// A question with buttons; each button runs its action (or nothing).
 pub struct Confirm {
     pub title: String,
     pub detail: String,
     /// (label, primary?, action). The first one is what Escape does.
-    pub buttons: Vec<(String, bool, Option<Box<dyn FnOnce(&mut App)>>)>,
+    pub buttons: Vec<ConfirmButton>,
 }
 
 /// What a background thread hands back to the frame loop.
@@ -85,7 +91,7 @@ pub struct App {
     pub toast: Option<(String, Instant)>,
     pub forms: Vec<Form>,
     pub confirms: Vec<Confirm>,
-    pending: Vec<Box<dyn FnOnce(&mut App)>>,
+    pending: Vec<Action>,
     tx: Sender<Done>,
     rx: Receiver<Done>,
     last_watch: Instant,
@@ -344,7 +350,7 @@ impl App {
         &mut self,
         title: &str,
         detail: &str,
-        buttons: Vec<(String, bool, Option<Box<dyn FnOnce(&mut App)>>)>,
+        buttons: Vec<ConfirmButton>,
     ) {
         self.confirms.push(Confirm {
             title: title.into(),
