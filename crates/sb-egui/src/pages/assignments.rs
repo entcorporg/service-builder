@@ -385,7 +385,7 @@ pub fn assignments(
         });
     }
     if !m.fields.is_empty() {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             ui.add(icon("sparkles", 13.0, SERVICE));
             if link(ui, "Remplir automatiquement les champs de même nom").clicked() {

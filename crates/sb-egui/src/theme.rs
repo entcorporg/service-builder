@@ -38,6 +38,11 @@ pub const MD: f32 = 14.0;
 pub const LG: f32 = 15.0;
 pub const XL: f32 = 20.0;
 
+/// The line height of the GTK labels (`line-height: 1.29` on Inter's own 1.3-ish line box) for wrapped text.
+pub const fn lh(size: f32) -> f32 {
+    size * 1.68
+}
+
 pub fn mono(size: f32) -> FontId {
     FontId::new(size, FontFamily::Monospace)
 }
@@ -126,7 +131,7 @@ pub fn apply(ctx: &egui::Context) {
         s.spacing.item_spacing = egui::vec2(8.0, 6.0);
         s.spacing.button_padding = egui::vec2(10.0, 5.0);
         s.spacing.window_margin = Margin::same(16);
-        s.spacing.interact_size.y = 26.0;
+        s.spacing.interact_size.y = 30.0;
         s.spacing.combo_width = 120.0;
         s.interaction.tooltip_delay = 0.4;
     });

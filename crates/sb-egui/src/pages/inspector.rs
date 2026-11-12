@@ -20,6 +20,7 @@ use super::common::{
 use super::editors::{delete_service, delete_topic, service_form};
 use super::steps::{Flow, Loc};
 use crate::app::{App, Page};
+use crate::fonts::Weight;
 use crate::theme::*;
 
 #[derive(Default)]
@@ -70,7 +71,13 @@ fn open_logic(app: &mut App, ui: &mut Ui) {
 /// The small title over the steps of a handler.
 fn steps_title(ui: &mut Ui) {
     ui.add_space(6.0);
-    ui.label(RichText::new("LOGIQUE").size(11.0).strong().color(FAINT));
+    ui.label(
+        RichText::new("LOGIQUE")
+            .size(11.0)
+            .semibold()
+            .extra_letter_spacing(0.9)
+            .color(FAINT),
+    );
 }
 
 /// A card is open by itself when it is the only one of its list (once: the user can close it).
@@ -102,12 +109,12 @@ fn project(app: &mut App, ui: &mut Ui) {
         })
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 12.0;
-            ui.label(RichText::new("Rien de sélectionné").size(LG).strong());
+            ui.label(RichText::new("Rien de sélectionné").size(LG).bold());
             for text in [
                 "Cliquez sur un service ou un topic dans le canvas pour configurer ses RPC, ses consumers et leur logique.",
                 "Glissez un Service ou un Topic depuis la colonne de gauche pour construire votre architecture.",
             ] {
-                ui.add(egui::Label::new(RichText::new(text).color(MUTED)).wrap());
+                ui.add(egui::Label::new(RichText::new(text).line_height(Some(lh(BASE))).color(MUTED)).wrap());
             }
         });
 
@@ -392,7 +399,8 @@ fn routes(app: &mut App, ui: &mut Ui, svc: &Service, sname: &str) {
                                         ui.label(
                                             RichText::new(r.method.as_str())
                                                 .size(9.0)
-                                                .strong()
+                                                .bold()
+                                                .extra_letter_spacing(0.6)
                                                 .color(color),
                                         );
                                     });

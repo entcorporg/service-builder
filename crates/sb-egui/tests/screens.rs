@@ -54,7 +54,8 @@ fn screens() {
             .build_eframe(|cc| {
                 let open = std::env::var("SB_PROJECT").ok().map(PathBuf::from);
                 // A character no font has is drawn as a box, as in the app (the harness would panic).
-                cc.egui_ctx.set_missing_glyph_policy(eframe::egui::epaint::text::MissingGlyphPolicy::Tofu);
+                cc.egui_ctx
+                    .set_missing_glyph_policy(eframe::egui::epaint::text::MissingGlyphPolicy::Tofu);
                 let mut app = App::new(cc, open);
                 if std::env::var("SB_SAMPLE").as_deref() == Ok("showcase") {
                     app.load_sample("showcase");
@@ -78,7 +79,9 @@ fn screens() {
                 app.page = page;
                 app
             });
-        harness.ctx.set_missing_glyph_policy(eframe::egui::epaint::text::MissingGlyphPolicy::Tofu);
+        harness
+            .ctx
+            .set_missing_glyph_policy(eframe::egui::epaint::text::MissingGlyphPolicy::Tofu);
         // Let the analysis come back and the icons load.
         for _ in 0..6 {
             harness.run_steps(2);

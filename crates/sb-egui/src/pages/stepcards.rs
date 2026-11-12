@@ -181,7 +181,15 @@ fn as_expr(text: &str) -> Option<Expr> {
 
 fn hint_line(ui: &mut Ui, text: &str) {
     if !text.is_empty() {
-        ui.add(egui::Label::new(RichText::new(text).size(11.0).color(FAINT)).wrap());
+        ui.add(
+            egui::Label::new(
+                RichText::new(text)
+                    .size(11.0)
+                    .line_height(Some(lh(11.0)))
+                    .color(FAINT),
+            )
+            .wrap(),
+        );
     }
 }
 
@@ -849,7 +857,7 @@ fn step_card(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, i: usize, len: 
             );
             let name = ui
                 .painter()
-                .layout_no_wrap(title(&kind).into(), prop(BASE), TEXT);
+                .layout_no_wrap(title(&kind).into(), semibold(BASE), TEXT);
             let x = badge.right() + 8.0;
             let name_w = name.size().x;
             ui.painter()
@@ -947,6 +955,7 @@ fn step_card(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, i: usize, len: 
                                         RichText::new(name)
                                             .size(11.0)
                                             .semibold()
+                                            .extra_letter_spacing(0.9)
                                             .color(hex(0xff8fb8)),
                                     );
                                     steps_box(app, ui, list, &loc.inside_pub(side, i));

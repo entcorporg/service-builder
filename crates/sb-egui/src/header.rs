@@ -152,7 +152,8 @@ fn project_name(ui: &mut egui::Ui, current: &str) -> Option<String> {
     let key = id.with("buffer");
     let focused = ui.memory(|m| m.has_focus(id));
     let mut text: String = if focused {
-        ui.data(|d| d.get_temp::<String>(key)).unwrap_or_else(|| current.to_string())
+        ui.data(|d| d.get_temp::<String>(key))
+            .unwrap_or_else(|| current.to_string())
     } else {
         current.to_string()
     };
@@ -265,8 +266,12 @@ fn pill(app: &App, ui: &mut egui::Ui) {
     let galley = ui.painter().layout_no_wrap(text, semibold(SM), color);
     let size = Vec2::new(10.0 + 14.0 + 6.0 + galley.size().x + 10.0, 26.0);
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-    ui.painter().rect_filled(rect, CornerRadius::same(255), fill);
-    let ir = egui::Rect::from_center_size(rect.left_center() + Vec2::new(10.0 + 7.0, 0.0), Vec2::splat(14.0));
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(255), fill);
+    let ir = egui::Rect::from_center_size(
+        rect.left_center() + Vec2::new(10.0 + 7.0, 0.0),
+        Vec2::splat(14.0),
+    );
     crate::icons::paint(ui, icon_name, ir, color);
     let at = egui::pos2(rect.left() + 30.0, rect.center().y - galley.size().y / 2.0);
     ui.painter().galley(at, galley, color);

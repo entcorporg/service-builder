@@ -346,12 +346,7 @@ impl App {
         );
     }
 
-    pub fn confirm(
-        &mut self,
-        title: &str,
-        detail: &str,
-        buttons: Vec<ConfirmButton>,
-    ) {
+    pub fn confirm(&mut self, title: &str, detail: &str, buttons: Vec<ConfirmButton>) {
         self.confirms.push(Confirm {
             title: title.into(),
             detail: detail.into(),

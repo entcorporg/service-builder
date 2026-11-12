@@ -5,7 +5,14 @@ use egui_kittest::Harness;
 use sb_egui::app::{App, Page};
 use sb_egui::pages::canvas::{Sel, select};
 
-const PAGES: [Page; 6] = [Page::Architecture, Page::Endpoint, Page::Flows, Page::Tables, Page::Mcp, Page::Code];
+const PAGES: [Page; 6] = [
+    Page::Architecture,
+    Page::Endpoint,
+    Page::Flows,
+    Page::Tables,
+    Page::Mcp,
+    Page::Code,
+];
 
 fn harness(sample: &'static str) -> Harness<'static, App> {
     // SAFETY: set before the app starts its threads.
@@ -13,13 +20,17 @@ fn harness(sample: &'static str) -> Harness<'static, App> {
         std::env::set_var("SB_NO_UPDATE", "1");
         std::env::set_var("SB_OPEN_ALL", "1");
     }
-    let mut h = Harness::builder().with_size([1480.0, 920.0]).build_eframe(move |cc| {
-        cc.egui_ctx.set_missing_glyph_policy(eframe::egui::epaint::text::MissingGlyphPolicy::Tofu);
-        let mut app = App::new(cc, None);
-        app.load_sample(sample);
-        app
-    });
-    h.ctx.set_missing_glyph_policy(eframe::egui::epaint::text::MissingGlyphPolicy::Tofu);
+    let mut h = Harness::builder()
+        .with_size([1480.0, 920.0])
+        .build_eframe(move |cc| {
+            cc.egui_ctx
+                .set_missing_glyph_policy(eframe::egui::epaint::text::MissingGlyphPolicy::Tofu);
+            let mut app = App::new(cc, None);
+            app.load_sample(sample);
+            app
+        });
+    h.ctx
+        .set_missing_glyph_policy(eframe::egui::epaint::text::MissingGlyphPolicy::Tofu);
     for _ in 0..4 {
         h.run_steps(2);
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -31,9 +42,17 @@ fn sweep(sample: &'static str) {
     let mut h = harness(sample);
     let p = h.state().project();
     let mut sels: Vec<Option<Sel>> = vec![None];
-    sels.extend(p.services.iter().map(|s| Some(Sel::Service(s.name.clone()))));
+    sels.extend(
+        p.services
+            .iter()
+            .map(|s| Some(Sel::Service(s.name.clone()))),
+    );
     sels.extend(p.topics.iter().map(|t| Some(Sel::Topic(t.name.clone()))));
-    sels.extend(p.messages.iter().map(|m| Some(Sel::Messages(m.name.clone()))));
+    sels.extend(
+        p.messages
+            .iter()
+            .map(|m| Some(Sel::Messages(m.name.clone()))),
+    );
     for sel in sels {
         select(h.state_mut(), sel);
         h.state_mut().page = Page::Architecture;

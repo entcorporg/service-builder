@@ -24,8 +24,8 @@ use eframe::egui::{
 };
 use sb_model::{Field, FieldType, Message, MessageKind, Project};
 
-use crate::fonts::Weight;
 use crate::app::App;
+use crate::fonts::Weight;
 use crate::icons::icon;
 use crate::theme::*;
 
@@ -37,19 +37,20 @@ pub fn section<R>(
     action: impl FnOnce(&mut Ui),
     body: impl FnOnce(&mut Ui) -> R,
 ) -> R {
-    ui.add_space(14.0);
+    ui.add_space(6.0);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         ui.add(icon(icon_name, 14.0, MUTED));
         ui.label(
             RichText::new(title.to_uppercase())
                 .size(11.0)
-                .semibold()
+                .bold()
+                .extra_letter_spacing(0.9)
                 .color(MUTED),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), action);
     });
-    ui.add_space(10.0);
+    ui.add_space(6.0);
     let r = ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 8.0;
         body(ui)
@@ -100,10 +101,10 @@ pub fn field<R>(ui: &mut Ui, label: &str, hint: &str, control: impl FnOnce(&mut 
         .horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
             ui.allocate_ui_with_layout(
-                Vec2::new(84.0, 24.0),
+                Vec2::new(84.0, 30.0),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    ui.set_min_size(Vec2::new(84.0, 24.0));
+                    ui.set_min_size(Vec2::new(84.0, 30.0));
                     ui.add(egui::Label::new(RichText::new(label).color(MUTED)).truncate());
                 },
             );
@@ -111,9 +112,20 @@ pub fn field<R>(ui: &mut Ui, label: &str, hint: &str, control: impl FnOnce(&mut 
         })
         .inner;
     if !hint.is_empty() {
-        ui.horizontal(|ui| {
-            ui.add_space(94.0);
-            ui.add(egui::Label::new(RichText::new(hint).size(11.0).color(FAINT)).wrap());
+        ui.scope(|ui| {
+            ui.spacing_mut().interact_size.y = 0.0;
+            ui.horizontal(|ui| {
+                ui.add_space(94.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(hint)
+                            .size(11.0)
+                            .line_height(Some(lh(11.0)))
+                            .color(FAINT),
+                    )
+                    .wrap(),
+                );
+            });
         });
     }
     r
@@ -123,7 +135,15 @@ pub fn empty(ui: &mut Ui, text: &str) {
     Frame::new()
         .inner_margin(Margin::symmetric(8, 4))
         .show(ui, |ui| {
-            ui.add(egui::Label::new(RichText::new(text).size(SM).color(FAINT)).wrap());
+            ui.add(
+                egui::Label::new(
+                    RichText::new(text)
+                        .size(SM)
+                        .line_height(Some(lh(SM)))
+                        .color(FAINT),
+                )
+                .wrap(),
+            );
         });
 }
 
@@ -150,7 +170,7 @@ pub fn commit_entry(
         .id(id)
         .desired_width(ui.available_width())
         .hint_text(placeholder)
-        .margin(Margin::symmetric(8, 5));
+        .margin(Margin::symmetric(8, 7));
     if mono {
         edit = edit.font(crate::theme::mono(SM));
     }
@@ -188,6 +208,7 @@ pub fn choice(
     selected: &str,
 ) -> Option<String> {
     let mut picked = None;
+    ui.spacing_mut().interact_size.y = 30.0;
     egui::ComboBox::from_id_salt(id)
         .selected_text(selected)
         .width(ui.available_width().max(80.0))
@@ -225,7 +246,7 @@ pub fn card(
             ui.set_width(ui.available_width());
             let head = ui.horizontal(|ui| {
                 let toggle = Frame::new()
-                    .inner_margin(Margin::symmetric(6, 9))
+                    .inner_margin(Margin::symmetric(6, 5))
                     .show(ui, |ui| {
                         // Room for the actions on the right: the summary is cut before them.
                         ui.set_max_width(ui.available_width() - 70.0);
@@ -310,6 +331,7 @@ pub fn danger_button(ui: &mut Ui, text: &str) -> Response {
     ui.add_space(22.0);
     ui.add(
         egui::Button::new(RichText::new(text).color(ERR))
+            .min_size(Vec2::new(ui.available_width(), 34.0))
             .fill(Color32::TRANSPARENT)
             .stroke(Stroke::new(1.0, alpha(ERR, 90)))
             .corner_radius(CornerRadius::same(8)),
@@ -340,7 +362,7 @@ pub fn list_card(
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
-                    ui.label(RichText::new(title).semibold());
+                    ui.label(RichText::new(title).bold());
                     if !subtitle.is_empty() {
                         ui.label(RichText::new(subtitle).color(MUTED));
                     }

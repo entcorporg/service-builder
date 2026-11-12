@@ -121,7 +121,10 @@ pub fn page(app: &mut App, ui: &mut Ui) {
             // inspector is drawn in a child of a fixed rectangle, whose size does not reach the panel.
             let rect = ui.available_rect_before_wrap();
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-            child.set_clip_rect(rect.expand2(egui::vec2(16.0, 0.0)).intersect(ui.clip_rect()));
+            child.set_clip_rect(
+                rect.expand2(egui::vec2(16.0, 0.0))
+                    .intersect(ui.clip_rect()),
+            );
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .max_width(rect.width())
@@ -464,19 +467,22 @@ fn paint_graph(p: &egui::Painter, v: &View, st: &CanvasState) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn layout(
     p: &egui::Painter,
     v: &View,
     s: &str,
     size: f64,
     mono: bool,
+    bold: bool,
     color: Color32,
     max: f64,
 ) -> Arc<Galley> {
-    let font = if mono {
-        theme::mono(v.s(size))
-    } else {
-        theme::prop(v.s(size))
+    let font = match (mono, bold) {
+        (true, false) => theme::mono(v.s(size)),
+        (true, true) => theme::mono_bold(v.s(size)),
+        (false, false) => theme::prop(v.s(size)),
+        (false, true) => theme::bold(v.s(size)),
     };
     let mut job = LayoutJob::simple_singleline(s.to_string(), font, color);
     job.wrap.max_width = v.s(max).max(1.0);
@@ -494,13 +500,16 @@ struct Label<'a> {
     text: &'a str,
     size: f64,
     mono: bool,
+    bold: bool,
     color: Color32,
     max: f64,
 }
 
 impl Label<'_> {
     fn draw(&self, p: &egui::Painter, v: &View) {
-        let g = layout(p, v, self.text, self.size, self.mono, self.color, self.max);
+        let g = layout(
+            p, v, self.text, self.size, self.mono, self.bold, self.color, self.max,
+        );
         let at = v.pt(self.x, self.cy) - Vec2::new(0.0, g.size().y / 2.0);
         p.galley(at, g, self.color);
     }
@@ -508,7 +517,7 @@ impl Label<'_> {
 
 /// The width of the text in canvas units.
 fn width_of(p: &egui::Painter, v: &View, s: &str, size: f64, mono: bool) -> f64 {
-    f64::from(layout(p, v, s, size, mono, TEXT, 10_000.0).size().x) / v.zoom
+    f64::from(layout(p, v, s, size, mono, false, TEXT, 10_000.0).size().x) / v.zoom
 }
 
 type Anchor = ((f64, f64), f64, f64);
@@ -580,6 +589,7 @@ fn edge(p: &egui::Painter, v: &View, e: &Edge, a: Anchor, b: Anchor) {
             text: &e.label,
             size: 10.0,
             mono: true,
+            bold: false,
             color,
             max: 10_000.0,
         }
@@ -624,6 +634,7 @@ fn node(p: &egui::Painter, v: &View, n: &Node, x: f64, y: f64, selected: bool) {
         text: &n.name,
         size: 13.0,
         mono: topic,
+        bold: true,
         color: if topic { TOPIC } else { TEXT },
         max: n.w - 28.0 - badge_w - 40.0,
     }
@@ -638,6 +649,7 @@ fn node(p: &egui::Painter, v: &View, n: &Node, x: f64, y: f64, selected: bool) {
             text: &n.badge,
             size: 11.0,
             mono: true,
+            bold: false,
             color: MUTED,
             max: 10_000.0,
         }
@@ -649,7 +661,7 @@ fn node(p: &egui::Painter, v: &View, n: &Node, x: f64, y: f64, selected: bool) {
             right -= 20.0;
             let c = v.pt(right + 8.0, y + 17.0);
             p.circle_filled(c, v.s(8.0), color);
-            let g = layout(p, v, &count.to_string(), 10.0, false, INK, 100.0);
+            let g = layout(p, v, &count.to_string(), 10.0, false, true, INK, 100.0);
             p.galley(c - g.size() / 2.0, g, INK);
             right -= 2.0;
         }
@@ -662,6 +674,7 @@ fn node(p: &egui::Painter, v: &View, n: &Node, x: f64, y: f64, selected: bool) {
             text: &n.meta[0],
             size: 12.0,
             mono: true,
+            bold: false,
             color: TEXT,
             max: n.w - 28.0,
         }
@@ -672,6 +685,7 @@ fn node(p: &egui::Painter, v: &View, n: &Node, x: f64, y: f64, selected: bool) {
             text: &n.meta[1],
             size: 10.5,
             mono: false,
+            bold: false,
             color: MUTED,
             max: n.w - 28.0,
         }
@@ -685,6 +699,7 @@ fn node(p: &egui::Painter, v: &View, n: &Node, x: f64, y: f64, selected: bool) {
             text: "vide",
             size: 11.0,
             mono: false,
+            bold: false,
             color: MUTED,
             max: 10_000.0,
         }
@@ -693,7 +708,7 @@ fn node(p: &egui::Painter, v: &View, n: &Node, x: f64, y: f64, selected: bool) {
     for (i, r) in n.rows.iter().enumerate() {
         let ry = y + HEADER + 6.0 + i as f64 * ROW;
         let color = tag_color(r.tag);
-        let g = layout(p, v, r.label, 9.0, true, color, 10_000.0);
+        let g = layout(p, v, r.label, 9.0, true, true, color, 10_000.0);
         let tw = f64::from(g.size().x) / v.zoom + 10.0;
         let pill = Rect::from_min_size(v.pt(x + 12.0, ry + 2.0), Vec2::new(v.s(tw), v.s(15.0)));
         p.rect_filled(pill, v.radius(4.0), alpha(color, 46));
@@ -704,6 +719,7 @@ fn node(p: &egui::Painter, v: &View, n: &Node, x: f64, y: f64, selected: bool) {
             text: &r.text,
             size: 11.5,
             mono: true,
+            bold: false,
             color: TEXT,
             max: n.w - tw - 44.0,
         }

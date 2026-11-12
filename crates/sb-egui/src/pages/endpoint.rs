@@ -13,8 +13,8 @@ use sb_model::{
 use super::common::{choice, commit_entry, empty, icon_btn, link, number, unique};
 use super::editors::{SCALARS, type_name};
 use super::steps::{Flow, Loc};
-use crate::fonts::Weight;
 use crate::app::{App, Page};
+use crate::fonts::Weight;
 use crate::icons::icon;
 use crate::theme::*;
 
@@ -135,7 +135,8 @@ fn tag(ui: &mut Ui, method: HttpMethod) {
             ui.add(egui::Label::new(
                 RichText::new(method.as_str())
                     .size(9.0)
-                    .semibold()
+                    .bold()
+                    .extra_letter_spacing(0.6)
                     .color(color),
             ));
         });
@@ -163,7 +164,12 @@ fn labelled_field(ui: &mut Ui, label: &str, w: f32, add: impl FnOnce(&mut Ui)) {
     fixed_h(ui, w, 44.0, |ui| {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
-            small(ui, &label.to_uppercase(), 10.0, FAINT);
+            ui.label(
+                RichText::new(label.to_uppercase())
+                    .size(10.0)
+                    .extra_letter_spacing(0.6)
+                    .color(FAINT),
+            );
             add(ui);
         });
     });
@@ -271,15 +277,18 @@ fn fields_editor(
             }
         });
         if let Some(o) = origin {
-            ui.horizontal(|ui| {
-                ui.add_space(26.0);
-                Frame::new()
-                    .fill(alpha(SERVICE, 36))
-                    .corner_radius(CornerRadius::same(4))
-                    .inner_margin(Margin::symmetric(6, 0))
-                    .show(ui, |ui| {
-                        ui.label(RichText::new(o(f)).size(XS).color(SERVICE));
-                    });
+            ui.scope(|ui| {
+                ui.spacing_mut().interact_size.y = 0.0;
+                ui.horizontal(|ui| {
+                    ui.add_space(26.0);
+                    Frame::new()
+                        .fill(alpha(SERVICE, 36))
+                        .corner_radius(CornerRadius::same(4))
+                        .inner_margin(Margin::symmetric(6, 0))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(o(f)).size(10.0).color(SERVICE));
+                        });
+                });
             });
         }
     }
@@ -322,7 +331,10 @@ fn json_preview(ui: &mut Ui, title: impl FnOnce(&mut Ui), body: Option<&str>) {
                         ui.set_width(ui.available_width());
                         ui.add(
                             egui::Label::new(
-                                RichText::new(text).font(mono(SM)).color(hex(0x9be3b4)),
+                                RichText::new(text)
+                                    .font(mono(SM))
+                                    .line_height(Some(18.0))
+                                    .color(hex(0x9be3b4)),
                             )
                             .selectable(true),
                         );
@@ -370,7 +382,8 @@ fn card(
                     ui.label(
                         RichText::new(title.to_uppercase())
                             .size(11.0)
-                            .semibold()
+                            .bold()
+                            .extra_letter_spacing(0.9)
                             .color(MUTED),
                     );
                 });
@@ -415,9 +428,14 @@ pub fn page(app: &mut App, ui: &mut Ui) {
     egui::Panel::left("endpoint-tree")
         .exact_size(228.0)
         .resizable(false)
-        .frame(Frame::new().fill(PANEL).inner_margin(Margin::same(12)))
+        .frame(
+            Frame::new()
+                .fill(PANEL)
+                .inner_margin(Margin::symmetric(12, 14)),
+        )
         .show(ui, |ui| {
             crate::widgets::section_title(ui, "Structure");
+            ui.add_space(14.0);
             ScrollArea::vertical().show(ui, |ui| super::palette::tree(app, ui));
         });
     egui::CentralPanel::no_frame().show(ui, |ui| draw(app, ui));
@@ -543,7 +561,11 @@ fn draw(app: &mut App, ui: &mut Ui) {
                             ui.set_width(ui.available_width());
                             ui.spacing_mut().item_spacing.y = 8.0;
                             ui.label(
-                                RichText::new("LOGIQUE").size(11.0).semibold().color(FAINT),
+                                RichText::new("LOGIQUE")
+                                    .size(11.0)
+                                    .bold()
+                                    .extra_letter_spacing(0.9)
+                                    .color(FAINT),
                             );
                             small(
                                 ui,
@@ -891,6 +913,7 @@ fn response_body(
         RichText::new("VALEURS, PRODUITES PAR LA LOGIQUE")
             .size(11.0)
             .semibold()
+            .extra_letter_spacing(0.8)
             .color(FAINT),
     );
     let respond_at = route

@@ -332,7 +332,12 @@ fn rules_row(app: &mut App, ui: &mut Ui, message: &str, index: usize, f: &Field)
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         ui.add_space(36.0);
-        ui.label(RichText::new("RÈGLES").size(10.0).color(FAINT));
+        ui.label(
+            RichText::new("RÈGLES")
+                .size(10.0)
+                .extra_letter_spacing(0.7)
+                .color(FAINT),
+        );
         for (i, r) in f.rules.iter().enumerate() {
             Frame::new()
                 .fill(PANEL2)
