@@ -82,3 +82,34 @@ fn edit_undo_redo() {
         h.run_steps(2);
     }
 }
+
+#[test]
+fn drag_a_node_then_undo_with_the_keyboard() {
+    use eframe::egui::{Key, Modifiers, pos2};
+    let mut h = harness("orders");
+    let position = |h: &Harness<'static, App>| {
+        let p = h.state().project();
+        p.services.iter().find(|s| s.name == "Payments").map(|s| (s.position.x, s.position.y))
+    };
+    let before = position(&h);
+    // The Payments node, where the orders sample is fitted in a 1480×920 window.
+    h.hover_at(pos2(620.0, 454.0));
+    h.run_steps(2);
+    h.drag_at(pos2(620.0, 454.0));
+    h.run_steps(1);
+    for i in 1..=10 {
+        h.hover_at(pos2(620.0 + 4.0 * i as f32, 454.0 + 12.0 * i as f32));
+        h.run_steps(1);
+    }
+    h.drop_at(pos2(660.0, 574.0));
+    h.run_steps(3);
+    let moved = position(&h);
+    assert_ne!(moved, before, "the drag moves the node");
+    // The canvas has the pointer and maybe the focus: the shortcuts must still work.
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(2);
+    assert_eq!(position(&h), before, "Ctrl+Z undoes the move");
+    h.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+    h.run_steps(2);
+    assert_eq!(position(&h), moved, "Ctrl+Shift+Z redoes it");
+}

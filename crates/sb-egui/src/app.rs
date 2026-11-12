@@ -449,11 +449,12 @@ impl App {
         if hit(Modifiers::COMMAND, Key::O) {
             self.guard(crate::files::pick_project);
         }
-        if hit(shift, Key::Z) {
-            self.redo();
-        } else if hit(Modifiers::COMMAND, Key::Z) {
-            // Not while typing: the text field has its own undo.
-            if ctx.memory(|m| m.focused().is_none()) {
+        // Not while typing: a text field has its own undo (only a text input wants the keyboard; the canvas
+        // or a button having the focus does not count).
+        if !ctx.text_edit_focused() {
+            if hit(shift, Key::Z) {
+                self.redo();
+            } else if hit(Modifiers::COMMAND, Key::Z) {
                 self.undo();
             }
         }
