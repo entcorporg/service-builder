@@ -1,7 +1,7 @@
 //! Development aid: renders the window headless (wgpu, software Vulkan is fine) and writes one PNG per page.
 //!
 //! ```sh
-//! SB_SHOTS=/tmp/shots cargo test -p sb-egui --test screens -- --nocapture
+//! SB_SHOTS=/tmp/shots cargo test -p sb-egui --test screens -- --ignored --nocapture
 //! ```
 //!
 //! * `SB_SHOTS`: the folder of the PNGs (default `target/shots`).
@@ -18,7 +18,9 @@ use egui_kittest::Harness;
 use sb_egui::app::{App, Page};
 use sb_egui::pages::canvas::{Sel, select};
 
+/// Ignored by default: it needs a Vulkan device (lavapipe, `mesa-vulkan-drivers`, is enough).
 #[test]
+#[ignore]
 fn screens() {
     // SAFETY: set before any thread of the app starts.
     unsafe { std::env::set_var("SB_NO_UPDATE", "1") };
@@ -76,6 +78,7 @@ fn screens() {
                 app.page = page;
                 app
             });
+        harness.ctx.set_missing_glyph_policy(eframe::egui::epaint::text::MissingGlyphPolicy::Tofu);
         // Let the analysis come back and the icons load.
         for _ in 0..6 {
             harness.run_steps(2);
