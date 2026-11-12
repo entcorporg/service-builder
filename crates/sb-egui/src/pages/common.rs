@@ -24,6 +24,7 @@ use eframe::egui::{
 };
 use sb_model::{Field, FieldType, Message, MessageKind, Project};
 
+use crate::fonts::Weight;
 use crate::app::App;
 use crate::icons::icon;
 use crate::theme::*;
@@ -43,7 +44,7 @@ pub fn section<R>(
         ui.label(
             RichText::new(title.to_uppercase())
                 .size(11.0)
-                .strong()
+                .semibold()
                 .color(MUTED),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), action);
@@ -225,7 +226,7 @@ pub fn card(
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 8.0;
                             ui.add(icon(if open { "down" } else { "right" }, 14.0, FAINT));
-                            ui.label(RichText::new(title).font(mono(SM)).strong());
+                            ui.label(RichText::new(title).font(mono(SM)).semibold());
                             ui.add(
                                 egui::Label::new(RichText::new(summary).size(SM).color(MUTED))
                                     .truncate(),
@@ -333,7 +334,7 @@ pub fn list_card(
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
-                    ui.label(RichText::new(title).strong());
+                    ui.label(RichText::new(title).semibold());
                     if !subtitle.is_empty() {
                         ui.label(RichText::new(subtitle).color(MUTED));
                     }

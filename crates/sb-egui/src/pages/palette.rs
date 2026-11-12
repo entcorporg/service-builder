@@ -212,7 +212,7 @@ pub fn tiles(app: &mut App, ui: &mut Ui) {
         false,
         "publish",
         "Service mail",
-        "MTA prêt à l’emploi : événements -> mails",
+        "MTA prêt à l’emploi : événements → mails",
     ) {
         add_service(app, ServiceKind::Mta);
     }
@@ -221,7 +221,7 @@ pub fn tiles(app: &mut App, ui: &mut Ui) {
         false,
         "publish",
         "Service temps réel",
-        "SSE prêt à l’emploi : événements -> navigateurs (DragonflyDB)",
+        "SSE prêt à l’emploi : événements → navigateurs (DragonflyDB)",
     ) {
         add_service(app, ServiceKind::Realtime);
     }

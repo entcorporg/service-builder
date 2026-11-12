@@ -11,6 +11,7 @@ use sb_model::{
 };
 
 use super::common::{choice, icon_btn, link, unique};
+use crate::fonts::Weight;
 use crate::app::App;
 use crate::icons::{self, icon};
 use crate::theme::*;
@@ -189,7 +190,7 @@ fn heading(ui: &mut Ui, text: &str) {
     ui.label(
         RichText::new(text.to_uppercase())
             .size(11.0)
-            .strong()
+            .semibold()
             .color(MUTED),
     );
 }

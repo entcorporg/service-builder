@@ -13,6 +13,7 @@ use sb_model::{
 use super::common::{choice, commit_entry, empty, icon_btn, link, number, unique};
 use super::editors::{SCALARS, type_name};
 use super::steps::{Flow, Loc};
+use crate::fonts::Weight;
 use crate::app::{App, Page};
 use crate::icons::icon;
 use crate::theme::*;
@@ -134,7 +135,7 @@ fn tag(ui: &mut Ui, method: HttpMethod) {
             ui.add(egui::Label::new(
                 RichText::new(method.as_str())
                     .size(9.0)
-                    .strong()
+                    .semibold()
                     .color(color),
             ));
         });
@@ -369,7 +370,7 @@ fn card(
                     ui.label(
                         RichText::new(title.to_uppercase())
                             .size(11.0)
-                            .strong()
+                            .semibold()
                             .color(MUTED),
                     );
                 });
@@ -394,7 +395,7 @@ fn card(
                     ui.label(
                         RichText::new(s.to_string())
                             .font(mono(BASE))
-                            .strong()
+                            .semibold()
                             .color(OK),
                     );
                 }
@@ -451,7 +452,7 @@ fn draw(app: &mut App, ui: &mut Ui) {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 10.0;
                 empty(ui, "Route introuvable.");
-                if link(ui, "Retour à l’architecture").clicked() {
+                if link(ui, "← Retour à l’architecture").clicked() {
                     app.page = Page::Architecture;
                 }
             });
@@ -543,7 +544,7 @@ fn draw(app: &mut App, ui: &mut Ui) {
                             ui.set_width(ui.available_width());
                             ui.spacing_mut().item_spacing.y = 8.0;
                             ui.label(
-                                RichText::new("LOGIQUE").size(11.0).strong().color(FAINT),
+                                RichText::new("LOGIQUE").size(11.0).semibold().color(FAINT),
                             );
                             small(
                                 ui,
@@ -890,7 +891,7 @@ fn response_body(
     ui.label(
         RichText::new("VALEURS, PRODUITES PAR LA LOGIQUE")
             .size(11.0)
-            .strong()
+            .semibold()
             .color(FAINT),
     );
     let respond_at = route
@@ -940,7 +941,7 @@ fn response_body(
             .iter()
             .filter(|v| v.path != "input" && !v.path.contains('.') && v.ty == route.response)
         {
-            if link(ui, &format!("Tout lire depuis {}", v.path)).clicked() {
+            if link(ui, &format!("✦ Tout lire depuis {}", v.path)).clicked() {
                 let (s, r, name) = (sname.to_string(), rname.to_string(), v.path.clone());
                 app.edit(move |p| read_from(p, &s, &r, &name));
             }
@@ -949,7 +950,7 @@ fn response_body(
             .iter()
             .map(|v| v.path.split('.').next().unwrap_or("").to_string())
             .collect();
-        if link(ui, "Construire la réponse par la logique (Rust)")
+        if link(ui, "‹› Construire la réponse par la logique (Rust)")
             .on_hover_text("Ajoute une variable du type de la réponse, remplie en Rust (requêtes sur plusieurs tables par exemple)")
             .clicked()
         {

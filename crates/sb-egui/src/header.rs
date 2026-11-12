@@ -163,7 +163,7 @@ fn project_name(ui: &mut egui::Ui, current: &str) -> Option<String> {
             .frame(egui::Frame::NONE)
             .font(semibold(BASE))
             .margin(Margin::symmetric(8, 4))
-            .vertical_align(egui::Align::Center)
+            .align(egui::Align2::LEFT_CENTER)
             .min_size(Vec2::new(150.0, 26.0))
             .desired_width(150.0),
     );

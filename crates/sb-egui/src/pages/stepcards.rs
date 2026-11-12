@@ -12,6 +12,7 @@ use sb_model::{Assignment, CmpOp, Condition, Expr, Field, FieldType, Project, St
 use super::assignments::{assignments, expr_editor};
 use super::common::{choice, commit_entry, icon_btn};
 use super::steps::{Flow, Loc, list_mut, new_id, step_move, vars_at};
+use crate::fonts::Weight;
 use crate::app::App;
 use crate::icons;
 use crate::theme::*;
@@ -945,7 +946,7 @@ fn step_card(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, i: usize, len: 
                                     ui.label(
                                         RichText::new(name)
                                             .size(11.0)
-                                            .strong()
+                                            .semibold()
                                             .color(hex(0xff8fb8)),
                                     );
                                     steps_box(app, ui, list, &loc.inside_pub(side, i));

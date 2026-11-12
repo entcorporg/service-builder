@@ -22,8 +22,14 @@ fn find(pattern: &str) -> Option<Vec<u8>> {
 pub fn install(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
     // The fonts egui ships come after ours: they hold the glyphs ours may lack (symbols, emoji).
-    let fallback_prop = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
-    let fallback_mono = fonts.families.get(&FontFamily::Monospace).cloned().unwrap_or_default();
+    let mut fallback_prop = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    let mut fallback_mono = fonts.families.get(&FontFamily::Monospace).cloned().unwrap_or_default();
+    // DejaVu Sans has the arrows, box drawing and most symbols that Inter and egui's fonts lack.
+    if let Some(bytes) = find("DejaVu Sans") {
+        fonts.font_data.insert("dejavu".into(), Arc::new(FontData::from_owned(bytes)));
+        fallback_prop.insert(0, "dejavu".into());
+        fallback_mono.insert(0, "dejavu".into());
+    }
     let mut add = |key: &str, pattern: &str, family: FontFamily, fallback: &[String]| {
         let Some(bytes) = find(pattern) else {
             fonts.families.entry(family).or_insert_with(|| fallback.to_vec());

@@ -11,6 +11,7 @@ use eframe::egui::{
 };
 use sb_app::Analysis;
 
+use crate::fonts::Weight;
 use crate::app::App;
 use crate::theme::{self, BORDER, CODE_BG, FAINT, MUTED, PANEL, RAISED, SERVICE, TEXT, TOPIC};
 use crate::{icons, widgets};
@@ -226,7 +227,7 @@ pub fn page(app: &mut App, ui: &mut Ui) {
                     RichText::new("FICHIERS")
                         .size(theme::XS)
                         .color(FAINT)
-                        .strong(),
+                        .semibold(),
                 );
             });
             ui.add_space(6.0);

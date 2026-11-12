@@ -58,7 +58,7 @@ pub fn page(app: &mut App, ui: &mut Ui) {
                 for (i, r) in svc.rpcs.iter().enumerate() {
                     let l = loc(Flow::Rpc(i));
                     let title = format!("RPC {}", r.name);
-                    let sub = format!("{} -> {}", r.request, r.response);
+                    let sub = format!("{} → {}", r.request, r.response);
                     match flow_card(ui, &title, &sub) {
                         Some(0) => add_step(app, &l),
                         Some(1) => rpc_form(app, si, Some(i)),
@@ -73,7 +73,7 @@ pub fn page(app: &mut App, ui: &mut Ui) {
                     let l = loc(Flow::Route(i));
                     let title = format!("Route {}", r.name);
                     let sub = format!(
-                        "{} {} · {} -> {} · {}",
+                        "{} {} · {} → {} · {}",
                         r.method.as_str().to_uppercase(),
                         r.path,
                         r.request,
