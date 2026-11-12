@@ -1,8 +1,11 @@
-//! Application logic shared by the desktop app (Tauri commands) and the `sb` CLI.
+//! Application logic shared by the desktop app (GTK) and the `sb` CLI.
 //! Free of any UI type so it can be unit-tested without a window.
 
 pub mod feedback;
 pub mod mcp;
+pub mod rename;
+pub mod scope;
+pub mod stepform;
 
 use std::fs;
 use std::path::Path;
@@ -143,7 +146,7 @@ mod tests {
     use sb_model::sample;
 
     fn temp(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("sb-tauri-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("sb-app-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir

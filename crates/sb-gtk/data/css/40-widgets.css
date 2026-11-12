@@ -1,0 +1,97 @@
+/* ---- lists ---- */
+list, list.navigation-sidebar { background: transparent; color: @text; }
+row { background: transparent; border-bottom: 1px solid alpha(@border, 0.6); }
+row:hover { background: alpha(@raised, 0.35); }
+row:selected, row:selected:hover { background: @raised; color: @text; }
+row .heading { font-weight: 600; font-size: 13px; }
+row.flow {
+  background: @panel;
+  border: 1px solid @border;
+  border-radius: 10px;
+  margin: 12px 12px 4px 12px;
+}
+row.flow:hover { background: @panel; }
+row.step {
+  background: @panel2;
+  border: 1px solid @border;
+  border-radius: 8px;
+  margin: 3px 12px;
+}
+row.step:hover { border-color: @border_strong; background: @panel2; }
+row.step label.heading { font-family: monospace; font-size: 12px; font-weight: 500; }
+row.item {
+  background: @panel;
+  border: 1px solid @border;
+  border-radius: 10px;
+  margin: 6px 12px;
+}
+row.item:hover { background: @panel; border-color: @border_strong; }
+row.error label.heading { color: @err; }
+row.warning label.heading { color: @warn; }
+
+.section-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.9px;
+  color: @faint;
+}
+
+/* ---- buttons in the lists ---- */
+row button, window.dialog button, button.flat {
+  background: @raised;
+  color: @text;
+  border: 1px solid @border;
+  border-radius: 7px;
+  box-shadow: none;
+  padding: 3px 10px;
+  min-height: 0;
+}
+row button:hover, button.flat:hover { border-color: @border_strong; background: alpha(@service, 0.18); }
+row button.destructive-action {
+  background: transparent;
+  color: @muted;
+  border-color: transparent;
+}
+row button.destructive-action:hover { background: alpha(@err, 0.15); color: @err; }
+
+/* ---- forms ---- */
+entry, spinbutton, dropdown > button, textview, textview text {
+  background: @bg;
+  color: @text;
+  border: 1px solid @border;
+  border-radius: 7px;
+  box-shadow: none;
+}
+entry:focus-within, spinbutton:focus-within { border-color: @service; }
+textview text { border: 0; }
+scrolledwindow { background: transparent; }
+window.dialog, window:not(.background) { background: @panel; }
+popover > contents { background: @panel; border: 1px solid @border; border-radius: 10px; }
+checkbutton check { background: @bg; border-color: @border_strong; }
+checkbutton check:checked { background: @accent; border-color: @accent; color: @ink; }
+switch { background: @raised; border: 1px solid @border; }
+switch:checked { background: @accent; }
+label.error { color: @err; }
+
+/* ---- code ---- */
+textview.font-monospace, textview.font-monospace text { font-family: monospace; font-size: 12px; background: @bg; }
+paned > separator { background: @border; min-width: 1px; }
+
+/* ---- status line ---- */
+.statusbar {
+  background: @panel;
+  border-top: 1px solid @border;
+  color: @muted;
+  font-size: 12px;
+}
+.card { background: @panel; border: 1px solid @border; border-radius: 10px; padding: 8px 12px; }
+
+.pill { padding: 4px 10px; border-radius: 999px; }
+.pill label { font-weight: 600; font-size: 12px; }
+.pill.ok { background: alpha(@ok, 0.1); }
+.pill.ok label { color: @ok; }
+.pill.warning { background: alpha(@warn, 0.1); }
+.pill.warning label { color: @warn; }
+.pill.error { background: alpha(@err, 0.12); }
+.pill.error label { color: @err; }
+

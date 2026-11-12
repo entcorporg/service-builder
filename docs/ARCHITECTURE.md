@@ -4,10 +4,10 @@
 
 ```mermaid
 flowchart LR
-  subgraph app["Application de bureau (Tauri)"]
-    UI["ui/ — React, xyflow, zustand"] -- "invoke" --> CMD["src-tauri — commandes"]
+  subgraph app["Application de bureau (GTK 4)"]
+    UI["crates/sb-gtk — fenêtre GTK 4"]
   end
-  CMD --> APP["sb-app<br/>analyze · open · save · export"]
+  UI --> APP["sb-app<br/>analyze · open · save · export"]
   CLI["sb (CLI)"] --> APP
   APP --> GEN["sb-codegen<br/>.proto · Rust · Cargo · compose"]
   APP --> MODEL["sb-model<br/>modèle · typage · validation"]
@@ -17,11 +17,10 @@ flowchart LR
 
 | Crate / dossier | Rôle |
 | --- | --- |
-| `crates/sb-model` | Le document : `Project`, `Service`, `Topic`, `Message`, `Step`… (JSON camelCase), règles de nommage, typage léger des mappings, validation avec diagnostics. Aucune dépendance à Tauri ni au générateur. |
+| `crates/sb-model` | Le document : `Project`, `Service`, `Topic`, `Message`, `Step`… (JSON camelCase), règles de nommage, typage léger des mappings, validation avec diagnostics. Aucune dépendance à l'interface ni au générateur. |
 | `crates/sb-codegen` | Du modèle vers un workspace Cargo : `.proto`, crate `contracts`, crate `runtime` embarquée, un crate par service, `docker-compose.yml`. Pur et déterministe. |
-| `crates/sb-app` | Services applicatifs partagés par l'app et le CLI `sb` : `analyze` (validation + génération + rustfmt), ouvrir/sauver, exporter. |
-| `src-tauri` | Fine couche de commandes Tauri au-dessus de `sb-app`. |
-| `ui/` | L'éditeur. Tout ce qui est « intelligent » (validation, génération) est appelé côté Rust. |
+| `crates/sb-app` | Services applicatifs partagés par l'app et le CLI `sb` : `analyze` (validation + génération + rustfmt), ouvrir/sauver, exporter, serveur MCP, et la logique d'édition sans fenêtre : formulaires d'étapes (`stepform`), renommages en cascade (`rename`), portée des variables (`scope`). |
+| `crates/sb-gtk` | L'application GTK 4 (gtk4-rs) au-dessus de `sb-app` : fenêtre (`uis/`), thème (`data/css/*.css`), mise à jour (`updater.rs`). |
 
 ## Le modèle de projet
 
@@ -82,8 +81,8 @@ qu'une liste.
 Le Rust brut n'est pas typé : c'est l'échappatoire. Sa syntaxe est tout de même vérifiée avec `syn`, avec le chemin
 exact de l'étape fautive.
 
-`ui/src/scope.ts` reprend ces règles pour **proposer** les champs compatibles ; le validateur Rust reste l'autorité
-et un test (`scope.test.ts`) fixe la parité sur les cas importants.
+`sb_app::scope` reprend ces règles pour **lister** les variables lisibles à une étape (dans les formulaires) ; le
+validateur reste l'autorité.
 
 ### Diagnostics
 
@@ -735,29 +734,28 @@ sur mesure vit dans les étapes *Code Rust* du projet.
 
 ## L'application
 
-- **Canvas** : le graphe xyflow est *calculé* à partir du projet. Les positions sont stockées dans le projet (on
-  sauve au lâcher du nœud) ; les tailles mesurées par xyflow sont conservées d'un calcul au suivant, sinon la minimap
-  et le `fitView` les perdent.
-- **État** : un store zustand + immer. Les composants éditent le projet avec `edit(draft => …)` ; les renommages
-  (message, topic, service, RPC, champ) sont des fonctions de cascade dans `ui/src/model.ts`.
-- **Boucle d'analyse** : après chaque modification (anti-rebond 250 ms), l'UI appelle `analyze(project)`. La réponse
-  contient les diagnostics et, si le projet est valide, les fichiers générés. Les réponses arrivées dans le
-  désordre sont ignorées. Quand le projet est invalide, la dernière version valide du code reste affichée,
-  marquée comme périmée.
-- **Styles (migration vers Tailwind en cours)** : `ui/src/app.css` est le point d'entrée. Les couches CSS vont de la
-  moins à la plus prioritaire : `theme`, `xyflow`, `legacy` (l'ancien `styles.css`), `utilities`. Un utilitaire bat donc
-  toujours une règle héritée (y compris `input`, `button`…), et aucune règle héritée ne peut défaire un utilitaire. Le
-  `preflight` de Tailwind n'est pas chargé : les vues non migrées comptent sur les styles par défaut du navigateur ; il
-  entrera avec la dernière vue. Les tailles sont en px (la racine fait 13 px) et la palette pointe sur les variables de
-  `:root` (`bg-panel`, `text-muted`, `border-line`, `text-ok`…), qui deviendront les jetons du thème à la fin.
-  Règles pour migrer un composant : remplacer **toutes** ses classes héritées (une règle héritée qui subsiste est
-  invisible derrière l'utilitaire, mais continue de s'appliquer à d'autres éléments), traduire les règles une à une
-  (`text-xs` = 11 px, `text-sm` = 12 px), supprimer les règles CSS devenues inutiles, et remplacer les sélecteurs e2e
-  qui visaient ses classes par des rôles ARIA ou `data-testid`. Un test (`no-utility-clash`) échoue si une classe de
-  `styles.css` s'écrit comme un utilitaire (`.inline`, `.block`…) : Tailwind scanne tout le code et générerait cet
-  utilitaire à partir de l'ancien balisage. Vérification de non-régression visuelle : captures des mêmes scénarios
-  avant / après (un worktree de `main` sert de référence) et comparaison pixel à pixel.
-- **Glisser-déposer** : HTML5 natif depuis la palette. Vérifié dans WebKitGTK (la vraie fenêtre Tauri).
+La fenêtre est en GTK 4 (`crates/sb-gtk`, dossier `uis/`). Tout ce qui est « intelligent » reste dans `sb-app` et se
+teste sans fenêtre.
+
+- **Canvas** (`canvas.rs`, graphe pur dans `graph.rs`) : le graphe est *calculé* à partir du projet (producteurs et
+  étapes `Publish` pour les flèches orange, consommateurs pour les vertes, étapes `CallRpc` pour les appels). Les
+  positions sont stockées dans le projet et écrites au lâcher du nœud (une modification dans l'historique). Une
+  flèche tracée depuis la poignée de sortie d'un nœud édite le projet (`graph::connect`) : producteur, consommateur ou mail.
+- **État et historique** (`edit.rs`) : toute modification passe par `edit(ui, |p| …)`, qui garde l'historique
+  (annuler/rétablir, 100 niveaux), fige les numéros de champs et marque le projet comme modifié. Fermer ou ouvrir avec des
+  modifications demande quoi en faire. Le fichier est rechargé quand un autre programme (un client MCP) le modifie,
+  sauf si des modifications locales sont en cours.
+- **Formulaires** (`form.rs`, `steps.rs`) : un formulaire modal générique. Ceux des étapes sont dérivés du JSON Schema du
+  modèle (`sb_app::stepform`) : les ~35 types d'étapes sont couverts sans code propre, et un nouveau champ du modèle
+  apparaît seul. Un test fait faire l'aller-retour formulaire → étape à toutes les étapes des exemples.
+- **Renommages** (`sb_app::rename`) : message, topic, service, RPC et table se renomment avec toutes leurs références
+  (les étapes sont parcourues en JSON, en ne touchant que les champs qui portent vraiment ce genre de nom). Un test
+  vérifie, sur les deux exemples, qu'un renommage ne crée aucune erreur de validation.
+- **Boucle d'analyse** : après chaque modification, `analyze(project)` tourne hors du fil graphique
+  (`gio::spawn_blocking`). Les réponses arrivées dans le désordre sont ignorées (compteur de génération).
+- **Thème** : `data/css/*.css`, chargé au démarrage, reprend les couleurs de l'ancienne interface web (fond bleu nuit,
+  accent orange). `SB_SCREENSHOT=<dossier>` écrit une capture PNG par onglet (peinte par GTK, sans outil externe) :
+  c'est ainsi que le rendu se vérifie.
 
 ### Serveur MCP
 
@@ -793,18 +791,18 @@ jamais l'appel : on ne le réécrit pas). `submit_report` valide (1 à 5 suggest
 attente au plus) et range le rapport. Pas de jeton GitHub ni d'envoi automatique, pour deux raisons : un rapport écrit
 par un agent peut contenir, malgré la consigne, un détail du projet, et une issue est publique. L'app construit donc
 une URL « new issue » pré-remplie (corps tronqué pour tenir dans la limite d'URL de GitHub) et l'ouvre dans le
-navigateur par `tauri-plugin-opener`, dont la capacité est limitée aux pages `issues/new` du dépôt.
+navigateur par `gtk::UriLauncher`, limité aux pages du dépôt.
 
 ### Mise à jour automatique
 
-Le plugin `tauri-plugin-updater` lit `latest.json` sur la dernière release GitHub et vérifie la signature minisign
-du paquet avec la clé publique de `tauri.conf.json` (`plugins.updater.pubkey`) : une release non signée par notre
-clé est refusée. Côté UI, `bridge.ts` garde le handle renvoyé par `check()` (seul moyen d'installer ce qu'il a trouvé),
-`actions.ts` porte `checkForUpdate` (au lancement, silencieux ; au clic, bavard) et `installUpdate`, et l'état
-(`idle | checking | available | installing`) vit dans le store.
+`crates/sb-gtk/src/updater.rs` interroge `releases/latest` de l'API GitHub et compare le tag à la version du binaire.
+Une release n'est installable que si elle porte un `.AppImage` **et** son `.AppImage.minisig` ; le téléchargement est
+vérifié avec la clé publique minisign du fichier (`PUBLIC_KEY`, la même que celle des builds précédents) avant de
+remplacer `$APPIMAGE` (écriture à côté puis `rename`, donc atomique) et de relancer. Hors AppImage (`.deb`,
+`cargo run`), l'application propose seulement d'ouvrir la page de la release. La recherche tourne hors du fil
+graphique (`gio::spawn_blocking`), la progression passe par un `AtomicI32` lu par un timer.
 
-Les versions sont écrites à cinq endroits (`Cargo.toml`, `Cargo.lock`, `tauri.conf.json`, deux `package.json`) ;
-`scripts/release.mjs` les change ensemble et refuse de partir d'un dépôt où elles divergent. Le job `bump` de la CI
+La version est écrite dans `Cargo.toml` et suivie par `Cargo.lock` : `scripts/release.mjs` les change ensemble. Le job `bump` de la CI
 s'exécute sur le sommet de `main` et non sur le commit testé (une release précédente a pu le déplacer) ; le job
 `publish` repart du tag, donc « Re-run failed jobs » relance la construction sans réincrémenter.
 
@@ -812,9 +810,7 @@ s'exécute sur le sommet de `main` et non sur le commit testé (une release pré
 
 1. **Exécuter pour de bon** : bouton « Lancer » (compose + `cargo run` des services) avec logs, et un test d'intégration
    du code généré contre un broker.
-2. Tracer les flèches à la souris (service → topic crée une étape *Publier*, topic → service un consumer).
-3. Annuler / rétablir (le modèle est un arbre immuable via immer : les patches sont à portée de main).
-4. Modèles prêts à l'emploi : saga avec compensation, CQRS, inbox (déduplication côté consumer), entités et requêtes métier.
-5. Évolution de schéma : détecter les changements incompatibles par rapport à une version publiée.
-6. Autres cibles de sérialisation (Avro/JSON + schema registry), persistance (SQL), observabilité (OpenTelemetry).
-7. Internationalisation de l'interface.
+2. Modèles prêts à l'emploi : saga avec compensation, CQRS, inbox (déduplication côté consumer), entités et requêtes métier.
+3. Évolution de schéma : détecter les changements incompatibles par rapport à une version publiée.
+4. Autres cibles de sérialisation (Avro/JSON + schema registry), persistance (SQL), observabilité (OpenTelemetry).
+5. Internationalisation de l'interface.

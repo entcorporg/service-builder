@@ -1,0 +1,46 @@
+/* ---- inspector ---- */
+.inspector-empty { padding-bottom: 8px; }
+.inspector-empty label { color: @muted; }
+label.inspector-title { color: @text; font-size: 15px; font-weight: 700; }
+.section { padding: 14px 0 6px; }
+.section + .section { border-top: 1px solid @border; margin-top: 8px; }
+.section-head { font-size: 11px; font-weight: 700; letter-spacing: 0.9px; color: @muted; }
+.row-label { color: @muted; }
+.row-hint, label.empty { color: @faint; font-size: 11px; }
+label.empty { font-size: 12px; padding: 4px 8px; }
+.steps-title { color: @faint; font-size: 11px; font-weight: 600; letter-spacing: 0.9px; margin-top: 6px; }
+.card { background: @panel2; border: 1px solid @border; border-radius: 10px; padding: 0; margin-bottom: 2px; }
+.card.rpc { border-left: 3px solid @service; }
+.card.consumer { border-left: 3px solid @ok; }
+button.card-toggle { background: transparent; border: 0; box-shadow: none; padding: 9px 6px; min-height: 0; }
+button.card-toggle:hover { background: alpha(@raised, 0.4); }
+.card-name { font-weight: 700; }
+.step-summary { color: @muted; font-size: 12px; }
+.card-body { padding: 4px 12px 12px; border-top: 1px solid @border; background: alpha(@code_bg, 0.45); }
+button.link-btn { background: transparent; border: 0; box-shadow: none; color: @service; padding: 4px 0; min-height: 0; }
+button.link-btn:hover { text-decoration: underline; background: transparent; }
+button.danger-btn {
+  background: transparent; border: 1px solid alpha(@err, 0.35); color: @err; border-radius: 8px; padding: 6px 10px; box-shadow: none;
+}
+button.danger-btn:hover { background: alpha(@err, 0.1); }
+button.icon-btn.danger:hover { background: alpha(@err, 0.15); }
+button.route-open {
+  background: @panel2; border: 1px solid @border; border-radius: 8px; box-shadow: none; padding: 7px 10px; min-height: 0;
+}
+button.route-open:hover { border-color: @accent; }
+.inspector entry, .inspector spinbutton { min-height: 28px; padding: 0 8px; }
+.inspector spinbutton text { padding: 0; min-height: 0; }
+.inspector dropdown > button { min-height: 0; padding: 5px 8px; }
+
+/* A number field is a plain input in the web version (its arrows only show on hover, and nothing here uses them). */
+spinbutton > button { min-width: 0; min-height: 0; padding: 0; margin: 0; border: 0; opacity: 0; -gtk-icon-size: 0; }
+/* `label { color: @text }` would win over the colour of the button around it. */
+button.link-btn label { color: @service; }
+/* ---- schemas ---- */
+.kind-hint { color: @muted; font-size: 12px; margin-bottom: 0; }
+.fields entry, .fields dropdown > button { min-height: 0; padding: 4px 8px; }
+.fields entry { min-height: 26px; padding: 0 8px; }
+.fields { margin: 10px 0 4px; }
+.field-tag { color: @faint; font-family: monospace; font-size: 10.5px; }
+checkbutton.check-mono label { color: @muted; font-family: monospace; font-size: 11px; font-weight: 600; }
+.rule-chip { background: @panel2; border: 1px solid @border; border-radius: 6px; padding: 2px 2px 2px 8px; font-size: 12px; }

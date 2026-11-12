@@ -46,9 +46,6 @@ describe('bump', () => {
       fs.writeFileSync(path.join(dir, file), content)
     }
     put('Cargo.toml', '[workspace]\nmembers = ["a"]\n\n[workspace.package]\nversion = "0.1.0"\nedition = "2024"\n\n[workspace.dependencies]\nserde = { version = "1" }\n')
-    put('src-tauri/tauri.conf.json', '{\n  "productName": "X",\n  "version": "0.1.0",\n  "identifier": "x"\n}\n')
-    put('package.json', '{\n  "name": "x",\n  "version": "0.1.0"\n}\n')
-    put('ui/package.json', '{\n  "name": "ui",\n  "version": "0.1.0",\n  "dependencies": { "a": "^0.1.0" }\n}\n')
     put(
       'Cargo.lock',
       'version = 4\n\n[[package]]\nname = "a"\nversion = "0.1.0"\ndependencies = [\n "serde",\n]\n\n[[package]]\nname = "serde"\nversion = "0.1.0"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "abc"\n\n[[package]]\nname = "b"\nversion = "0.1.0"\n',
@@ -61,8 +58,6 @@ describe('bump', () => {
     assert.equal(bump('normal', dir), '0.2.0')
     assert.equal(currentVersion(dir), '0.2.0')
     assert.match(read('Cargo.toml'), /\[workspace\.package\]\nversion = "0\.2\.0"\nedition/)
-    assert.match(read('src-tauri/tauri.conf.json'), /"version": "0\.2\.0",\n  "identifier"/)
-    assert.match(read('ui/package.json'), /"version": "0\.2\.0",\n  "dependencies": \{ "a": "\^0\.1\.0" \}/)
     fs.rmSync(dir, { recursive: true })
   })
 
@@ -83,13 +78,6 @@ describe('bump', () => {
     assert.equal(currentVersion(dir), '0.1.0')
     assert.match(read('Cargo.lock'), /name = "a"\nversion = "0\.1\.0"/)
     assert.throws(() => setVersion('latest', dir))
-    fs.rmSync(dir, { recursive: true })
-  })
-
-  it('refuses to bump when the files already disagree', () => {
-    const { dir } = fixture()
-    fs.writeFileSync(path.join(dir, 'package.json'), '{ "version": "0.3.0" }')
-    assert.throws(() => bump('minor', dir), /disagree/)
     fs.rmSync(dir, { recursive: true })
   })
 })

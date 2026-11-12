@@ -5,7 +5,7 @@ vous dessinez des services, des topics Kafka, des schémas protobuf et la logiqu
 handler avec des blocs ; l'application génère un workspace Cargo complet
 (**gRPC** avec tonic pour les RPC, **Kafka** avec rdkafka pour les événements).
 
-Application de bureau Linux : **Tauri 2** (Rust) + **React** (xyflow pour le canvas).
+Application de bureau Linux : **GTK 4** (gtk4-rs). 
 
 ![Architecture et inspecteur](docs/screenshots/architecture.png)
 
@@ -34,16 +34,12 @@ Ce qui est vérifié en continu pendant que vous éditez (et qui bloque l'export
 
 ## Démarrer
 
-Prérequis : Rust stable, Node 22, pnpm 10. Sous Ubuntu/Debian, les bibliothèques de Tauri :
+Prérequis : Rust stable. Sous Ubuntu/Debian, GTK 4 : `sudo apt install libgtk-4-dev pkg-config build-essential`.
+Node 22 n'est utile que pour les scripts de release (`scripts/`).
 
 ```sh
-sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev \
-  librsvg2-dev libssl-dev pkg-config build-essential
-```
-
-```sh
-pnpm install
-pnpm tauri dev      # lance l'application avec rechargement à chaud
+cargo run -p service-builder     # lance l'application
+SB_SCREENSHOT=/tmp/captures cargo run -p service-builder   # écrit une capture PNG par onglet, puis quitte
 ```
 
 Un projet d'exemple (Orders → Payments → Notifications) est chargé au démarrage.
@@ -87,18 +83,18 @@ lancement et signalée quand on clique. Sous Linux, seul l'AppImage se met à jo
    mention échoue ; si plusieurs mentions coexistent, la plus forte l'emporte.
 2. **Un push sur `main` avec mention incrémente la version**, une fois tous les tests passés : `0.1.0` + `[normal]`
    donne `0.2.0` (les nombres à droite repartent à zéro). La CI écrit la nouvelle version dans `Cargo.toml`,
-   `Cargo.lock`, `tauri.conf.json` et les deux `package.json`, commite `chore(release): vX.Y.Z [skip ci]`, pose le
-   tag `vX.Y.Z`, puis construit les paquets signés et publie la release GitHub avec le `latest.json` que lit l'application.
+   `Cargo.lock`, commite `chore(release): vX.Y.Z [skip ci]`, pose le
+   tag `vX.Y.Z`, puis construit l'AppImage (`scripts/appimage.sh`), la signe (minisign) et publie la release GitHub que lit l'application.
    Sans mention, rien n'est publié.
 
 Réglage unique, à faire une fois : ajouter la clé privée de signature aux secrets du dépôt
-(`gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/service-builder.key`). La clé publique correspondante est dans
-`src-tauri/tauri.conf.json` ; sans la clé privée, les mises à jour ne peuvent pas être signées. Si `main` est protégée,
+(`gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/service-builder.key`, nom conservé pour garder la même clé). La clé publique correspondante est dans
+`crates/sb-gtk/src/updater.rs` ; sans la clé privée, les mises à jour ne peuvent pas être signées. Si `main` est protégée,
 autorisez `github-actions[bot]` à y pousser le commit de version.
 
 ### Où tourne la CI
 
-Les contrôles (formatage, clippy, tests, code généré, UI, e2e) tournent sur un **runner auto-hébergé** (libellé
+Les contrôles (formatage, clippy, tests, code généré) tournent sur un **runner auto-hébergé** (libellé
 `service-builder`) : plus rapide, et sans minutes GitHub. Seule la release (`bump`, `publish`) reste sur un runner
 GitHub, pour être construite dans un environnement propre et parce que c'est là que vit la clé de signature. Une PR
 venue d'un **fork** ne touche jamais le runner local : elle retombe sur un runner GitHub. Chaque commit d'une PR n'est
@@ -107,7 +103,7 @@ testé qu'une fois (pas de double exécution push + PR), et seul `main` est test
 Installer le runner sur une machine : télécharger le runner officiel, puis
 `./config.sh --url https://github.com/<org>/service-builder --token <jeton> --labels service-builder` et `./run.sh`
 (le jeton vient de `gh api -X POST repos/<org>/service-builder/actions/runners/registration-token`). La machine
-doit avoir Rust stable (rustfmt, clippy), Node 22, pnpm, cmake, les bibliothèques de Tauri et Google Chrome ; son
+doit avoir Rust stable (rustfmt, clippy), Node 22, cmake et GTK 4 (`libgtk-4-dev`) ; son
 fichier `.env` doit contenir le `PATH` qui les trouve. Pour qu'il survive à la session, un service `systemd --user`
 suffit (`ExecStart=<dossier du runner>/run.sh`, `systemctl --user enable --now …`). Hors ligne, les jobs attendent :
 désenregistrer le runner et remettre `ubuntu-24.04` dans `runs-on` suffit pour revenir aux runners GitHub.
@@ -148,9 +144,7 @@ cargo run -p sb-app --bin sb -- mcp projet.sb.json        # serveur MCP sur stdi
 ## Tests
 
 ```sh
-cargo test --workspace                 # modèle, validation, générateur, logique applicative
-pnpm --dir ui test                     # logique TypeScript (typage, renommages en cascade)
-cargo build -p sb-app --bin sb && pnpm --dir ui e2e   # scénarios Playwright, avec le vrai code Rust
+cargo test --workspace                 # modèle, validation, générateur, logique applicative (formulaires d'étapes, renommages, portée des variables), mise à jour
 node --test scripts/release.test.mjs   # détection du type de mise à jour et incrément de version
 ```
 
@@ -177,8 +171,16 @@ La CI le fait.
   (`input.ancien_nom`) : la validation les signale.
 - Les événements sont du protobuf brut, sans schema registry.
 - L'interface est en français uniquement.
-- Les dialogues de fichiers natifs (GTK) n'ont pas été exercés automatiquement (les tests simulent les dialogues) ;
-  `pnpm tauri build` (paquets `.deb` / AppImage) n'a pas été essayé. L'application en mode `tauri dev`
-  a été lancée et pilotée dans un serveur X virtuel.
+- L'interface GTK 4 édite tout le projet : architecture (canvas, flèches à tracer depuis la poignée de sortie d'un
+  nœud), services (standard, mail, temps réel), messages et leurs champs (règles et sources des schémas d'API), topics,
+  flows (RPC, routes, consommateurs, jobs, avec étapes et branches) et tables SQL (colonnes, uniques, index, clés
+  étrangères). Annuler/rétablir (Ctrl+Z / Ctrl+Maj+Z), enregistrer (Ctrl+S), ouvrir (Ctrl+O). Les formulaires
+  d'étapes sont générés depuis le JSON Schema du modèle (`sb_app::stepform`) : chaque champ est un texte, les
+  expressions s'écrivent `a.b`, `"texte"`, `42`, `now` ou `rust: code`, et les variables disponibles sont listées.
+  Renommer un service, un message, un topic, un RPC ou une table met à jour toutes ses références
+  (`sb_app::rename`) ; les noms de colonnes et de contraintes ne se changent pas après création.
+- Les dialogues, le glisser à la souris, l'AppImage et la mise à jour automatique n'ont pas été exercés de bout en
+  bout (seule la logique pure est testée : `updater.rs`, `stepform.rs`, `rename.rs`, `scope.rs`, le graphe et
+  l'adressage des étapes). `SB_SCREENSHOT=<dossier>` permet de vérifier le rendu de chaque onglet.
 
 La conception et la feuille de route sont dans [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

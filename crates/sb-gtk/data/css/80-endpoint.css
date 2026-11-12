@@ -1,0 +1,290 @@
+/* ---- API page (endpoint configurator) ---- */
+.ep-head {
+  background: @panel;
+  border-bottom: 1px solid @border;
+  padding: 10px 14px;
+}
+
+button.ep-back {
+  background: @panel2;
+  border: 1px solid @border;
+  border-radius: 8px;
+  box-shadow: none;
+  padding: 6px 10px;
+  min-height: 0;
+}
+
+button.ep-back:hover {
+  border-color: @accent;
+}
+
+.ep-method>button {
+  font-weight: 700;
+}
+
+entry.ep-path {
+  font-size: 14px;
+}
+
+label.ep-field-label {
+  font-size: 10px;
+  letter-spacing: 0.6px;
+  color: @faint;
+}
+
+.ep-problems {
+  background: alpha(@err, 0.06);
+  border-bottom: 1px solid @border;
+  padding: 8px 14px;
+  font-size: 12px;
+}
+
+label.ep-err {
+  color: #ffc9d0;
+}
+
+label.ep-warn {
+  color: @warn;
+}
+
+.ep-logic {
+  border-right: 1px solid @border;
+}
+
+.ep-col {
+  padding: 16px 18px 40px;
+}
+
+label.ep-col-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.9px;
+  color: @faint;
+}
+
+label.ep-hint {
+  color: @muted;
+  font-size: 12px;
+}
+
+.ep-card {
+  background: @panel;
+  border: 1px solid @border;
+  border-radius: 12px;
+  padding: 12px 14px 14px;
+}
+
+label.ep-card-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.9px;
+  color: @muted;
+}
+
+label.status-code {
+  font-family: monospace;
+  color: @ok;
+  font-weight: 700;
+}
+
+label.ep-sub {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  color: @faint;
+  margin-top: 8px;
+}
+
+label.field-tag {
+  color: @faint;
+  font-family: monospace;
+  font-size: 10.5px;
+  min-width: 18px;
+}
+
+label.origin {
+  font-size: 10px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: alpha(@service, 0.14);
+  color: @service;
+}
+
+.json-preview {
+  border: 1px solid @border;
+  border-radius: 8px;
+  background: @code_bg;
+}
+
+.json-title {
+  padding: 5px 10px;
+  font-size: 11px;
+  color: @muted;
+  border-bottom: 1px solid @border;
+}
+
+label.json-body {
+  padding: 10px 12px;
+  font-family: monospace;
+  font-size: 12px;
+  color: #9be3b4;
+}
+
+button.add-step-btn {
+  background: transparent;
+  border: 1px dashed @border_strong;
+  border-radius: 10px;
+  box-shadow: none;
+  padding: 7px;
+  color: @muted;
+}
+
+button.add-step-btn:hover {
+  border-color: @accent;
+  background: alpha(@accent, 0.06);
+}
+
+/* ---- step cards ---- */
+row.step-row {
+  background: transparent;
+  border: 0;
+  padding: 2px 0;
+}
+
+row.step-row:hover {
+  background: transparent;
+}
+
+.step-card {
+  background: @panel;
+  border: 1px solid @border;
+  border-radius: 10px;
+  padding: 4px 6px 4px 8px;
+}
+
+.step-card:hover {
+  border-color: @border_strong;
+}
+
+.step-icon {
+  min-width: 24px;
+  min-height: 24px;
+  border-radius: 7px;
+}
+
+.step-icon.si-gray {
+  background: alpha(#8f97bd, 0.18);
+}
+
+.step-icon.si-violet {
+  background: alpha(#b482ff, 0.18);
+}
+
+.step-icon.si-orange {
+  background: alpha(#ffb04a, 0.18);
+}
+
+.step-icon.si-blue {
+  background: alpha(#7886ff, 0.2);
+}
+
+.step-icon.si-pink {
+  background: alpha(#ff66a0, 0.17);
+}
+
+.step-icon.si-green {
+  background: alpha(#3ecf8e, 0.17);
+}
+
+.step-icon.si-red {
+  background: alpha(#ff6678, 0.15);
+}
+
+.step-icon.si-salmon {
+  background: alpha(#ff8c5a, 0.16);
+}
+
+.step-icon.si-cyan {
+  background: alpha(#78dcff, 0.15);
+}
+
+.step-icon.si-teal {
+  background: alpha(#4ecdc4, 0.15);
+}
+
+.step-icon.si-yellow {
+  background: alpha(#ffc44d, 0.15);
+}
+
+button.step-open {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  padding: 5px 6px;
+  min-height: 0;
+}
+
+button.step-open:hover {
+  background: alpha(@raised, 0.4);
+}
+
+label.step-kind {
+  font-weight: 700;
+}
+
+label.branch-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  color: #ff8fb8;
+  margin-top: 4px;
+}
+
+label.assignment-type {
+  color: @faint;
+  font-size: 10.5px;
+}
+
+.step-card {
+  padding: 0;
+}
+
+.step-card .step-open {
+  padding: 8px 8px;
+}
+
+.step-body {
+  padding: 4px 12px 12px;
+  border-top: 1px solid @border;
+  background: alpha(@code_bg, 0.45);
+  border-radius: 0 0 10px 10px;
+}
+
+label.step-field {
+  font-size: 11px;
+  color: @faint;
+  letter-spacing: 0.4px;
+  margin-top: 2px;
+}
+
+textview.step-text {
+  min-height: 70px;
+  padding: 4px;
+}
+
+.branch {
+  border-left: 2px solid alpha(#ff66a0, 0.4);
+  padding-left: 10px;
+  margin-left: 2px;
+}
+
+.step-body label.empty {
+  padding: 2px 0;
+}/* A cookie of a response: one card per cookie, as in the web version. */
+.cookie-card { background: @panel2; border: 1px solid @border; border-radius: 10px; padding: 8px 10px; }
+/* The blocks that can be added: a grid of two columns under the dashed button, as in the web version. */
+.widget-grid { margin-top: 0; }
+button.widget { background: @panel2; border: 1px solid @border; border-radius: 9px; box-shadow: none; padding: 8px 10px; min-height: 0; }
+button.widget:hover { border-color: @accent; background: @raised; }
+label.widget-name { font-weight: 700; }
+label.widget-hint { color: @muted; font-size: 10.5px; line-height: 1.1; }

@@ -75,12 +75,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           clean: ${{ runner.environment == 'github-hosted' }}
-      - name: Tauri system dependencies
+      - name: GTK 4 system dependencies
         if: runner.environment == 'github-hosted'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
-            libayatana-appindicator3-dev librsvg2-dev libssl-dev pkg-config build-essential
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev pkg-config build-essential
       - uses: dtolnay/rust-toolchain@stable
         if: runner.environment == 'github-hosted'
         with:
@@ -147,52 +146,11 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-realtime-target
           REALTIME_TEST_DRAGONFLY_URL: redis://localhost:6379
 
-  ui:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          clean: ${{ runner.environment == 'github-hosted' }}
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: ${{ runner.environment == 'github-hosted' && 'pnpm' || '' }}
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm --dir ui typecheck
-      - run: pnpm --dir ui test
-      - run: pnpm --dir ui build
-
-  e2e:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          clean: ${{ runner.environment == 'github-hosted' }}
-      - uses: dtolnay/rust-toolchain@stable
-        if: runner.environment == 'github-hosted'
-      - uses: Swatinem/rust-cache@v2
-        if: runner.environment == 'github-hosted'
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: ${{ runner.environment == 'github-hosted' && 'pnpm' || '' }}
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm --dir ui exec playwright install --with-deps chromium
-        if: runner.environment == 'github-hosted'
-      - run: cargo build -p sb-app --bin sb
-      - run: pnpm --dir ui e2e
-        env:
-          SB_CHROMIUM: ${{ runner.environment == 'self-hosted' && '/usr/bin/google-chrome' || '' }}
-
   # Rule 2 — a push to main that carries a mention raises the version (0.1.0 + [normal] = 0.2.0),
   # commits it and tags it. The commit made with GITHUB_TOKEN does not start another run.
   bump:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.update-type.outputs.level != ''
-    needs: [update-type, scripts, rust, generated-workspace, ui, e2e]
+    needs: [update-type, scripts, rust, generated-workspace]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -220,7 +178,7 @@ jobs:
           git push origin main "v$version"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
 
-  # Builds the signed bundles and publishes the GitHub release whose latest.json the app polls.
+  # Builds the AppImage, signs it, and publishes the GitHub release the app polls for updates.
   publish:
     needs: [update-type, bump]
     runs-on: ubuntu-24.04
@@ -230,27 +188,36 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.bump.outputs.tag }}
-      - name: Tauri system dependencies
+      - name: GTK 4 system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
-            libayatana-appindicator3-dev librsvg2-dev libssl-dev pkg-config build-essential patchelf
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev pkg-config build-essential \
+            libfuse2t64 file desktop-file-utils librsvg2-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - uses: tauri-apps/tauri-action@v0
+      - run: cargo build --release -p service-builder
+      - name: AppImage
+        run: scripts/appimage.sh "${{ needs.bump.outputs.tag }}"
+      - name: Sign
+        # The key is the one of the earlier releases (a base64 minisign secret key file): the public key in
+        # crates/sb-gtk/src/updater.rs is unchanged, so installed builds keep updating.
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Signs the update bundles; the matching public key is in src-tauri/tauri.conf.json.
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          tagName: ${{ needs.bump.outputs.tag }}
-          releaseName: Service Builder ${{ needs.bump.outputs.tag }}
-          releaseBody: "Mise à jour ${{ needs.update-type.outputs.level }}. Le détail est dans l’historique des commits."
-          includeUpdaterJson: true
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          cargo install rsign2 --locked
+          umask 077
+          printf '%s' "$KEY" | base64 -d > "$RUNNER_TEMP/minisign.key"
+          for image in dist/*.AppImage; do
+            printf '%s\n' "$PASSWORD" | rsign sign -s "$RUNNER_TEMP/minisign.key" -x "$image.minisig" "$image"
+          done
+          rm -f "$RUNNER_TEMP/minisign.key"
+      - name: Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.bump.outputs.tag }}
+          LEVEL: ${{ needs.update-type.outputs.level }}
+        run: |
+          gh release create "$TAG" dist/*.AppImage dist/*.AppImage.minisig \
+            --title "Service Builder $TAG" \
+            --notes "Mise à jour $LEVEL. Le détail est dans l’historique des commits."

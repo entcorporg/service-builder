@@ -1,0 +1,16 @@
+/* ---- code view ---- */
+.code-tree { background: @panel; border-right: 1px solid @border; padding: 10px 6px; }
+button.tree-row {
+  background: transparent; border: 0; border-radius: 6px; box-shadow: none; padding: 3px 8px 2px 4px; min-height: 0; color: @muted;
+}
+button.tree-row label { color: @muted; }
+button.tree-row:hover { background: @raised; }
+button.tree-row:hover label { color: @text; }
+button.tree-row.dir label { color: @text; }
+button.tree-row.leaf.active { background: alpha(@service, 0.18); }
+button.tree-row.leaf.active label { color: #fff; }
+.code-main { background: @code_bg; }
+.code-head { border-bottom: 1px solid @border; padding: 7px 14px; }
+label.code-path { color: @muted; font-family: monospace; font-size: 12px; }
+textview.code, textview.code text { background: @code_bg; color: #d6d9ee; font-size: 12.5px; }
+

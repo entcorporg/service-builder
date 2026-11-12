@@ -40,13 +40,9 @@ export function bumpVersion(version, level) {
 
 // Each version lives in one place per file; `read` extracts it and `write` replaces it.
 const WORKSPACE_VERSION = /(\[workspace\.package\][^[]*?\nversion = ")([^"]+)(")/
-const JSON_VERSION = /("version": ")([^"]+)(")/
 
 const FILES = [
   { file: 'Cargo.toml', pattern: WORKSPACE_VERSION },
-  { file: 'src-tauri/tauri.conf.json', pattern: JSON_VERSION },
-  { file: 'package.json', pattern: JSON_VERSION },
-  { file: 'ui/package.json', pattern: JSON_VERSION },
 ]
 
 function readVersion(dir, { file, pattern }) {

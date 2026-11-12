@@ -1,0 +1,166 @@
+/* ---- toolbar ---- */
+.toolbar {
+  background: @panel;
+  border-bottom: 1px solid @border;
+  min-height: 52px;
+  padding: 0 12px;
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 14px;
+}
+
+entry.project-name {
+  background: transparent;
+  border: 1px solid transparent;
+  font-weight: 600;
+  padding: 4px 8px;
+  min-height: 0;
+}
+
+entry.project-name:hover,
+entry.project-name:focus-within {
+  background: @bg;
+  border-color: @border;
+}
+
+.dirty {
+  color: @accent;
+  font-size: 11px;
+}
+
+.file {
+  color: @faint;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+/* The tabs: a dark track with the current one raised. */
+.tabs {
+  background: @bg;
+  padding: 3px;
+  border-radius: 9px;
+}
+
+.tabs button {
+  color: @muted;
+  border: 0;
+  border-radius: 7px;
+  padding: 5px 12px;
+  min-height: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.tabs button label {
+  color: @muted;
+}
+
+.tabs button:hover:not(:checked) label {
+  color: @text;
+}
+
+.tabs button:checked {
+  background: @raised;
+}
+
+.tabs button:checked label {
+  color: @text;
+}
+
+button.ghost,
+button.primary {
+  background: transparent;
+  border: 1px solid transparent;
+  box-shadow: none;
+  color: @text;
+  border-radius: 8px;
+  padding: 6px 10px;
+  min-height: 0;
+}
+
+button.ghost:hover {
+  background: @raised;
+}
+
+button.primary {
+  background-image: linear-gradient(135deg, @accent, @accent2);
+  color: @ink;
+  font-weight: 700;
+}
+
+button.primary label {
+  color: @ink;
+}
+
+button.primary:hover {
+  filter: brightness(1.08);
+}
+
+button.update {
+  color: @accent;
+  border-color: @accent;
+  font-weight: 600;
+}
+
+button.update label {
+  color: @accent;
+}
+
+button:disabled {
+  opacity: 0.45;
+}
+
+/* ---- problems (bottom panel) ---- */
+.problems {
+  background: @panel;
+  border-top: 1px solid @border;
+}
+
+button.problems-head {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 7px 14px;
+  min-height: 0;
+}
+
+button.problems-head:hover {
+  background: alpha(@raised, 0.4);
+}
+
+.problems-title {
+  font-weight: 700;
+}
+
+.count {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.count label {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.count.error label {
+  color: @err;
+}
+
+.count.warning label {
+  color: @warn;
+}
+
+.count.ok label {
+  color: @ok;
+}
+
+.toast {
+  background: @raised;
+  border: 1px solid @border_strong;
+  border-radius: 10px;
+  padding: 10px 14px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
