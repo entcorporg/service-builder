@@ -108,7 +108,10 @@ fn drag_a_node_then_undo_with_the_keyboard() {
     let mut h = harness("orders");
     let position = |h: &Harness<'static, App>| {
         let p = h.state().project();
-        p.services.iter().find(|s| s.name == "Payments").map(|s| (s.position.x, s.position.y))
+        p.services
+            .iter()
+            .find(|s| s.name == "Payments")
+            .map(|s| (s.position.x, s.position.y))
     };
     let before = position(&h);
     // The Payments node, where the orders sample is fitted in a 1480×920 window.
