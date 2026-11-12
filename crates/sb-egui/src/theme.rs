@@ -46,6 +46,22 @@ pub fn prop(size: f32) -> FontId {
     FontId::new(size, FontFamily::Proportional)
 }
 
+pub fn medium(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(crate::fonts::MEDIUM.into()))
+}
+
+pub fn semibold(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(crate::fonts::SEMIBOLD.into()))
+}
+
+pub fn bold(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(crate::fonts::BOLD.into()))
+}
+
+pub fn mono_bold(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(crate::fonts::MONO_BOLD.into()))
+}
+
 /// The colour with an alpha (0..=255), for tints of the accent or of a kind.
 pub fn alpha(c: Color32, a: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)

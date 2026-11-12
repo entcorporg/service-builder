@@ -20,7 +20,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         .frame(Frame::new().fill(PANEL).stroke(Stroke::new(1.0, BORDER)))
         .show(ui, |ui| {
             let head = Frame::new()
-                .inner_margin(Margin::symmetric(14, 8))
+                .inner_margin(Margin::symmetric(14, 7))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
@@ -30,12 +30,12 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
                             13.0,
                             FAINT,
                         ));
-                        ui.label(RichText::new("PROBLÈMES").size(XS).strong().color(MUTED));
+                        ui.label(RichText::new("Problèmes").font(bold(BASE)).color(TEXT));
                         let count = |ui: &mut egui::Ui, n: String, icon_name: &str, color| {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
                                 ui.add(icon(icon_name, 12.0, color));
-                                ui.label(RichText::new(n).size(SM).color(color));
+                                ui.label(RichText::new(n).font(semibold(SM)).color(color));
                             });
                         };
                         if errors > 0 {
@@ -74,7 +74,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
                                     ui.label(
                                         RichText::new(format!("{mark} · {}", d.code))
                                             .color(color)
-                                            .strong(),
+                                            .font(bold(BASE)),
                                     );
                                     ui.label(&d.message);
                                     ui.label(

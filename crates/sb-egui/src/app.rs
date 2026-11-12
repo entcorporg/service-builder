@@ -123,6 +123,7 @@ impl App {
 
     pub fn with_context(ctx: egui::Context, open: Option<PathBuf>) -> Self {
         egui_extras::install_image_loaders(&ctx);
+        crate::fonts::install(&ctx);
         crate::theme::apply(&ctx);
         let (tx, rx) = channel();
         let project = sb_model::sample::orders();

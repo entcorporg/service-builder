@@ -19,7 +19,7 @@ pub fn section_title(ui: &mut Ui, text: &str) {
         RichText::new(text.to_uppercase())
             .size(XS)
             .color(FAINT)
-            .strong(),
+            .family(egui::FontFamily::Name(crate::fonts::BOLD.into())),
     );
 }
 
@@ -81,22 +81,50 @@ pub fn ghost_colored(
     }
 }
 
-/// The orange button of the main action (`button.primary`).
+/// The orange button of the main action (`button.primary`): a gradient from the accent to the second accent.
 pub fn primary(ui: &mut Ui, icon_name: &str, text: &str, enabled: bool) -> Response {
-    let mut b = if icon_name.is_empty() {
-        egui::Button::new(RichText::new(text).color(INK).strong())
-    } else {
-        egui::Button::image_and_text(
-            icon(icon_name, 15.0, INK),
-            RichText::new(text).color(INK).strong(),
-        )
-    };
-    b = b
-        .fill(if enabled { ACCENT } else { alpha(ACCENT, 90) })
-        .stroke(Stroke::NONE)
-        .corner_radius(CornerRadius::same(8))
-        .min_size(Vec2::new(0.0, 30.0));
-    ui.add_enabled(enabled, b)
+    let font = theme::bold(BASE);
+    let galley = ui.painter().layout_no_wrap(text.to_string(), font, INK);
+    let icon_w = if icon_name.is_empty() { 0.0 } else { 15.0 + 6.0 };
+    let size = Vec2::new(10.0 + icon_w + galley.size().x + 10.0, 30.0);
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, r) = ui.allocate_exact_size(size, sense);
+    if ui.is_rect_visible(rect) {
+        let fade = |c: Color32| {
+            let c = if r.hovered() { c.gamma_multiply(1.0).lerp_to_gamma(Color32::WHITE, 0.08) } else { c };
+            if enabled { c } else { c.gamma_multiply(0.45) }
+        };
+        gradient(ui.painter(), rect, 8.0, fade(ACCENT), fade(ACCENT2));
+        let mut x = rect.left() + 10.0;
+        if !icon_name.is_empty() {
+            let ir = egui::Rect::from_center_size(egui::pos2(x + 7.5, rect.center().y), Vec2::splat(15.0));
+            crate::icons::paint(ui, icon_name, ir, INK);
+            x += icon_w;
+        }
+        ui.painter().galley(egui::pos2(x, rect.center().y - galley.size().y / 2.0), galley, INK);
+    }
+    if enabled { r.on_hover_cursor(egui::CursorIcon::PointingHand) } else { r }
+}
+
+/// A rounded rectangle filled with a horizontal gradient.
+pub fn gradient(painter: &egui::Painter, rect: egui::Rect, radius: f32, from: Color32, to: Color32) {
+    let r = radius.min(rect.height() / 2.0).min(rect.width() / 2.0);
+    // The ends are rounded rectangles in the end colours; the middle is a gradient mesh.
+    let left = egui::Rect::from_min_max(rect.min, egui::pos2(rect.left() + 2.0 * r, rect.bottom()));
+    let right = egui::Rect::from_min_max(egui::pos2(rect.right() - 2.0 * r, rect.top()), rect.max);
+    painter.rect_filled(left, CornerRadius::same(r as u8), from);
+    painter.rect_filled(right, CornerRadius::same(r as u8), to);
+    let mid = egui::Rect::from_min_max(egui::pos2(rect.left() + r, rect.top()), egui::pos2(rect.right() - r, rect.bottom()));
+    let t = |x: f32| (x - rect.left()) / rect.width();
+    let at = |x: f32| from.lerp_to_gamma(to, t(x));
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(mid.left_top(), at(mid.left()));
+    mesh.colored_vertex(mid.right_top(), at(mid.right()));
+    mesh.colored_vertex(mid.right_bottom(), at(mid.right()));
+    mesh.colored_vertex(mid.left_bottom(), at(mid.left()));
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(mesh);
 }
 
 /// A bordered button (`button` of the forms, `.btn`).

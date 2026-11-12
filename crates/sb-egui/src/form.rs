@@ -245,7 +245,7 @@ pub fn show_modals(app: &mut App, ctx: &egui::Context) {
         let mut submit = false;
         let modal = egui::Modal::new(form.id).show(ctx, |ui| {
             ui.set_min_width(380.0);
-            ui.label(RichText::new(&form.title).size(LG).strong());
+            ui.label(RichText::new(&form.title).font(bold(LG)));
             ui.add_space(8.0);
             submit |= form.body(ui);
             if !form.error.is_empty() {
@@ -290,7 +290,7 @@ pub fn show_modals(app: &mut App, ctx: &egui::Context) {
             egui::Modal::new(egui::Id::unique(("confirm", app.confirms.len()))).show(ctx, |ui| {
                 ui.set_min_width(360.0);
                 ui.set_max_width(520.0);
-                ui.label(RichText::new(&c.title).size(LG).strong());
+                ui.label(RichText::new(&c.title).font(bold(LG)));
                 if !c.detail.is_empty() {
                     ui.add_space(6.0);
                     ui.label(RichText::new(&c.detail).color(MUTED));

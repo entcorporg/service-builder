@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod files;
+pub mod fonts;
 pub mod form;
 pub mod header;
 pub mod icons;

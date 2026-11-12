@@ -7,7 +7,7 @@ use crate::app::{App, Page};
 use crate::files::{ask_new_project, export_code, pick_project, save_as};
 use crate::icons::icon;
 use crate::theme::*;
-use crate::widgets::{ghost, primary, text_field};
+use crate::widgets::{ghost, primary};
 
 /// The views the tabs switch between: (page, label, icon).
 pub const TABS: [(Page, &str, &str); 4] = [
@@ -42,17 +42,17 @@ fn bar(app: &mut App, ui: &mut egui::Ui) {
             egui::Image::new(egui::include_image!("../data/service-builder.png"))
                 .fit_to_exact_size(Vec2::splat(26.0)),
         );
-        ui.label(RichText::new("Service Builder").size(MD).strong());
+        ui.label(RichText::new("Service Builder").font(bold(MD)));
     });
 
     // The name of the project: edited in place, committed with Enter or when the focus leaves.
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         let name = app.state.project.name.clone();
-        if let Some(new) = text_field(ui, "project-name", &name, 150.0) {
-            if !new.is_empty() {
-                app.edit(|p| p.name = new);
-            }
+        if let Some(new) = project_name(ui, &name)
+            && !new.is_empty()
+        {
+            app.edit(|p| p.name = new);
         }
         if app.state.dirty {
             ui.label(RichText::new("●").size(11.0).color(ACCENT))
@@ -146,6 +146,52 @@ fn bar(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
+/// The name of the project, edited in place: plain text until hovered or focused (`entry.project-name`).
+fn project_name(ui: &mut egui::Ui, current: &str) -> Option<String> {
+    let id = ui.make_persistent_id("project-name");
+    let key = id.with("buffer");
+    let focused = ui.memory(|m| m.has_focus(id));
+    let mut text: String = if focused {
+        ui.data(|d| d.get_temp::<String>(key)).unwrap_or_else(|| current.to_string())
+    } else {
+        current.to_string()
+    };
+    let background = ui.painter().add(egui::Shape::Noop);
+    let r = ui.add(
+        egui::TextEdit::singleline(&mut text)
+            .id(id)
+            .frame(egui::Frame::NONE)
+            .font(semibold(BASE))
+            .margin(Margin::symmetric(8, 4))
+            .vertical_align(egui::Align::Center)
+            .min_size(Vec2::new(150.0, 26.0))
+            .desired_width(150.0),
+    );
+    if r.hovered() || r.has_focus() {
+        ui.painter().set(
+            background,
+            egui::epaint::RectShape::new(
+                r.rect,
+                CornerRadius::same(6),
+                BG,
+                Stroke::new(1.0, BORDER),
+                egui::StrokeKind::Inside,
+            ),
+        );
+    }
+    if r.has_focus() {
+        ui.data_mut(|d| d.insert_temp(key, text.clone()));
+    }
+    if r.lost_focus() {
+        ui.data_mut(|d| d.remove::<String>(key));
+        let new = text.trim().to_string();
+        if !ui.input(|i| i.key_pressed(egui::Key::Escape)) && new != current {
+            return Some(new);
+        }
+    }
+    None
+}
+
 /// The views, in a dark track with the current one raised.
 fn tabs(app: &mut App, ui: &mut egui::Ui) {
     // The API page is the architecture, zoomed on a route; the flows list belongs to it too.
@@ -215,18 +261,15 @@ fn pill(app: &App, ui: &mut egui::Ui) {
             ERR,
         ),
     };
-    Frame::new()
-        .fill(alpha(color, 26))
-        .stroke(Stroke::new(1.0, alpha(color, 80)))
-        .corner_radius(CornerRadius::same(255))
-        .inner_margin(Margin::symmetric(10, 4))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.add(icon(icon_name, 14.0, color));
-                ui.label(RichText::new(text).size(SM).color(color).strong());
-            });
-        });
+    let fill = alpha(color, if errors > 0 { 31 } else { 26 });
+    let galley = ui.painter().layout_no_wrap(text, semibold(SM), color);
+    let size = Vec2::new(10.0 + 14.0 + 6.0 + galley.size().x + 10.0, 26.0);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::same(255), fill);
+    let ir = egui::Rect::from_center_size(rect.left_center() + Vec2::new(10.0 + 7.0, 0.0), Vec2::splat(14.0));
+    crate::icons::paint(ui, icon_name, ir, color);
+    let at = egui::pos2(rect.left() + 30.0, rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley(at, galley, color);
 }
 
 /// The less used actions: a menu at the end.
