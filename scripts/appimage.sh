@@ -17,11 +17,14 @@ fetch linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/c
 appdir="$root/target/appimage/AppDir"
 rm -rf "$appdir"
 data="$root/crates/sb-egui/data"
+# linuxdeploy names the icon after its file, which must match Icon= of the desktop file.
+icon="$root/target/appimage/icon"
+mkdir -p "$icon" && cp "$data/service-builder-512.png" "$icon/service-builder.png"
 export PATH="$tools:$PATH" APPIMAGE_EXTRACT_AND_RUN=1 LINUXDEPLOY_OUTPUT_VERSION="$version"
 export OUTPUT="$root/dist/Service.Builder_${version}_amd64.AppImage"
 
 "$tools/linuxdeploy" --appdir "$appdir" \
   --executable "$root/target/release/service-builder" \
   --desktop-file "$data/dev.servicebuilder.app.desktop" \
-  --icon-file "$data/service-builder-512.png" \
+  --icon-file "$icon/service-builder.png" \
   --output appimage
