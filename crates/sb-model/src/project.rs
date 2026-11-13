@@ -28,8 +28,6 @@ pub struct Project {
     pub schema_version: u32,
     pub name: String,
     #[serde(default)]
-    pub broker: BrokerConfig,
-    #[serde(default)]
     pub outbox: OutboxConfig,
     #[serde(default)]
     pub messages: Vec<Message>,
@@ -40,20 +38,6 @@ pub struct Project {
     /// How the project runs in containers from the Pods page: resources, admin interfaces, reverse proxy.
     #[serde(default, skip_serializing_if = "crate::pods::PodsConfig::is_default")]
     pub pods: crate::pods::PodsConfig,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct BrokerConfig {
-    pub bootstrap_servers: String,
-}
-
-impl Default for BrokerConfig {
-    fn default() -> Self {
-        Self {
-            bootstrap_servers: "localhost:9092".into(),
-        }
-    }
 }
 
 /// How the services publish their events: every event goes through a transactional outbox, and
@@ -1461,7 +1445,6 @@ impl Project {
         Self {
             schema_version: SCHEMA_VERSION,
             name: name.into(),
-            broker: BrokerConfig::default(),
             outbox: OutboxConfig::default(),
             messages: vec![],
             topics: vec![],

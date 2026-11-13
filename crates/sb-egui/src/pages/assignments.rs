@@ -73,6 +73,8 @@ fn fits(have: &str, want: &str) -> bool {
 }
 
 const MODES: [&str; 4] = ["—", "Champ", "Valeur", "Rust"];
+/// One more source, for a timestamp column of an SQL step only: the clock of the database (`now()`).
+const CLOCK: &str = "Maintenant";
 
 fn mode_of(e: &Option<Expr>) -> &'static str {
     match e {
@@ -80,7 +82,7 @@ fn mode_of(e: &Option<Expr>) -> &'static str {
         Some(Expr::Path { .. }) => MODES[1],
         Some(Expr::Literal { .. }) => MODES[2],
         Some(Expr::Raw { .. }) => MODES[3],
-        Some(Expr::Now) => MODES[2],
+        Some(Expr::Now) => CLOCK,
     }
 }
 
@@ -111,6 +113,35 @@ pub fn pick(
 /// One value: a source (—, Champ, Valeur, Rust) and what goes with it. Returns `Some(new value)` when the user
 /// changed it (`Some(None)`: unset, when `allow_unset`).
 pub fn expr_editor(
+    app: &mut App,
+    ui: &mut Ui,
+    id: impl egui::AsIdSalt,
+    target: Option<&Field>,
+    allow_unset: bool,
+    current: Option<&Expr>,
+    vars: &[Var],
+) -> Option<Option<Expr>> {
+    expr_editor_with(app, ui, id, target, allow_unset, current, vars, false)
+}
+
+/// The value written to, or compared with, a column in an SQL step: a timestamp column (`clock`) can also take the
+/// clock of the database, which exists nowhere else.
+#[allow(clippy::too_many_arguments)]
+pub fn sql_expr_editor(
+    app: &mut App,
+    ui: &mut Ui,
+    id: impl egui::AsIdSalt,
+    target: Option<&Field>,
+    allow_unset: bool,
+    current: Option<&Expr>,
+    vars: &[Var],
+    clock: bool,
+) -> Option<Option<Expr>> {
+    expr_editor_with(app, ui, id, target, allow_unset, current, vars, clock)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expr_editor_with(
     _app: &mut App,
     ui: &mut Ui,
     id: impl egui::AsIdSalt,
@@ -118,6 +149,7 @@ pub fn expr_editor(
     allow_unset: bool,
     current: Option<&Expr>,
     vars: &[Var],
+    clock: bool,
 ) -> Option<Option<Expr>> {
     let id = ui.make_persistent_id(id);
     let scalar = |t: &str| {
@@ -139,9 +171,12 @@ pub fn expr_editor(
         }),
         c => c.cloned(),
     };
+    // A clock already chosen stays in the list, even where it is refused: the user sees what is there.
+    let clock = clock || matches!(current, Some(Expr::Now));
     let modes: Vec<String> = MODES
         .iter()
         .filter(|m| allow_unset || **m != "—")
+        .chain(clock.then_some(&CLOCK))
         .map(|s| (*s).to_string())
         .collect();
     let first_path = options.first().map(|v| v.path.clone()).unwrap_or_default();
@@ -164,6 +199,7 @@ pub fn expr_editor(
                 "Rust" => Some(Expr::Raw {
                     code: String::new(),
                 }),
+                CLOCK => Some(Expr::Now),
                 _ => None,
             });
         }
