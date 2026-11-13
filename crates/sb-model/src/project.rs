@@ -37,6 +37,9 @@ pub struct Project {
     pub topics: Vec<Topic>,
     #[serde(default)]
     pub services: Vec<Service>,
+    /// How the project runs in containers from the Pods page: resources, admin interfaces, reverse proxy.
+    #[serde(default, skip_serializing_if = "crate::pods::PodsConfig::is_default")]
+    pub pods: crate::pods::PodsConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1463,6 +1466,7 @@ impl Project {
             messages: vec![],
             topics: vec![],
             services: vec![],
+            pods: Default::default(),
         }
     }
 

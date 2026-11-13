@@ -84,6 +84,10 @@ pub fn path(name: &str) -> &'static str {
         }
         "grip" => "M9 5h.01M9 12h.01M9 19h.01M15 5h.01M15 12h.01M15 19h.01",
         "graph" => "M5 5h5v5H5zM14 14h5v5h-5zM10 7.5h4a3 3 0 013 3V14",
+        "pods" => "M12 3l8 4.5v9L12 21l-8-4.5v-9zM12 12l8-4.5M12 12v9M12 12L4 7.5",
+        "play" => "M7 4l13 8-13 8z",
+        "stop" => "M6 6h12v12H6z",
+        "restart" => "M21 12a9 9 0 11-3-6.7M21 4v5h-5",
         "plug" => "M9 2v6M15 2v6M6 8h12v4a6 6 0 01-12 0zM12 18v4",
         "update" => "M21 12a9 9 0 11-3-6.7M21 4v5h-5M12 8v5M9.5 10.5L12 8l2.5 2.5",
         "new" => "M6 3h9l4 4v14H6zM14 3v5h5M12 11v6M9 14h6",

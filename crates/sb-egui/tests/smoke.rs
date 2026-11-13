@@ -5,12 +5,13 @@ use egui_kittest::Harness;
 use sb_egui::app::{App, Page};
 use sb_egui::pages::canvas::{Sel, select};
 
-const PAGES: [Page; 6] = [
+const PAGES: [Page; 7] = [
     Page::Architecture,
     Page::Endpoint,
     Page::Flows,
     Page::Tables,
     Page::Mcp,
+    Page::Pods,
     Page::Code,
 ];
 
@@ -19,6 +20,7 @@ fn harness(sample: &'static str) -> Harness<'static, App> {
     unsafe {
         std::env::set_var("SB_NO_UPDATE", "1");
         std::env::set_var("SB_OPEN_ALL", "1");
+        std::env::set_var("SB_NO_ENGINE", "1");
     }
     let mut h = Harness::builder()
         .with_size([1480.0, 920.0])

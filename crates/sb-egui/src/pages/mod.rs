@@ -12,6 +12,7 @@ pub mod inspector;
 pub mod mail;
 pub mod mcp;
 pub mod palette;
+pub mod pods;
 pub mod schemas;
 pub mod stepcards;
 pub mod stepjson;

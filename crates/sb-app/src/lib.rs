@@ -3,6 +3,7 @@
 
 pub mod feedback;
 pub mod mcp;
+pub mod pods;
 pub mod rename;
 pub mod scope;
 pub mod stepform;

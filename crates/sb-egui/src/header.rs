@@ -10,10 +10,11 @@ use crate::theme::*;
 use crate::widgets::{ghost, primary};
 
 /// The views the tabs switch between: (page, label, icon).
-pub const TABS: [(Page, &str, &str); 4] = [
+pub const TABS: [(Page, &str, &str); 5] = [
     (Page::Architecture, "Architecture", "graph"),
     (Page::Tables, "Tables", "table"),
     (Page::Mcp, "MCP", "plug"),
+    (Page::Pods, "Pods", "pods"),
     (Page::Code, "Code généré", "code"),
 ];
 

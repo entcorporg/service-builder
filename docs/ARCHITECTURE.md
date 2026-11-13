@@ -19,7 +19,7 @@ flowchart LR
 | --- | --- |
 | `crates/sb-model` | Le document : `Project`, `Service`, `Topic`, `Message`, `Step`… (JSON camelCase), règles de nommage, typage léger des mappings, validation avec diagnostics. Aucune dépendance à l'interface ni au générateur. |
 | `crates/sb-codegen` | Du modèle vers un workspace Cargo : `.proto`, crate `contracts`, crate `runtime` embarquée, un crate par service, `docker-compose.yml`. Pur et déterministe. |
-| `crates/sb-app` | Services applicatifs partagés par l'app et le CLI `sb` : `analyze` (validation + génération + rustfmt), ouvrir/sauver, exporter, serveur MCP, et la logique d'édition sans fenêtre : formulaires d'étapes (`stepform`), renommages en cascade (`rename`), portée des variables (`scope`). |
+| `crates/sb-app` | Services applicatifs partagés par l'app et le CLI `sb` : `analyze` (validation + génération + rustfmt), ouvrir/sauver, exporter, lancer en conteneurs (`pods`), serveur MCP, et la logique d'édition sans fenêtre : formulaires d'étapes (`stepform`), renommages en cascade (`rename`), portée des variables (`scope`). |
 | `crates/sb-egui` | L'application (paquet `service-builder`, egui/eframe sur wgpu) au-dessus de `sb-app` : coque (`app.rs`, `header.rs`), pages (`pages/`), thème (`theme.rs`, `fonts.rs`, `icons.rs`), mise à jour (`updater.rs`). |
 
 ## Le modèle de projet
@@ -798,6 +798,59 @@ attente au plus) et range le rapport. Pas de jeton GitHub ni d'envoi automatique
 par un agent peut contenir, malgré la consigne, un détail du projet, et une issue est publique. L'app construit donc
 une URL « new issue » pré-remplie (corps tronqué pour tenir dans la limite d'URL de GitHub) et l'ouvre dans le
 navigateur (`egui::OpenUrl`), limité aux pages du dépôt.
+
+### Pods : lancer sans exporter
+
+L'onglet **Pods** (`pages/pods.rs`) lance les services générés dans des conteneurs, avec leur infrastructure, sans
+passer par un export. Trois couches, comme le reste :
+
+- **Le réglage** (`sb-model/src/pods.rs`, clé `pods` du projet, absente tant qu'elle vaut les défauts) : les ressources
+  (`cpuset`, politique de redémarrage, mémoire d'un service, de Kafka, de PostgreSQL ; le swap est plafonné à la même
+  valeur), la publication des ports sur `127.0.0.1`, un fichier d'environnement donné à chaque service (les secrets
+  restent hors du projet), Adminer et Kafka UI, et **Traefik** : domaine, e-mail ACME, ports, tableau de bord,
+  authentification des interfaces, limite de débit, un sous-domaine par hôte, et les **frontends** (nom, sous-domaine,
+  port du serveur de développement sur l'hôte). Validé comme le reste
+  (`E_PODS_*`, pointeurs `/pods/...`, affichés sous le champ fautif) : tout ce qui finit dans un YAML y est vérifié.
+- **Les fichiers** (`sb-codegen/src/pods.rs`, purs et testés) : `Dockerfile` (deux images : `builder`, Rust + cmake, et
+  `runtime`, Debian + OpenSSL), `build.sh`, `compose.pods.yml` et, si Traefik est actif, `traefik/traefik.yml` et
+  `traefik/dynamic/{services,routers,middlewares}.yaml`. Ils ne font pas partie d'un export, qui reste ce dont
+  `cargo run` a besoin ; l'onglet les montre (« Fichiers générés ») et `sb pods` les écrit.
+- **L'exécution** (`sb-app/src/pods.rs`, bloquant, appelé sur un fil) : le workspace est écrit dans
+  `~/.local/share/service-builder/pods/sb-<projet>/` (un fichier inchangé n'est pas réécrit : sa date dit à cargo qu'il
+  n'a rien à recompiler), les deux images sont construites, puis `build.sh` compile les services **dans un conteneur**
+  de l'image `builder`, sources montées en lecture seule et trois volumes pour le registre de cargo, le dossier de
+  build et les binaires. Rien de BuildKit n'est utilisé : le builder classique de Docker suffit, Podman aussi. Enfin
+  `compose up -d` démarre la stack ; chaque service monte le volume des binaires et lance le sien. Un service déjà en
+  marche n'est redémarré que si son binaire a changé (`build.sh` le signale). Le premier build prend plusieurs minutes
+  (librdkafka est compilé), les suivants quelques secondes.
+
+**Moteur.** Avec Podman et `podman-compose` installés, la stack tourne dans un Podman *rootless* au store privé
+(`~/.local/share/service-builder/engine`, par `XDG_DATA_HOME`/`XDG_CONFIG_HOME`) : ses images, conteneurs et volumes ne
+se mélangent pas à ceux de l'utilisateur. Sinon Docker est utilisé, et la stack n'est isolée que par son nom de projet
+compose (`sb-<projet>`). En rootless, `cpuset` demande la délégation du contrôleur cgroup correspondant, et les ports
+80/443 un `net.ipv4.ip_unprivileged_port_start` adapté.
+
+**La stack.** Kafka (KRaft, joint en `kafka:19092`), PostgreSQL (une base par service, volume `postgres-data`), Mailpit
+s'il y a un service mail, DragonflyDB s'il y a un service temps réel, puis les services : `KAFKA_BROKERS`,
+`<SERVICE>_DATABASE_URL`, `<SERVICE>_URL` des autres services, `DRAGONFLY_URL`, `SMTP_HOST`, `JWKS_URL` sont posés
+pour qu'ils se trouvent par leur nom. Les services s'arrêtent sur `SIGINT`, relayé par un processus init (sans lui, le
+premier processus d'un conteneur ignore le signal et l'arrêt attend dix secondes). Les ports de Kafka et de PostgreSQL
+ne sont pas publiés : les interfaces d'administration les remplacent, et la stack ne heurte pas un Kafka local.
+
+**Traefik.** Sans domaine : HTTP sur `*.localhost` (résolu par les navigateurs), sans certificat. Avec un domaine :
+redirection vers HTTPS et certificats Let's Encrypt (défi HTTP : le port 80 doit être joignable). Pas de fournisseur
+Docker, donc pas d'accès au socket du moteur : les routes sont des fichiers. Chaque interface et chaque frontend a son
+hôte ; l'API est sur le sien (`api.`). Les chemins viennent des routes du projet : un service seul sous un premier
+segment reçoit tout le segment (`/orders`), des services qui en partagent un (`/auth/login` ici, `/auth/me` là) gardent
+chacun leurs chemins, et le plus profond l'emporte (priorité). Un service est servi une seule fois, tel quel, sauf
+s'il **lit** quel frontend l'appelle (un champ d'une requête de route avec `source` = l'en-tête `X-Frontend-ID`) :
+lui seul est alors servi une fois par frontend sous `/<nom du frontend>`, que Traefik retire en posant `X-Frontend-ID`
+= le nom du frontend, par-dessus ce qu'a envoyé le client. Avec des frontends, Traefik
+répond au CORS (origines des frontends, avec identifiants) et les services démarrent avec `CORS_ORIGINS` vide pour que
+l'en-tête ne parte pas deux fois. Les chemins `/.well-known/...` sont servis sans préfixe. Sur un domaine public, des
+interfaces sans authentification donnent l'avertissement `W_PODS_ADMIN_OPEN`.
+
+La stack continue de tourner quand l'application se ferme. Deux projets de même nom partagent la même stack.
 
 ### Mise à jour automatique
 

@@ -4,10 +4,12 @@
 //! Cargo workspace of event-driven Rust services (gRPC for RPC, Kafka for events).
 
 pub mod names;
+pub mod pods;
 pub mod project;
 pub mod sample;
 pub mod typing;
 pub mod validate;
 
+pub use pods::{Frontend, PodsConfig, TraefikConfig, TraefikHosts};
 pub use project::*;
 pub use validate::{Diagnostic, Severity, has_errors, validate};

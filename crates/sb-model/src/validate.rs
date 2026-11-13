@@ -52,6 +52,7 @@ pub fn validate(project: &Project) -> Vec<Diagnostic> {
     c.topics();
     c.services();
     c.graph_warnings();
+    c.pods();
     c.out
 }
 
@@ -156,6 +157,184 @@ impl<'a> Checker<'a> {
                 "E_OUTBOX_ATTEMPTS",
                 "/outbox/maxAttempts",
                 format!("an event gets between 1 and {MAX_OUTBOX_ATTEMPTS} publish attempts before it is moved to the DLQ"),
+            );
+        }
+    }
+
+    // ---- pods ------------------------------------------------------------------------
+
+    /// The settings of the Pods page: they end up in a compose file and in the configuration of Traefik, so
+    /// what would not be valid there is refused here.
+    fn pods(&mut self) {
+        use crate::pods::*;
+        let pods = &self.project.pods;
+        if !pods.cpuset.is_empty() && !is_cpuset(&pods.cpuset) {
+            self.error(
+                "E_PODS_CPUSET",
+                "/pods/cpuset",
+                "the CPUs are numbers and ranges separated by commas, like `0-5` or `0,2,4`",
+            );
+        }
+        if !RESTART_POLICIES.contains(&pods.restart.as_str()) {
+            self.error(
+                "E_PODS_RESTART",
+                "/pods/restart",
+                format!(
+                    "the restart policy is one of {}",
+                    RESTART_POLICIES.join(", ")
+                ),
+            );
+        }
+        for (key, value) in [
+            ("serviceMemory", &pods.service_memory),
+            ("kafkaMemory", &pods.kafka_memory),
+            ("postgresMemory", &pods.postgres_memory),
+        ] {
+            if !is_memory(value) {
+                self.error(
+                    "E_PODS_MEMORY",
+                    format!("/pods/{key}"),
+                    "a memory amount is a number and a unit, like `160m` or `1g`",
+                );
+            }
+        }
+        if pods.env_file.contains(['\n', '"']) {
+            self.error(
+                "E_PODS_ENV_FILE",
+                "/pods/envFile",
+                "the environment file is the path of one file",
+            );
+        }
+        let t = &pods.traefik;
+        if !t.enabled {
+            return;
+        }
+        let domain = t.domain.trim();
+        if !domain.is_empty() && (!is_host(domain) || !domain.contains('.')) {
+            self.error(
+                "E_PODS_DOMAIN",
+                "/pods/traefik/domain",
+                "the domain is a host name in lower case, like `example.com`",
+            );
+        }
+        if t.tls() && !t.acme_email.contains('@') {
+            self.error(
+                "E_PODS_ACME_EMAIL",
+                "/pods/traefik/acmeEmail",
+                "Let's Encrypt needs an e-mail address to issue the certificates of the domain",
+            );
+        }
+        if t.acme_email
+            .contains(|c: char| c.is_whitespace() || c == '"')
+        {
+            self.error(
+                "E_PODS_ACME_EMAIL",
+                "/pods/traefik/acmeEmail",
+                "the e-mail address has a space or a quote",
+            );
+        }
+        if t.http_port == 0 || t.https_port == 0 || (t.tls() && t.http_port == t.https_port) {
+            self.error(
+                "E_PODS_PORT",
+                "/pods/traefik",
+                "the HTTP and HTTPS ports of the proxy are two different ports of the host",
+            );
+        }
+        if t.rate_average == 0 || t.rate_burst == 0 {
+            self.error(
+                "E_PODS_RATE_LIMIT",
+                "/pods/traefik",
+                "the rate limit of the API is at least 1 request per second, and so is its burst",
+            );
+        }
+        if !t.admin_auth.is_empty() && !is_htpasswd(&t.admin_auth) {
+            self.error(
+                "E_PODS_ADMIN_AUTH",
+                "/pods/traefik/adminAuth",
+                "the authentication is one `user:hash` line, as written by `htpasswd -nB user`",
+            );
+        }
+
+        // Every host the proxy serves, with where it is set: two of them cannot share a name.
+        let mta = self
+            .project
+            .services
+            .iter()
+            .any(|s| s.kind == ServiceKind::Mta);
+        let mut hosts: Vec<(String, String)> = vec![("api".into(), t.hosts.api.clone())];
+        for (on, key, value) in [
+            (t.dashboard, "dashboard", &t.hosts.dashboard),
+            (pods.adminer, "adminer", &t.hosts.adminer),
+            (pods.kafka_ui, "kafkaUi", &t.hosts.kafka_ui),
+            (mta, "mailpit", &t.hosts.mailpit),
+        ] {
+            if on {
+                hosts.push((key.into(), value.clone()));
+            }
+        }
+        for (key, value) in &hosts {
+            if !is_host(value) {
+                self.error(
+                    "E_PODS_HOST",
+                    format!("/pods/traefik/hosts/{key}"),
+                    "a sub-domain is made of lower case letters, digits and `-`",
+                );
+            }
+        }
+        let mut hosts: Vec<(String, String)> = hosts
+            .into_iter()
+            .map(|(key, value)| (format!("/pods/traefik/hosts/{key}"), value))
+            .collect();
+
+        let mut names = HashSet::new();
+        for (i, f) in t.frontends.iter().enumerate() {
+            let at = format!("/pods/traefik/frontends/{i}");
+            if !is_frontend_name(&f.name) {
+                self.error(
+                    "E_PODS_FRONTEND_NAME",
+                    format!("{at}/name"),
+                    "the name of a frontend starts with a lower case letter and holds letters, digits and `-`",
+                );
+            } else if !names.insert(f.name.as_str()) {
+                self.error(
+                    "E_PODS_FRONTEND_NAME",
+                    format!("{at}/name"),
+                    format!("two frontends are named `{}`", f.name),
+                );
+            }
+            if !f.host.is_empty() && !is_host(&f.host) {
+                self.error(
+                    "E_PODS_HOST",
+                    format!("{at}/host"),
+                    "a sub-domain is made of lower case letters, digits and `-`",
+                );
+            }
+            hosts.push((format!("{at}/host"), f.host.clone()));
+            if f.port == 0 {
+                self.error(
+                    "E_PODS_PORT",
+                    format!("{at}/port"),
+                    "the port of the dev server of the frontend is missing",
+                );
+            }
+        }
+        let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
+        for (at, host) in &hosts {
+            if let Some(first) = seen.insert(host.as_str(), at.as_str()) {
+                self.error(
+                    "E_PODS_HOST_DUPLICATE",
+                    at.clone(),
+                    format!("`{}` is already the host of {first}", t.fqdn(host)),
+                );
+            }
+        }
+
+        let exposed = t.dashboard || pods.adminer || pods.kafka_ui || mta;
+        if t.tls() && exposed && t.admin_auth.is_empty() {
+            self.warn(
+                "W_PODS_ADMIN_OPEN",
+                "/pods/traefik/adminAuth",
+                "the admin interfaces are served on a public domain without authentication: anyone can open them",
             );
         }
     }

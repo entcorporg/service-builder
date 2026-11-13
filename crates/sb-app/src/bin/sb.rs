@@ -4,6 +4,9 @@
 //! sb sample                          print the demo project as JSON
 //! sb validate <project.json>         print diagnostics, exit 1 if there are errors
 //! sb generate <project.json> <dir>   write the generated Cargo workspace into <dir>
+//! sb pods <project.json> <dir>       write the workspace with what runs it in containers (Dockerfile, compose, Traefik)
+//! sb up <project.json>             compile the services and start them in containers, with their infrastructure
+//! sb down <project.json> [--volumes] stop that stack (and delete its data)
 //! sb analyze                         project JSON on stdin -> analysis JSON on stdout
 //! sb mcp <project.json>              MCP server on stdio, to let an AI client edit the project
 //! ```
@@ -18,6 +21,9 @@ const USAGE: &str = "usage:
   sb sample
   sb validate <project.json>
   sb generate <project.json> <dir>
+  sb pods <project.json> <dir>
+  sb up <project.json>
+  sb down <project.json> [--volumes]
   sb analyze            (project JSON on stdin)
   sb mcp <project.json> (MCP server on stdio)";
 
@@ -52,6 +58,49 @@ fn run(args: &[&str]) -> Result<ExitCode, String> {
             print_diagnostics(&diagnostics);
             let report = sb_app::export_project(&project, Path::new(dir))?;
             println!("wrote {} files to {}", report.files, report.dir);
+            Ok(ExitCode::SUCCESS)
+        }
+        ["pods", file, dir] => {
+            let project = sb_app::load_project(Path::new(file))?;
+            print_diagnostics(&sb_codegen::diagnose(&project));
+            let files = sb_app::pods::prepare(&project, Path::new(dir))?;
+            println!("wrote {files} files to {dir}");
+            println!("start it from that folder with:");
+            for command in sb_codegen::pods::manual_commands(&project, "docker") {
+                println!("  {command}");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        ["up", file] => {
+            let project = sb_app::load_project(Path::new(file))?;
+            let engine = sb_app::pods::Engine::detect()?;
+            println!("engine: {}", engine.label());
+            let dir = sb_app::pods::stack_dir(&project);
+            sb_app::pods::up(
+                &engine,
+                &project,
+                &dir,
+                &|l| println!("{l}"),
+                &Default::default(),
+            )?;
+            for link in sb_codegen::pods::links(&project) {
+                println!("{}: {}", link.label, link.url);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        ["down", file, rest @ ..] if matches!(rest, [] | ["--volumes"]) => {
+            let project = sb_app::load_project(Path::new(file))?;
+            let engine = sb_app::pods::Engine::detect()?;
+            let dir = sb_app::pods::stack_dir(&project);
+            let log = |l: &str| println!("{l}");
+            sb_app::pods::down(
+                &engine,
+                &project,
+                &dir,
+                !rest.is_empty(),
+                &log,
+                &Default::default(),
+            )?;
             Ok(ExitCode::SUCCESS)
         }
         ["analyze"] => {

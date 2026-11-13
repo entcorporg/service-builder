@@ -19,6 +19,7 @@ Application de bureau Linux : **egui** (eframe, rendu GPU par wgpu).
 | Panneau de réglages | Inspecteur : RPC, consumers, mappings champ à champ typés |
 | Aperçu en direct | Onglet « Code généré » : Rust, `.proto`, `Cargo.toml`, `docker-compose.yml` |
 | Publier | « Exporter le code » : un workspace Cargo prêt à `cargo run` |
+| Prévisualiser | Onglet « Pods » : les services lancés dans des conteneurs, sans exporter |
 
 ![Code généré](docs/screenshots/generated-code.png)
 
@@ -131,6 +132,21 @@ recharge quand sa fenêtre reprend le focus, sauf s'il y a des modifications non
 l'enregistrement écrasera celles du client). Le projet n'est pas protégé contre deux éditeurs simultanés : le dernier
 qui enregistre l'emporte.
 
+## Lancer sans exporter (onglet Pods)
+
+L'onglet **Pods** compile les services et les démarre dans des conteneurs, avec Kafka et PostgreSQL. Un formulaire,
+enregistré dans le projet, règle :
+
+- les **ressources** : CPU (`cpuset`), politique de redémarrage, mémoire d'un service, de Kafka et de PostgreSQL ;
+- les **interfaces** : Adminer (PostgreSQL) et Kafka UI, à activer ou non ;
+- **Traefik**, à ajouter ou retirer : domaine et Let's Encrypt (ou HTTP sur `*.localhost` sans domaine), un hôte par
+  interface, les frontends (serveurs de développement sur l'hôte ; un service qui lit l'en-tête `X-Frontend-ID` le reçoit),
+  CORS, limite de débit. Le `traefik.yml` et les `dynamic/*.yaml` sont générés, et visibles dans l'onglet.
+
+Il faut Podman avec `podman-compose` (la stack tourne alors dans un store privé, à l'écart de vos conteneurs) ou
+Docker avec `docker compose`. Le premier lancement compile tout (plusieurs minutes) ; les suivants ne recompilent et ne
+redémarrent que ce qui a changé. Détails dans [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#pods--lancer-sans-exporter).
+
 ## En ligne de commande
 
 Le binaire `sb` utilise exactement le même code que l'application (pratique en CI) :
@@ -139,6 +155,9 @@ Le binaire `sb` utilise exactement le même code que l'application (pratique en 
 cargo run -p sb-app --bin sb -- sample > projet.sb.json   # projet d'exemple
 cargo run -p sb-app --bin sb -- validate projet.sb.json   # code de sortie 1 s'il y a des erreurs
 cargo run -p sb-app --bin sb -- generate projet.sb.json ./out
+cargo run -p sb-app --bin sb -- pods projet.sb.json ./out # le workspace + Dockerfile, compose et Traefik de l'onglet Pods
+cargo run -p sb-app --bin sb -- up projet.sb.json         # compile et démarre la stack en conteneurs
+cargo run -p sb-app --bin sb -- down projet.sb.json       # l'arrête (--volumes : supprime aussi ses données)
 cargo run -p sb-app --bin sb -- mcp projet.sb.json        # serveur MCP sur stdio
 ```
 
