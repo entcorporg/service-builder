@@ -184,11 +184,16 @@ La CI le fait.
 - Les flèches du canvas sont **dérivées** du modèle. On ne peut tracer à la souris que *topic → service* (cela crée
   un consumer) et *service → topic* (cela déclare le producteur) ; publier et appeler un RPC se configurent dans les
   étapes de l'inspecteur.
-- Le bloc SQL lit une seule table à la fois (pas de jointure, pas de clé étrangère dans la conception des tables) ; l'API HTTP n'a ni authentification, ni spécification OpenAPI générée, ni validation des champs obligatoires.
+- Le bloc SQL lit une seule table à la fois : pas de jointure, pas de pagination (une limite, pas de décalage).
+- L'API HTTP n'a pas de spécification OpenAPI générée ; un champ absent d'une requête prend sa valeur par défaut au
+  lieu d'être refusé ; une réponse pose un statut et des cookies, pas d'en-têtes libres.
+- Pas d'appel à une API HTTP externe (Stripe, Twilio…) : seuls les webhooks entrants signés sont modélisés
+  (`verifyHmac`). Un appel sortant s'écrit dans l'étape *Code Rust*.
+- Le HTML et le texte des mails se saisissent à la main : pas d'éditeur visuel de gabarits.
 - Les tables se conçoivent dans la vue **Tables** et se lisent avec le bloc SQL ; les migrations sont additives (pas de
-  renommage ni de suppression de colonne). Pas d'inbox (déduplication côté consumer).
-- Pas d'annuler/rétablir. L'export **écrase** les fichiers générés : la logique sur mesure passe par
-  l'étape *Code Rust*, pas par l'édition des fichiers exportés.
+  renommage ni de suppression de colonne).
+- L'export **écrase** les fichiers générés : la logique sur mesure passe par l'étape *Code Rust*, pas par l'édition
+  des fichiers exportés.
 - Renommer un champ met à jour les mappings qui le ciblent, mais pas les expressions qui le *lisent*
   (`input.ancien_nom`) : la validation les signale.
 - Les événements sont du protobuf brut, sans schema registry.

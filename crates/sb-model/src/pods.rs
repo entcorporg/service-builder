@@ -272,6 +272,14 @@ mod tests {
     }
 
     #[test]
+    fn a_project_written_with_the_former_broker_setting_still_opens() {
+        let mut json = serde_json::to_value(crate::Project::new("demo")).unwrap();
+        json["broker"] = serde_json::json!({ "bootstrapServers": "localhost:9092" });
+        let project: crate::Project = serde_json::from_value(json).unwrap();
+        assert_eq!(project.name, "demo");
+    }
+
+    #[test]
     fn a_bucket_is_named_after_its_variable() {
         assert_eq!(bucket_name("AVATAR_BUCKET"), "avatar-bucket");
         assert_eq!(bucket_name("_B_"), "bucket-b");
