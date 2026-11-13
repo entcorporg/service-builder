@@ -23,5 +23,5 @@ export OUTPUT="$root/dist/Service.Builder_${version}_amd64.AppImage"
 "$tools/linuxdeploy" --appdir "$appdir" \
   --executable "$root/target/release/service-builder" \
   --desktop-file "$data/dev.servicebuilder.app.desktop" \
-  --icon-file "$data/service-builder.png" \
+  --icon-file "$data/service-builder-512.png" \
   --output appimage
