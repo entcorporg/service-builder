@@ -212,6 +212,8 @@ pub fn choice(
     egui::ComboBox::from_id_salt(id)
         .selected_text(selected)
         .width(ui.available_width().max(80.0))
+        // A long value is cut, it never widens the row.
+        .truncate()
         .show_ui(ui, |ui| {
             for o in options {
                 if ui.selectable_label(o == selected, o).clicked() && o != selected {

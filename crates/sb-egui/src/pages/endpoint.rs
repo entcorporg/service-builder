@@ -11,7 +11,6 @@ use sb_model::{
 };
 
 use super::common::{choice, commit_entry, empty, icon_btn, link, number, unique};
-use super::editors::{SCALARS, type_name};
 use super::steps::{Flow, Loc};
 use crate::app::{App, Page};
 use crate::fonts::Weight;
@@ -175,10 +174,6 @@ fn labelled_field(ui: &mut Ui, label: &str, w: f32, add: impl FnOnce(&mut Ui)) {
     });
 }
 
-fn message_mut<'a>(p: &'a mut Project, name: &str) -> Option<&'a mut Message> {
-    p.messages.iter_mut().find(|m| m.name == name)
-}
-
 fn route_mut<'a>(p: &'a mut Project, service: &str, route: &str) -> Option<&'a mut Route> {
     p.services
         .iter_mut()
@@ -188,119 +183,11 @@ fn route_mut<'a>(p: &'a mut Project, service: &str, route: &str) -> Option<&'a m
         .find(|r| r.name == route)
 }
 
-/// The fields of a schema, edited in place. `origin` says where a request field comes from.
-fn fields_editor(
-    app: &mut App,
-    ui: &mut Ui,
-    message: &str,
-    origin: Option<&dyn Fn(&Field) -> String>,
-) {
+/// The fields of a schema, edited in place, as in the inspector.
+fn fields_editor(app: &mut App, ui: &mut Ui, message: &str) {
     let p = app.project();
-    let fields = p
-        .messages
-        .iter()
-        .find(|m| m.name == message)
-        .map(|m| m.fields.clone())
-        .unwrap_or_default();
-    let mut types: Vec<String> = SCALARS.iter().map(|(n, _)| (*n).to_string()).collect();
-    types.extend(
-        p.messages
-            .iter()
-            .filter(|m| m.name != message)
-            .map(|m| m.name.clone()),
-    );
-    ui.spacing_mut().item_spacing.y = 6.0;
-    for (fi, f) in fields.iter().enumerate() {
-        let m = message.to_string();
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            let total = ui.available_width();
-            // tag, two checks, trash, and the gaps between the six items.
-            let w = ((total - 22.0 - 2.0 * 40.0 - 26.0 - 5.0 * 6.0) / 2.0).max(60.0);
-            fixed(ui, 22.0, |ui| {
-                ui.label(
-                    RichText::new(format!("#{}", fi + 1))
-                        .font(mono(10.5))
-                        .color(FAINT),
-                );
-            });
-            if let Some(v) = fixed(ui, w, |ui| {
-                commit_entry(ui, ("ep-fname", &m, fi), &f.name, true, "", false)
-            }) {
-                let m = m.clone();
-                app.edit(move |p| {
-                    if let Some(x) = message_mut(p, &m).and_then(|x| x.fields.get_mut(fi)) {
-                        x.name = v;
-                    }
-                });
-            }
-            if let Some(v) = fixed(ui, w, |ui| {
-                choice(ui, ("ep-ftype", &m, fi), &types, &type_name(&f.ty))
-            }) {
-                let m = m.clone();
-                app.edit(move |p| {
-                    let new = SCALARS
-                        .iter()
-                        .find(|(n, _)| *n == v)
-                        .map_or(FieldType::Message { name: v }, |(_, t)| t.clone());
-                    if let Some(x) = message_mut(p, &m).and_then(|x| x.fields.get_mut(fi)) {
-                        x.ty = new;
-                    }
-                });
-            }
-            for (text, on, repeated) in [("[]", f.repeated, true), ("?", f.optional, false)] {
-                let mut v = on;
-                let r = fixed(ui, 40.0, |ui| ui.checkbox(&mut v, text))
-                    .on_hover_text(if repeated { "Répété" } else { "Optionnel" });
-                if r.changed() {
-                    let m = m.clone();
-                    app.edit(move |p| {
-                        if let Some(x) = message_mut(p, &m).and_then(|x| x.fields.get_mut(fi)) {
-                            if repeated {
-                                x.repeated = v
-                            } else {
-                                x.optional = v
-                            }
-                        }
-                    });
-                }
-            }
-            if icon_btn(ui, "trash", &format!("Supprimer le champ {}", f.name), true).clicked() {
-                let m = m.clone();
-                app.edit(move |p| {
-                    if let Some(x) = message_mut(p, &m)
-                        && fi < x.fields.len()
-                    {
-                        x.fields.remove(fi);
-                    }
-                });
-            }
-        });
-        if let Some(o) = origin {
-            ui.scope(|ui| {
-                ui.spacing_mut().interact_size.y = 0.0;
-                ui.horizontal(|ui| {
-                    ui.add_space(26.0);
-                    Frame::new()
-                        .fill(alpha(SERVICE, 36))
-                        .corner_radius(CornerRadius::same(4))
-                        .inner_margin(Margin::symmetric(6, 0))
-                        .show(ui, |ui| {
-                            ui.label(RichText::new(o(f)).size(10.0).color(SERVICE));
-                        });
-                });
-            });
-        }
-    }
-    if link(ui, "+ Ajouter un champ").clicked() {
-        let m = message.to_string();
-        app.edit(move |p| {
-            if let Some(x) = message_mut(p, &m) {
-                let taken: Vec<&str> = x.fields.iter().map(|f| f.name.as_str()).collect();
-                let name = unique("field", &taken);
-                x.fields.push(Field::new(name, FieldType::String));
-            }
-        });
+    if let Some(m) = p.message(message) {
+        super::schemas::fields(app, ui, &p, m);
     }
 }
 
@@ -414,14 +301,6 @@ fn card(
             });
             body(app, ui);
         });
-}
-
-fn source_name(s: &sb_model::RequestSource) -> String {
-    match s {
-        sb_model::RequestSource::Header { name } | sb_model::RequestSource::Cookie { name } => {
-            name.clone()
-        }
-    }
 }
 
 pub fn page(app: &mut App, ui: &mut Ui) {
@@ -831,27 +710,7 @@ fn contract(
             );
             small(ui, &hint, SM, MUTED);
             if project.messages.iter().any(|m| m.name == route.request) {
-                let (params2, method) = (params.clone(), route.method);
-                let origin = move |f: &Field| -> String {
-                    if params2.contains(&f.name) {
-                        "chemin".into()
-                    } else if let Some(s) = &f.source {
-                        format!(
-                            "{} {}",
-                            if matches!(s, sb_model::RequestSource::Header { .. }) {
-                                "en-tête"
-                            } else {
-                                "cookie"
-                            },
-                            source_name(s)
-                        )
-                    } else if method.has_body() {
-                        "corps".into()
-                    } else {
-                        "query".into()
-                    }
-                };
-                fields_editor(app, ui, &route.request, Some(&origin));
+                fields_editor(app, ui, &route.request);
                 let not_path = |f: &Field| !params.contains(&f.name) && f.source.is_none();
                 let text = has_body.then(|| example_json(project, &route.request, &not_path));
                 json_preview(
@@ -900,7 +759,7 @@ fn response_body(
         empty(ui, "Choisissez un schéma API pour la réponse.");
         return;
     }
-    fields_editor(app, ui, &route.response, None);
+    fields_editor(app, ui, &route.response);
     json_preview(
         ui,
         |ui| {

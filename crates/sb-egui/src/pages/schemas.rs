@@ -3,13 +3,13 @@
 
 use eframe::egui::{self, Frame, Margin, RichText, Stroke, Ui, Vec2};
 use sb_app::rename;
-use sb_model::names::{is_pascal_ident, is_snake_ident};
-use sb_model::{Field, FieldType, Message, MessageKind, Project, Rule};
+use sb_model::names::{is_pascal_ident, is_snake_ident, pascal};
+use sb_model::{Field, FieldType, Message, MessageKind, Project, RequestSource, Rule};
 
 use super::canvas::{Sel, select};
 use super::common::{
     add_message, card, choice, commit_entry, empty, field, icon_btn, link, number, section,
-    separator,
+    separator, unique,
 };
 use super::editors::{SCALARS, type_name};
 use super::inspector::add_button;
@@ -70,7 +70,7 @@ fn message_mut<'a>(p: &'a mut Project, name: &str) -> Option<&'a mut Message> {
 }
 
 /// The types a field of a schema of this kind can have: API schemas travel as JSON, which has no bytes or timestamp.
-fn type_options(p: &Project, kind: MessageKind) -> Vec<String> {
+fn type_options(p: &Project, kind: MessageKind, list: bool) -> Vec<String> {
     let api = kind == MessageKind::Api;
     let mut options: Vec<String> = SCALARS
         .iter()
@@ -80,10 +80,45 @@ fn type_options(p: &Project, kind: MessageKind) -> Vec<String> {
     options.extend(
         p.messages
             .iter()
-            .filter(|m| (m.kind == MessageKind::Api) == api)
+            // In an API schema only a list holds objects: a plain field is a plain value.
+            .filter(|m| (m.kind == MessageKind::Api) == api && (!api || list))
             .map(|m| m.name.clone()),
     );
+    // Declaring the elements under the field is for lists only.
+    if api && list {
+        options.push(NEW_OBJECT.to_string());
+    }
     options
+}
+
+/// The entry of the type list of a list field (`[]`) that makes a new API schema for its elements: their fields are
+/// then declared under the field.
+const NEW_OBJECT: &str = "+ nouveaux éléments…";
+
+const SOURCE_BODY: &str = "Corps / query";
+const SOURCE_HEADER: &str = "En-tête";
+const SOURCE_COOKIE: &str = "Cookie";
+
+/// How deep nested schemas are shown under their field.
+const MAX_DEPTH: usize = 4;
+
+/// The name of the schema made for the objects of a field: `PlaceOrderBody` + `items` → `PlaceOrderBodyItem`.
+fn object_name(p: &Project, message: &str, f: &Field) -> String {
+    let mut part = pascal(&f.name);
+    if f.repeated && part.len() > 1 && part.ends_with('s') {
+        part.pop();
+    }
+    let taken: Vec<&str> = p.messages.iter().map(|m| m.name.as_str()).collect();
+    unique(&format!("{message}{part}"), &taken)
+}
+
+/// Whether a route that receives the schema has the field in its path.
+fn in_path(p: &Project, message: &str, field: &str) -> bool {
+    let param = format!("{{{field}}}");
+    p.services
+        .iter()
+        .flat_map(|s| &s.routes)
+        .any(|r| r.request == message && r.path.contains(&param))
 }
 
 fn parse_type(name: &str) -> FieldType {
@@ -195,9 +230,27 @@ fn message_body(app: &mut App, ui: &mut Ui, project: &Project, m: &Message) {
     }
 
     ui.add_space(2.0);
+    fields(app, ui, project, m);
+}
+
+/// The fields of a schema, edited in place: the inspector and the API page share it. The fields of an object (a
+/// field whose type is another API schema) are declared under it.
+pub fn fields(app: &mut App, ui: &mut Ui, project: &Project, m: &Message) {
+    fields_at(app, ui, project, m, &mut vec![m.name.clone()]);
+}
+
+fn fields_at(app: &mut App, ui: &mut Ui, project: &Project, m: &Message, path: &mut Vec<String>) {
     ui.spacing_mut().item_spacing.y = 6.0;
     for (i, f) in m.fields.iter().enumerate() {
-        field_row(app, ui, project, m, i, f);
+        field_row(app, ui, project, m, i, f, path.len() == 1);
+        if m.kind == MessageKind::Api
+            && f.repeated
+            && let FieldType::Message { name } = &f.ty
+            && let Some(inner) = project.message(name)
+            && inner.kind == MessageKind::Api
+        {
+            nested(app, ui, project, f, inner, path);
+        }
     }
     if link(ui, "+ Ajouter un champ").clicked() {
         app.edit(|p| {
@@ -215,6 +268,66 @@ fn message_body(app: &mut App, ui: &mut Ui, project: &Project, m: &Message) {
     }
 }
 
+/// The fields of the elements of a list field, under it.
+fn nested(
+    app: &mut App,
+    ui: &mut Ui,
+    project: &Project,
+    f: &Field,
+    inner: &Message,
+    path: &mut Vec<String>,
+) {
+    let what = format!("CHAQUE ÉLÉMENT DE {}", f.name);
+    // A bar on the left, and as little width lost as possible: the inspector is narrow.
+    let shown = Frame::new()
+        .inner_margin(Margin {
+            left: 10,
+            right: 0,
+            top: 0,
+            bottom: 2,
+        })
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(what)
+                        .size(10.0)
+                        .extra_letter_spacing(0.7)
+                        .color(FAINT),
+                );
+                ui.add(
+                    egui::Label::new(RichText::new(&inner.name).font(mono(XS)).color(MUTED))
+                        .truncate(),
+                );
+            });
+            if path.contains(&inner.name) {
+                ui.label(
+                    RichText::new("Déjà affiché plus haut.")
+                        .size(SM)
+                        .color(MUTED),
+                );
+            } else if path.len() >= MAX_DEPTH {
+                ui.label(
+                    RichText::new("Trop profond pour être affiché ici : ouvrez ce schéma.")
+                        .size(SM)
+                        .color(MUTED),
+                );
+            } else {
+                path.push(inner.name.clone());
+                // The same schema can be shown twice (two fields of the same type).
+                ui.push_id(("nested", path.len(), &f.name), |ui| {
+                    fields_at(app, ui, project, inner, path);
+                });
+                path.pop();
+            }
+        });
+    let rect = shown.response.rect;
+    ui.painter().vline(
+        rect.left() + 3.0,
+        rect.y_range(),
+        Stroke::new(1.0, BORDER_STRONG),
+    );
+}
+
 /// A change of one field of one schema.
 fn change(app: &mut App, message: &str, index: usize, f: impl FnOnce(&mut Field)) {
     app.edit(|p| {
@@ -224,7 +337,15 @@ fn change(app: &mut App, message: &str, index: usize, f: impl FnOnce(&mut Field)
     });
 }
 
-fn field_row(app: &mut App, ui: &mut Ui, project: &Project, m: &Message, index: usize, f: &Field) {
+fn field_row(
+    app: &mut App,
+    ui: &mut Ui,
+    project: &Project,
+    m: &Message,
+    index: usize,
+    f: &Field,
+    top: bool,
+) {
     let id = ("field", &m.name, index);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
@@ -262,14 +383,35 @@ fn field_row(app: &mut App, ui: &mut Ui, project: &Project, m: &Message, index: 
                 choice(
                     ui,
                     (id, "type"),
-                    &type_options(project, m.kind),
+                    &type_options(project, m.kind, f.repeated),
                     &type_name(&f.ty),
                 )
             })
             .inner
         {
-            change(app, &m.name, index, |x| {
-                x.ty = parse_type(&v);
+            let (message, field_name) = (m.name.clone(), f.name.clone());
+            app.edit(|p| {
+                let ty = if v == NEW_OBJECT {
+                    let Some(f) = p.message(&message).and_then(|m| m.fields.get(index)) else {
+                        return;
+                    };
+                    let name = object_name(p, &message, f);
+                    p.messages.push(Message {
+                        name: name.clone(),
+                        kind: MessageKind::Api,
+                        fields: vec![Field::new("id", FieldType::String)],
+                    });
+                    FieldType::Message { name }
+                } else {
+                    parse_type(&v)
+                };
+                let Some(x) = message_mut(p, &message)
+                    .and_then(|m| m.fields.get_mut(index))
+                    .filter(|x| x.name == field_name)
+                else {
+                    return;
+                };
+                x.ty = ty;
                 if matches!(x.ty, FieldType::Message { .. }) {
                     x.optional = false;
                 }
@@ -281,29 +423,44 @@ fn field_row(app: &mut App, ui: &mut Ui, project: &Project, m: &Message, index: 
         }
 
         let is_message = matches!(f.ty, FieldType::Message { .. });
-        if let Some(on) = widgets::check(
-            ui,
-            f.repeated,
-            RichText::new("[]").font(mono(11.0)).color(MUTED),
-        ) {
+        let repeated = ui.scope(|ui| {
+            widgets::check(
+                ui,
+                f.repeated,
+                RichText::new("[]").font(mono(11.0)).color(MUTED),
+            )
+        });
+        repeated
+            .response
+            .on_hover_text("Liste : le champ porte plusieurs valeurs (un tableau JSON).");
+        if let Some(on) = repeated.inner {
+            let api = m.kind == MessageKind::Api;
             change(app, &m.name, index, |x| {
                 x.repeated = on;
                 if on {
                     x.optional = false;
                     x.source = None;
+                } else if api && x.ty.is_message() {
+                    // No longer a list: no longer objects either (their schema stays in the project).
+                    x.ty = FieldType::String;
                 }
             });
         }
-        let optional = ui
-            .add_enabled_ui(!is_message && !f.repeated, |ui| {
-                widgets::check(
-                    ui,
-                    f.optional,
-                    RichText::new("?").font(mono(11.0)).color(MUTED),
-                )
-            })
-            .inner;
-        if let Some(on) = optional {
+        let optional = ui.add_enabled_ui(!is_message && !f.repeated, |ui| {
+            widgets::check(
+                ui,
+                f.optional,
+                RichText::new("?").font(mono(11.0)).color(MUTED),
+            )
+        });
+        optional
+            .response
+            .on_hover_text(if is_message || f.repeated {
+                "Optionnel : sans objet pour une liste ou un objet."
+            } else {
+                "Optionnel : le champ peut être absent."
+            });
+        if let Some(on) = optional.inner {
             change(app, &m.name, index, |x| {
                 x.optional = on;
                 if on {
@@ -322,8 +479,92 @@ fn field_row(app: &mut App, ui: &mut Ui, project: &Project, m: &Message, index: 
         }
     });
     if m.kind == MessageKind::Api && is_text(&f.ty) {
-        rules_row(app, ui, &m.name, index, f);
+        // Sources and rules are about what a route receives: a schema that is only an answer has neither.
+        let routes = || project.services.iter().flat_map(|s| &s.routes);
+        let received = routes().any(|r| r.request == m.name);
+        let only_answer = top && !received && routes().any(|r| r.response == m.name);
+        if top && (received || f.source.is_some()) && !f.repeated && !f.optional {
+            source_row(app, ui, project, &m.name, index, f);
+        }
+        if !only_answer || !f.rules.is_empty() {
+            rules_row(app, ui, &m.name, index, f);
+        }
     }
+}
+
+/// Where the route reads the field: the body or the query string, a header, a cookie (plain text fields of the
+/// schema a route receives).
+fn source_row(
+    app: &mut App,
+    ui: &mut Ui,
+    project: &Project,
+    message: &str,
+    index: usize,
+    f: &Field,
+) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.add_space(36.0);
+        ui.label(
+            RichText::new("LU DEPUIS")
+                .size(10.0)
+                .extra_letter_spacing(0.7)
+                .color(FAINT),
+        )
+        .on_hover_text(
+            "D'où la route lit ce champ. Un en-tête ou un cookie est relu à chaque requête : le corps ne peut pas le fournir.",
+        );
+        if f.source.is_none() && in_path(project, message, &f.name) {
+            ui.label(RichText::new("chemin").size(SM).color(SERVICE));
+            return;
+        }
+        let (current, name) = match &f.source {
+            Some(RequestSource::Header { name }) => (SOURCE_HEADER, name.as_str()),
+            Some(RequestSource::Cookie { name }) => (SOURCE_COOKIE, name.as_str()),
+            None => (SOURCE_BODY, ""),
+        };
+        let options = [SOURCE_BODY, SOURCE_HEADER, SOURCE_COOKIE].map(String::from);
+        let picked = ui
+            .allocate_ui(Vec2::new(118.0, 24.0), |ui| {
+                choice(ui, ("source", message, index), &options, current)
+            })
+            .inner;
+        if let Some(v) = picked {
+            // A name to start from: `X-Frontend-Id` for the field `frontend_id`.
+            let header = format!(
+                "X-{}",
+                f.name
+                    .split('_')
+                    .map(pascal)
+                    .collect::<Vec<_>>()
+                    .join("-")
+            );
+            let source = match v.as_str() {
+                SOURCE_HEADER => Some(RequestSource::Header {
+                    name: if name.is_empty() { header } else { name.to_string() },
+                }),
+                SOURCE_COOKIE => Some(RequestSource::Cookie {
+                    name: if name.is_empty() { f.name.clone() } else { name.to_string() },
+                }),
+                _ => None,
+            };
+            change(app, message, index, |x| x.source = source);
+        }
+        if f.source.is_some() {
+            let w = ui.available_width().max(80.0);
+            if let Some(v) = ui
+                .allocate_ui(Vec2::new(w, 24.0), |ui| {
+                    commit_entry(ui, ("source-name", message, index), name, true, "X-Frontend-ID", false)
+                })
+                .inner
+            {
+                change(app, message, index, |x| match &mut x.source {
+                    Some(RequestSource::Header { name } | RequestSource::Cookie { name }) => *name = v,
+                    None => {}
+                });
+            }
+        }
+    });
 }
 
 /// What a request must satisfy, checked before any step runs (text fields of API schemas).
