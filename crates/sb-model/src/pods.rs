@@ -32,6 +32,9 @@ pub struct PodsConfig {
     pub adminer: bool,
     /// Kafka UI (kafbat), a web interface for the broker.
     pub kafka_ui: bool,
+    /// Garage, an S3-compatible store, for the services that have an object step: its buckets and the access key of
+    /// the services are made by the stack. Off: the store is the one the environment file names.
+    pub garage: bool,
     pub traefik: TraefikConfig,
 }
 
@@ -47,6 +50,7 @@ impl Default for PodsConfig {
             env_file: String::new(),
             adminer: true,
             kafka_ui: true,
+            garage: true,
             traefik: TraefikConfig::default(),
         }
     }
@@ -56,6 +60,22 @@ impl PodsConfig {
     pub fn is_default(&self) -> bool {
         *self == Self::default()
     }
+}
+
+/// The bucket the stack makes for the variable of an object step: `AVATAR_BUCKET` gives `avatar-bucket`. A bucket
+/// name has 3 to 63 lower case letters, digits and `-`.
+pub fn bucket_name(env: &str) -> String {
+    let mut name: String = env
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    name = name.trim_matches('-').to_string();
+    if name.len() < 3 {
+        name = format!("bucket-{name}");
+    }
+    name.truncate(63);
+    name.trim_end_matches('-').to_string()
 }
 
 /// The reverse proxy: one host per admin interface and per frontend, and the API of the services on its own host.
@@ -144,6 +164,8 @@ pub struct TraefikHosts {
     pub kafka_ui: String,
     /// Mailpit, when the project has a mail service.
     pub mailpit: String,
+    /// Garage, when a service has an object step: where a browser sends and reads the files (signed URLs).
+    pub s3: String,
 }
 
 impl Default for TraefikHosts {
@@ -154,6 +176,7 @@ impl Default for TraefikHosts {
             adminer: "adminer".into(),
             kafka_ui: "kafka".into(),
             mailpit: "mail".into(),
+            s3: "s3".into(),
         }
     }
 }
@@ -249,6 +272,14 @@ mod tests {
     }
 
     #[test]
+    fn a_bucket_is_named_after_its_variable() {
+        assert_eq!(bucket_name("AVATAR_BUCKET"), "avatar-bucket");
+        assert_eq!(bucket_name("_B_"), "bucket-b");
+        let long = bucket_name(&format!("{}_X", "A".repeat(62)));
+        assert_eq!(long, "a".repeat(62));
+    }
+
+    #[test]
     fn hosts_follow_the_domain() {
         let mut t = TraefikConfig::default();
         assert_eq!(t.url("adminer"), "http://adminer.localhost");
@@ -310,6 +341,22 @@ mod tests {
         assert!(!crate::has_errors(&crate::validate(&p)));
         p.pods.traefik.admin_auth = "admin:$2y$05$hash".into();
         assert!(codes(&p).is_empty());
+
+        // The host of the object store counts only when the stack has one.
+        p.pods.traefik.hosts.s3 = "adminer".into();
+        assert!(codes(&p).is_empty());
+        crate::sample::add_jwt(&mut p);
+        crate::sample::add_avatars(&mut p);
+        assert_eq!(codes(&p), ["E_PODS_HOST_DUPLICATE"]);
+        p.pods.garage = false;
+        assert!(codes(&p).is_empty());
+        let mut p = {
+            let mut fresh = crate::sample::orders();
+            fresh.pods = p.pods.clone();
+            fresh.pods.garage = true;
+            fresh.pods.traefik.hosts.s3 = "s3".into();
+            fresh
+        };
 
         // Frontends: names and hosts are each unique.
         let front = |name: &str, host: &str| Frontend {

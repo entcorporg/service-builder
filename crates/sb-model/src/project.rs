@@ -1470,6 +1470,11 @@ impl Project {
         }
     }
 
+    /// Whether the stack of the Pods page holds Garage: it is asked for, and a service has an object step.
+    pub fn uses_garage(&self) -> bool {
+        self.pods.garage && self.services.iter().any(|s| !s.bucket_envs().is_empty())
+    }
+
     /// Gives every untagged field an explicit protobuf number.
     ///
     /// Without it a field's number depends on its position, so deleting a field in the middle
@@ -1673,6 +1678,24 @@ impl Service {
             .chain(self.routes.iter().flat_map(|r| &r.steps))
             .chain(self.consumers.iter().flat_map(|c| &c.steps))
             .chain(self.jobs.iter().flat_map(|j| &j.steps))
+    }
+
+    /// The environment variables that name the buckets the object steps of the service use, once each.
+    pub fn bucket_envs(&self) -> std::collections::BTreeSet<&str> {
+        let mut envs = std::collections::BTreeSet::new();
+        for step in self.handler_steps() {
+            step.walk(&mut |s| {
+                if let Step::ObjectPut { bucket_env, .. }
+                | Step::ObjectGet { bucket_env, .. }
+                | Step::ObjectDelete { bucket_env, .. }
+                | Step::ObjectPresignGet { bucket_env, .. }
+                | Step::ObjectPresignPut { bucket_env, .. } = s
+                {
+                    envs.insert(bucket_env.as_str());
+                }
+            });
+        }
+        envs
     }
 }
 

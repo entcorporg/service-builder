@@ -136,6 +136,14 @@ impl Engine {
         c
     }
 
+    /// The compose tool as a script names it.
+    fn compose_program(&self) -> &'static str {
+        match self.kind {
+            EngineKind::Podman => "podman-compose",
+            EngineKind::Docker => "docker compose",
+        }
+    }
+
     /// The compose tool on the stack in `dir`. For Podman it is `podman-compose`, which drives `podman` itself:
     /// `podman compose` may hand over to the Docker plugin, and to the Docker daemon with it.
     fn compose(&self, stack: &str, dir: &Path) -> Command {
@@ -217,6 +225,9 @@ pub fn prepare(project: &Project, dir: &Path) -> Result<usize, String> {
     }
     let mut files = analysis.files;
     files.extend(stack_files(project));
+    if project.uses_garage() {
+        garage_secrets(dir)?;
+    }
     for f in &files {
         let target = dir.join(&f.path);
         if fs::read_to_string(&target).is_ok_and(|current| current == f.content) {
@@ -231,6 +242,51 @@ pub fn prepare(project: &Project, dir: &Path) -> Result<usize, String> {
         write().map_err(|e| format!("cannot write {}: {e}", target.display()))?;
     }
     Ok(files.len())
+}
+
+/// `bytes` random bytes in hexadecimal, from the generator of the system.
+fn random_hex(bytes: usize) -> Result<String, String> {
+    use std::io::Read;
+    let mut buffer = vec![0u8; bytes];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut buffer))
+        .map_err(|e| format!("cannot read /dev/urandom: {e}"))?;
+    Ok(buffer.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The secrets of Garage, drawn once per stack and kept next to it, out of the project: the secret of the node, and
+/// the access key the services reach it with (an identifier and a secret in the form Garage imports). A file that is
+/// there is never written again: the key it holds is the one the store knows.
+fn garage_secrets(dir: &Path) -> Result<(), String> {
+    use sb_codegen::pods::{GARAGE_RPC_ENV, GARAGE_S3_ENV};
+    let draw = |path: &str, content: &dyn Fn() -> Result<String, String>| {
+        let target = dir.join(path);
+        if target.exists() {
+            return Ok(());
+        }
+        let text = content()?;
+        let write = || {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            std::io::Write::write_all(&mut options.open(&target)?, text.as_bytes())
+        };
+        write().map_err(|e| format!("cannot write {}: {e}", target.display()))
+    };
+    draw(GARAGE_RPC_ENV, &|| {
+        Ok(format!("GARAGE_RPC_SECRET={}\n", random_hex(32)?))
+    })?;
+    draw(GARAGE_S3_ENV, &|| {
+        Ok(format!(
+            "AWS_ACCESS_KEY_ID=GK{}\nAWS_SECRET_ACCESS_KEY={}\n",
+            random_hex(12)?,
+            random_hex(32)?
+        ))
+    })
 }
 
 /// Runs the command to its end, handing each line it prints (both streams) to `log`. `cancel` kills it.
@@ -390,6 +446,15 @@ pub fn up(
     // Containers of services that are no longer in the project go away with `--remove-orphans`.
     start.args(["up", "-d", "--remove-orphans"]);
     stream(start, log, cancel)?;
+
+    if project.uses_garage() {
+        log("▸ Garage : buckets et clé d'accès…");
+        let mut init = Command::new("sh");
+        init.arg(stack_gen::GARAGE_INIT).current_dir(dir);
+        init.envs(engine.env.iter().cloned());
+        init.env("COMPOSE", engine.compose_program());
+        stream(init, log, cancel)?;
+    }
 
     let restart: Vec<String> = changed
         .into_inner()
@@ -641,6 +706,53 @@ mod tests {
                 .unwrap()
                 .contains("mem_limit: 200m")
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_secrets_of_garage_are_drawn_once() {
+        use sb_codegen::pods::{GARAGE_INIT, GARAGE_RPC_ENV, GARAGE_S3_ENV};
+        let dir = std::env::temp_dir().join(format!("sb-pods-garage-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        // Without an object step, nothing of Garage is written.
+        prepare(&sample::orders(), &dir).unwrap();
+        assert!(!dir.join("garage").exists());
+
+        let mut project = sample::orders();
+        sample::add_jwt(&mut project);
+        sample::add_avatars(&mut project);
+        prepare(&project, &dir).unwrap();
+        assert!(dir.join(GARAGE_INIT).exists() && dir.join("garage/garage.toml").exists());
+        let read = |path: &str| fs::read_to_string(dir.join(path)).unwrap();
+        let rpc = read(GARAGE_RPC_ENV);
+        let secret = rpc.trim().strip_prefix("GARAGE_RPC_SECRET=").unwrap();
+        assert!(secret.len() == 64 && secret.bytes().all(|b| b.is_ascii_hexdigit()));
+        let s3 = read(GARAGE_S3_ENV);
+        let mut lines = s3.lines();
+        let id = lines
+            .next()
+            .unwrap()
+            .strip_prefix("AWS_ACCESS_KEY_ID=GK")
+            .unwrap();
+        let key = lines
+            .next()
+            .unwrap()
+            .strip_prefix("AWS_SECRET_ACCESS_KEY=")
+            .unwrap();
+        assert_eq!((id.len(), key.len()), (24, 64));
+        assert_ne!(secret, key);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(dir.join(GARAGE_S3_ENV))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o077, 0, "{mode:o}");
+        }
+        // The next start keeps them: the store knows this key.
+        prepare(&project, &dir).unwrap();
+        assert_eq!((read(GARAGE_RPC_ENV), read(GARAGE_S3_ENV)), (rpc, s3));
         fs::remove_dir_all(dir).unwrap();
     }
 

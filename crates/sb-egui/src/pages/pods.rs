@@ -452,6 +452,28 @@ fn form(app: &mut App, ui: &mut Ui) {
             );
         },
     );
+    // Only a project that stores objects has something to choose.
+    if p.services.iter().any(|s| !s.bucket_envs().is_empty()) {
+        separator(ui);
+        section(
+            ui,
+            "Stockage objet",
+            "table",
+            |_| {},
+            |ui| {
+                toggle(
+                    app,
+                    ui,
+                    (
+                        "Garage",
+                        "Un stockage compatible S3 dans la stack : ses buckets et la clé d'accès des services sont créés au démarrage. Désactivé : le stockage est celui que désigne le fichier .env.",
+                    ),
+                    pods.garage,
+                    |c, v| c.garage = v,
+                );
+            },
+        );
+    }
     separator(ui);
 
     let t = &pods.traefik;
@@ -584,7 +606,7 @@ fn traefik(app: &mut App, ui: &mut Ui, p: &Project) {
     widgets::section_title(ui, "Hôtes");
     let mta = p.services.iter().any(|s| s.kind == ServiceKind::Mta);
     type Set = fn(&mut PodsConfig, String);
-    let hosts: [(bool, &str, &str, &str, Set); 5] = [
+    let hosts: [(bool, &str, &str, &str, Set); 6] = [
         (true, "API", "api", &t.hosts.api, |c, v| {
             c.traefik.hosts.api = v
         }),
@@ -611,6 +633,9 @@ fn traefik(app: &mut App, ui: &mut Ui, p: &Project) {
         ),
         (mta, "Mailpit", "mailpit", &t.hosts.mailpit, |c, v| {
             c.traefik.hosts.mailpit = v
+        }),
+        (p.uses_garage(), "Garage (S3)", "s3", &t.hosts.s3, |c, v| {
+            c.traefik.hosts.s3 = v
         }),
     ];
     for (shown, label, key, value, set) in hosts {

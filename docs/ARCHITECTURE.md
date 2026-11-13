@@ -808,13 +808,15 @@ passer par un export. Trois couches, comme le reste :
   (`cpuset`, politique de redémarrage, mémoire d'un service, de Kafka, de PostgreSQL ; le swap est plafonné à la même
   valeur), la publication des ports sur `127.0.0.1`, un fichier d'environnement donné à chaque service (les secrets
   restent hors du projet ; un fichier de l'hôte qu'il désigne par un chemin absolu, comme `DKIM_PRIVATE_KEY_PATH`, est
-  monté en lecture seule au même chemin dans chaque service), Adminer et Kafka UI, et **Traefik** : domaine, e-mail ACME, ports, tableau de bord,
+  monté en lecture seule au même chemin dans chaque service), Adminer et Kafka UI, Garage (`garage`, actif par défaut, sans effet
+  tant qu'aucun service n'a d'étape objet), et **Traefik** : domaine, e-mail ACME, ports, tableau de bord,
   authentification des interfaces, limite de débit, un sous-domaine par hôte, et les **frontends** (nom, sous-domaine,
   port du serveur de développement sur l'hôte). Validé comme le reste
   (`E_PODS_*`, pointeurs `/pods/...`, affichés sous le champ fautif) : tout ce qui finit dans un YAML y est vérifié.
 - **Les fichiers** (`sb-codegen/src/pods.rs`, purs et testés) : `Dockerfile` (deux images : `builder`, Rust + cmake, et
   `runtime`, Debian + OpenSSL), `build.sh`, `compose.pods.yml` et, si Traefik est actif, `traefik/traefik.yml` et
-  `traefik/dynamic/{services,routers,middlewares}.yaml`. Ils ne font pas partie d'un export, qui reste ce dont
+  `traefik/dynamic/{services,routers,middlewares}.yaml`, et, avec Garage, `garage/garage.toml` et `garage/init.sh`.
+  Ils ne font pas partie d'un export, qui reste ce dont
   `cargo run` a besoin ; l'onglet les montre (« Fichiers générés ») et `sb pods` les écrit.
 - **L'exécution** (`sb-app/src/pods.rs`, bloquant, appelé sur un fil) : le workspace est écrit dans
   `~/.local/share/service-builder/pods/sb-<projet>/` (un fichier inchangé n'est pas réécrit : sa date dit à cargo qu'il
@@ -832,7 +834,7 @@ compose (`sb-<projet>`). En rootless, `cpuset` demande la délégation du contr�
 80/443 un `net.ipv4.ip_unprivileged_port_start` adapté.
 
 **La stack.** Kafka (KRaft, joint en `kafka:19092`), PostgreSQL (une base par service, volume `postgres-data`), Mailpit
-s'il y a un service mail, DragonflyDB s'il y a un service temps réel, puis les services : `KAFKA_BROKERS`,
+s'il y a un service mail, DragonflyDB s'il y a un service temps réel, Garage s'il y a une étape objet, puis les services : `KAFKA_BROKERS`,
 `<SERVICE>_DATABASE_URL`, `<SERVICE>_URL` des autres services, `DRAGONFLY_URL`, `SMTP_HOST`, `JWKS_URL` sont posés
 pour qu'ils se trouvent par leur nom. Les services s'arrêtent sur `SIGINT`, relayé par un processus init (sans lui, le
 premier processus d'un conteneur ignore le signal et l'arrêt attend dix secondes). Les ports de Kafka et de PostgreSQL
@@ -850,6 +852,33 @@ lui seul est alors servi une fois par frontend sous `/<nom du frontend>`, que Tr
 répond au CORS (origines des frontends, avec identifiants) et les services démarrent avec `CORS_ORIGINS` vide pour que
 l'en-tête ne parte pas deux fois. Les chemins `/.well-known/...` sont servis sans préfixe. Sur un domaine public, des
 interfaces sans authentification donnent l'avertissement `W_PODS_ADMIN_OPEN`.
+
+**Garage (stockage objet).** Dès qu'un service a une étape objet (`objectPut`, `objectGet`, `objectDelete`,
+`objectPresignGet`, `objectPresignPut`) et que `pods.garage` est actif, la stack contient un Garage à un seul nœud
+(`dxflrs/garage:v2.0.0`, volumes `garage-meta` et `garage-data`). Les services concernés, et eux seuls, reçoivent
+`S3_ENDPOINT=http://garage:3900`, `AWS_REGION=garage`, et le nom du bucket dans chaque variable que leurs étapes
+nomment : un bucket par variable, nommé d'après elle (`AVATAR_BUCKET` donne `avatar-bucket`).
+- **Les secrets ne sont pas générés** : le secret du nœud (`garage/rpc.env`) et la clé d'accès des services
+  (`garage/s3.env` : `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) sont tirés au hasard une fois par stack par
+  `sb-app`, écrits en `0600` dans le dossier de la stack, et jamais réécrits. Ils ne sont ni dans le projet ni dans
+  « Fichiers générés ». `garage/s3.env` passe **après** le fichier d'environnement du projet : dans la stack, c'est la
+  clé de ce Garage qui compte.
+- **`garage/init.sh`**, lancé après `compose up` à chaque démarrage (et à la main : `sh garage/init.sh`), passe par la
+  ligne de commande de Garage dans son conteneur : layout du nœud, import de la clé, création des buckets, droits de
+  lecture et d'écriture. Chaque étape regarde avant d'agir, il est donc relançable. Les services n'attendent pas
+  Garage : rien n'est demandé au stockage à leur démarrage.
+- **Les URL signées** portent l'hôte : `S3_PUBLIC_ENDPOINT` est l'adresse que le navigateur atteint. Avec Traefik,
+  l'hôte `s3.` (réglable) mène à Garage, sans authentification (la signature en est une, et `Authorization` appartient
+  à S3) et avec le CORS des frontends, nécessaire à un `PUT` signé depuis une page. Sans Traefik, le port S3 est publié
+  sur `127.0.0.1` (le premier libre après ceux des interfaces) si les ports sont publiés ; sinon la variable n'est pas
+  posée et les URL signées gardent l'adresse interne.
+- `pods.garage` à `false` : ni conteneur ni variables, le stockage est celui que désigne le fichier d'environnement.
+- Supprimer les volumes (`sb down --volumes`) vide le stockage ; la clé de `garage/s3.env` est réimportée au démarrage
+  suivant.
+
+Vérifié sur Docker avec le vrai Garage : `init.sh` deux fois de suite, puis un `PUT` et un `GET` signés avec la clé
+tirée (200), une requête non signée (403). Non vérifié : le parcours complet d'un service généré jusqu'à ce Garage, la
+route Traefik avec un navigateur, et Podman.
 
 La stack continue de tourner quand l'application se ferme. Deux projets de même nom partagent la même stack.
 

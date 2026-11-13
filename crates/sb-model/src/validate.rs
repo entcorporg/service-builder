@@ -267,6 +267,7 @@ impl<'a> Checker<'a> {
             (pods.adminer, "adminer", &t.hosts.adminer),
             (pods.kafka_ui, "kafkaUi", &t.hosts.kafka_ui),
             (mta, "mailpit", &t.hosts.mailpit),
+            (self.project.uses_garage(), "s3", &t.hosts.s3),
         ] {
             if on {
                 hosts.push((key.into(), value.clone()));

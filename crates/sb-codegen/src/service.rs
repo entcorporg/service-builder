@@ -1372,20 +1372,7 @@ fn jwt_settings(service: &Service) -> (BTreeSet<&str>, BTreeSet<&str>) {
 
 /// The environment variables that name the buckets the object steps of a service use, once each.
 fn bucket_envs(service: &Service) -> BTreeSet<&str> {
-    let mut envs = BTreeSet::new();
-    for step in service.handler_steps() {
-        step.walk(&mut |s| {
-            if let Step::ObjectPut { bucket_env, .. }
-            | Step::ObjectGet { bucket_env, .. }
-            | Step::ObjectDelete { bucket_env, .. }
-            | Step::ObjectPresignGet { bucket_env, .. }
-            | Step::ObjectPresignPut { bucket_env, .. } = s
-            {
-                envs.insert(bucket_env.as_str());
-            }
-        });
-    }
-    envs
+    service.bucket_envs()
 }
 
 /// The `app_url` of a passkey step as the argument of the runtime, an `Option<&str>`: the origin of the request, or

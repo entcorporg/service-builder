@@ -139,6 +139,8 @@ enregistré dans le projet, règle :
 
 - les **ressources** : CPU (`cpuset`), politique de redémarrage, mémoire d'un service, de Kafka et de PostgreSQL ;
 - les **interfaces** : Adminer (PostgreSQL) et Kafka UI, à activer ou non ;
+- le **stockage objet** : si un service a une étape objet, **Garage** (compatible S3) rejoint la stack, avec ses buckets
+  et la clé d'accès des services, créés au démarrage. Désactivé, le stockage est celui que désigne le fichier `.env` ;
 - **Traefik**, à ajouter ou retirer : domaine et Let's Encrypt (ou HTTP sur `*.localhost` sans domaine), un hôte par
   interface, les frontends (serveurs de développement sur l'hôte ; un service qui lit l'en-tête `X-Frontend-ID` le reçoit),
   CORS, limite de débit. Le `traefik.yml` et les `dynamic/*.yaml` sont générés, et visibles dans l'onglet.
