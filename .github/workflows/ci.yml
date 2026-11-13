@@ -186,7 +186,7 @@ jobs:
       - name: AppImage tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libfuse2t64 file desktop-file-utils
+          sudo apt-get install -y --no-install-recommends libfuse2t64 file desktop-file-utils minisign
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p service-builder
@@ -198,12 +198,13 @@ jobs:
         env:
           KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        # minisign reads the password from stdin when there is no terminal (rsign wants /dev/tty, which a runner has
+        # not). Its signatures are prehashed, the only kind the updater accepts.
         run: |
-          cargo install rsign2 --locked
           umask 077
           printf '%s' "$KEY" | base64 -d > "$RUNNER_TEMP/minisign.key"
           for image in dist/*.AppImage; do
-            printf '%s\n' "$PASSWORD" | rsign sign -s "$RUNNER_TEMP/minisign.key" -x "$image.minisig" "$image"
+            printf '%s\n' "$PASSWORD" | minisign -S -s "$RUNNER_TEMP/minisign.key" -m "$image" -x "$image.minisig"
           done
           rm -f "$RUNNER_TEMP/minisign.key"
       - name: Release
