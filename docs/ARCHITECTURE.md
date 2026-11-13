@@ -807,7 +807,8 @@ passer par un export. Trois couches, comme le reste :
 - **Le réglage** (`sb-model/src/pods.rs`, clé `pods` du projet, absente tant qu'elle vaut les défauts) : les ressources
   (`cpuset`, politique de redémarrage, mémoire d'un service, de Kafka, de PostgreSQL ; le swap est plafonné à la même
   valeur), la publication des ports sur `127.0.0.1`, un fichier d'environnement donné à chaque service (les secrets
-  restent hors du projet), Adminer et Kafka UI, et **Traefik** : domaine, e-mail ACME, ports, tableau de bord,
+  restent hors du projet ; un fichier de l'hôte qu'il désigne par un chemin absolu, comme `DKIM_PRIVATE_KEY_PATH`, est
+  monté en lecture seule au même chemin dans chaque service), Adminer et Kafka UI, et **Traefik** : domaine, e-mail ACME, ports, tableau de bord,
   authentification des interfaces, limite de débit, un sous-domaine par hôte, et les **frontends** (nom, sous-domaine,
   port du serveur de développement sur l'hôte). Validé comme le reste
   (`E_PODS_*`, pointeurs `/pods/...`, affichés sous le champ fautif) : tout ce qui finit dans un YAML y est vérifié.

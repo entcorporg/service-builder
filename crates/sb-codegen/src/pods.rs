@@ -89,11 +89,17 @@ pub struct Link {
 }
 
 pub fn files(project: &Project) -> Vec<GeneratedFile> {
+    files_with(project, &[])
+}
+
+/// The files of the stack, `mounts` being the files of the host the services read (a key the environment file names
+/// by its path): each one is mounted read-only in every service, at the path it has on the host.
+pub fn files_with(project: &Project, mounts: &[String]) -> Vec<GeneratedFile> {
     let mut files = vec![
         GeneratedFile::new(DOCKERFILE, dockerfile()),
         GeneratedFile::new(BUILD_SCRIPT, build_script(project)),
         GeneratedFile::new(".dockerignore", "target\n.git\n"),
-        GeneratedFile::new(COMPOSE_FILE, compose(project)),
+        GeneratedFile::new(COMPOSE_FILE, compose(project, mounts)),
     ];
     if project.pods.traefik.enabled {
         files.push(GeneratedFile::new(
@@ -342,7 +348,7 @@ fn mebibytes(amount: &str) -> u64 {
     }
 }
 
-fn compose(project: &Project) -> String {
+fn compose(project: &Project, mounts: &[String]) -> String {
     let pods = &project.pods;
     let t = &pods.traefik;
     let name = stack_name(project);
@@ -377,6 +383,15 @@ fn compose(project: &Project) -> String {
     y.line(1, "stop_signal: SIGINT");
     y.line(1, "volumes:");
     y.line(2, format!("- bin:{BIN_DIR}:ro"));
+    if !mounts.is_empty() {
+        y.comment(
+            2,
+            "The files the environment file names, where the services look for them.",
+        );
+    }
+    for path in mounts {
+        y.line(2, format!("- {}", quoted(&format!("{path}:{path}:ro"))));
+    }
     if !pods.env_file.trim().is_empty() {
         y.line(1, "env_file:");
         y.line(2, format!("- {}", quoted(pods.env_file.trim())));
@@ -1217,6 +1232,20 @@ mod tests {
             !compose.contains("kafka-ui") && !compose.contains("ports:"),
             "{compose}"
         );
+    }
+
+    #[test]
+    fn the_files_of_the_host_are_mounted_where_the_services_look_for_them() {
+        let p = sample::orders();
+        let compose = file(
+            &files_with(&p, &["/srv/keys/dkim.pem".to_string()]),
+            COMPOSE_FILE,
+        );
+        assert!(
+            compose.contains("    - \"/srv/keys/dkim.pem:/srv/keys/dkim.pem:ro\"\n"),
+            "{compose}"
+        );
+        assert!(!compose_of(&p).contains("dkim.pem"));
     }
 
     fn compose_of(p: &Project) -> String {

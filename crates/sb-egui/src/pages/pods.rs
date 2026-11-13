@@ -404,7 +404,7 @@ fn form(app: &mut App, ui: &mut Ui) {
             let new = row(
                 ui,
                 "Fichier .env",
-                "Des lignes NOM=valeur données à chaque service (clés, secrets) : elles restent hors du projet.",
+                "Des lignes NOM=valeur données à chaque service (clés, secrets) : elles restent hors du projet. Un fichier désigné par un chemin absolu (une clé) est monté dans les conteneurs.",
                 |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     browse = icon_btn(ui, "folder", "Choisir un fichier…", false).clicked();

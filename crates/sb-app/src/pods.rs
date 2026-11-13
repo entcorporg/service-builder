@@ -162,7 +162,43 @@ pub fn stack_dir(project: &Project) -> PathBuf {
 
 /// The files of the stack that are not part of an export: Dockerfile, compose, Traefik.
 pub fn stack_files(project: &Project) -> Vec<GeneratedFile> {
-    sb_codegen::pods::files(project)
+    sb_codegen::pods::files_with(project, &env_file_mounts(project))
+}
+
+/// The files of the host that the environment file names by an absolute path (`DKIM_PRIVATE_KEY_PATH=/…/dkim.pem`).
+/// A container does not see them unless they are mounted: the stack mounts each one at the same path.
+pub fn env_file_mounts(project: &Project) -> Vec<String> {
+    let Ok(text) = fs::read_to_string(project.pods.env_file.trim()) else {
+        return vec![];
+    };
+    let mut paths: Vec<String> = text
+        .lines()
+        .filter_map(env_value)
+        // A colon would be read as the separator of the mount.
+        .filter(|value| value.starts_with('/') && !value.contains(':'))
+        .filter(|value| Path::new(value).is_file())
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// The value of a `NAME=value` line, as compose reads it: quotes removed, and without the comment that follows a
+/// value that has none.
+fn env_value(line: &str) -> Option<String> {
+    let line = line.trim();
+    let line = line.strip_prefix("export ").unwrap_or(line);
+    if line.starts_with('#') {
+        return None;
+    }
+    let value = line.split_once('=')?.1.trim();
+    for quote in ['"', '\''] {
+        if let Some(rest) = value.strip_prefix(quote) {
+            return rest.split_once(quote).map(|(inside, _)| inside.to_string());
+        }
+    }
+    let value = value.split_once(" #").map_or(value, |(before, _)| before);
+    Some(value.trim_end().to_string())
 }
 
 /// Writes the workspace and the files of the stack into `dir`. A file whose content did not change is left alone:
@@ -538,6 +574,41 @@ mod tests {
         assert_eq!(list[0].service, "orders");
         assert_eq!(list[0].name, "sb-demo_orders_1");
         assert!(parse_ps("").is_empty() && parse_ps("[]").is_empty());
+    }
+
+    #[test]
+    fn the_files_the_environment_file_names_are_mounted() {
+        let dir = std::env::temp_dir().join(format!("sb-pods-env-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("dkim.pem").display().to_string();
+        fs::write(&key, "key").unwrap();
+        let env = dir.join(".env");
+        fs::write(
+            &env,
+            format!(
+                "# keys\nSMTP_HOST=mailpit   # dev relay\nDKIM_PRIVATE_KEY_PATH={key}    # dev key\n\
+                 export COPY=\"{key}\"\nMISSING=/nowhere/key.pem\nFOLDER={}\n",
+                dir.display()
+            ),
+        )
+        .unwrap();
+        let mut project = sample::orders();
+        project.pods.env_file = env.display().to_string();
+        assert_eq!(env_file_mounts(&project), vec![key.clone()]);
+        let compose = stack_files(&project)
+            .into_iter()
+            .find(|f| f.path == COMPOSE_FILE)
+            .unwrap()
+            .content;
+        assert!(
+            compose.contains(&format!("- \"{key}:{key}:ro\"")),
+            "{compose}"
+        );
+        // No environment file, or one that cannot be read: nothing is mounted.
+        project.pods.env_file = dir.join("absent").display().to_string();
+        assert!(env_file_mounts(&project).is_empty());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
