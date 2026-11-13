@@ -3563,7 +3563,7 @@ dependencies = [
 
 [[package]]
 name = "sb-app"
-version = "3.1.1"
+version = "3.2.0"
 dependencies = [
  "sb-codegen",
  "sb-model",
@@ -3573,7 +3573,7 @@ dependencies = [
 
 [[package]]
 name = "sb-codegen"
-version = "3.1.1"
+version = "3.2.0"
 dependencies = [
  "sb-model",
  "serde",
@@ -3585,7 +3585,7 @@ dependencies = [
 
 [[package]]
 name = "sb-model"
-version = "3.1.1"
+version = "3.2.0"
 dependencies = [
  "heck",
  "jsonschema",
@@ -3725,7 +3725,7 @@ dependencies = [
 
 [[package]]
 name = "service-builder"
-version = "3.1.1"
+version = "3.2.0"
 dependencies = [
  "eframe",
  "egui_extras",
