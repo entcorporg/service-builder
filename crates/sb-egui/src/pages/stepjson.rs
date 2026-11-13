@@ -13,7 +13,7 @@ use sb_model::{
 };
 use serde_json::Value;
 
-use super::assignments::expr_editor;
+use super::assignments::{expr_editor, sql_expr_editor};
 use super::common::{commit_entry, icon_btn, link};
 use crate::app::App;
 use crate::theme::*;
@@ -274,7 +274,7 @@ fn column_values(
                 .iter()
                 .find(|a| a.field == c.name)
                 .map(|a| a.value.clone());
-            let edited = expr_editor(
+            let edited = sql_expr_editor(
                 app,
                 ui,
                 (id, "col", &c.name),
@@ -282,6 +282,7 @@ fn column_values(
                 true,
                 current.as_ref(),
                 vars,
+                c.ty == sb_model::ColumnType::Timestamp,
             );
             if let Some(e) = edited {
                 list.retain(|a| a.field != c.name);
@@ -323,7 +324,7 @@ fn conditions(
         let target = column.map(|x| Field::new(&x.name, x.ty.field_type()));
         let mut value = |ui: &mut Ui, reserve: f32| -> Option<Expr> {
             let edited = fill(ui, reserve, |ui| {
-                expr_editor(
+                sql_expr_editor(
                     app,
                     ui,
                     (id, "value", i),
@@ -331,6 +332,7 @@ fn conditions(
                     false,
                     Some(&c.value),
                     vars,
+                    column.is_some_and(|x| x.ty == sb_model::ColumnType::Timestamp),
                 )
             });
             edited.flatten()

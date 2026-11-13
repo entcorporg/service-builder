@@ -206,8 +206,8 @@ tables, des listes), « Construire la réponse par la logique » ajoute une vari
 remplie en Rust avec `tx`, dont chaque champ alimente la réponse ; le bloc SQL le fait sans écrire de Rust. Une variable peut en effet porter un schéma entier,
 construit en Rust (`E_LET_VALUE` si on essaie autre chose). « ← Architecture » ramène au canvas.
 
-Pas encore : authentification, validation des champs obligatoires, pagination, spécification OpenAPI, jointures
-entre tables dans le bloc SQL (une requête plus riche s'écrit en Rust avec `tx`).
+Pas encore : refus d'un champ obligatoire absent, pagination, spécification OpenAPI, en-têtes de réponse libres,
+appel d'une API HTTP externe, jointures entre tables dans le bloc SQL (une requête plus riche s'écrit en Rust avec `tx`).
 
 ### Tables et bloc SQL
 
@@ -713,8 +713,7 @@ flowchart LR
 - **Étape Code Rust** : `tx` est disponible pour écrire ses propres données. Un `return` anticipé doit appeler
   `tx.commit().await?` avant, sinon tout est annulé (événements compris).
 
-Ce qui n'est pas encore modélisé : les *données métier* elles-mêmes (entités, tables) et la déduplication côté
-consumer (inbox). Pour l'instant elles s'écrivent à la main dans une étape *Code Rust*.
+Ce qui n'est pas modélisé s'écrit à la main dans une étape *Code Rust* : une jointure, un appel à une API externe.
 
 ### Pourquoi générer plutôt qu'interpréter ?
 

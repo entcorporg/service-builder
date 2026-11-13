@@ -145,13 +145,6 @@ impl<'a> Checker<'a> {
                 "the project name must start with a letter and contain only letters, digits, spaces, `-` or `_`",
             );
         }
-        if p.broker.bootstrap_servers.trim().is_empty() {
-            self.error(
-                "E_BROKER",
-                "/broker/bootstrapServers",
-                "the Kafka bootstrap servers are empty",
-            );
-        }
         if !(1..=MAX_OUTBOX_ATTEMPTS).contains(&p.outbox.max_attempts) {
             self.error(
                 "E_OUTBOX_ATTEMPTS",
