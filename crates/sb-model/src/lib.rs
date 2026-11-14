@@ -10,6 +10,9 @@ pub mod sample;
 pub mod typing;
 pub mod validate;
 
+#[cfg(test)]
+mod journal_tests;
+
 pub use pods::{Frontend, PodsConfig, TraefikConfig, TraefikHosts};
 pub use project::*;
 pub use validate::{Diagnostic, Severity, has_errors, validate};
