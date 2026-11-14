@@ -1999,6 +1999,8 @@ mod tests {
         let receipt = &flows[flows.find("pub async fn put_receipt(").unwrap()..];
         assert!(receipt.contains(".header(\"Cache-Control\", \"no-store\".to_string())"));
         assert!(receipt.contains(".header(\"X-Order-Id\", input.order_id.clone())"));
+        // A header value may be a text with values in it.
+        assert!(receipt.contains(".header(\"X-Receipt-Ref\", format!("));
         // The handler checks what the flow computed before it goes on the wire: a bad value is a 500, never a split header.
         let http = file(&files, "services/orders/src/transport/http.rs");
         assert!(http.contains("eda_runtime::http::header_value_ok(v)"));

@@ -2122,7 +2122,7 @@ pub fn add_sql_reads(p: &mut Project) {
             conditions: vec![SqlCondition {
                 column: "title".into(),
                 op: CmpOp::Eq,
-                value: path("input.search"),
+                value: call(Func::Lower, vec![path("input.search")]),
                 test: SqlTest::Contains,
             }],
             values: vec![],
@@ -2143,7 +2143,8 @@ pub fn add_sql_reads(p: &mut Project) {
                 column: "post_id".into(),
                 descending: false,
             }],
-            limit_from: Some(path("input.page_size")),
+            // An absent page size is 20: an operation stands where a number is expected.
+            limit_from: Some(call(Func::Default, vec![path("input.page_size"), lit(20)])),
             offset: None,
             cursor: vec![path("input.after_title"), path("input.after_id")],
             total_bind: Some("total".into()),
@@ -2663,6 +2664,11 @@ pub fn add_receipts(p: &mut Project) {
                 ResponseHeader {
                     name: "X-Order-Id".into(),
                     value: path("input.order_id"),
+                },
+                // A text with a value in it: the new expressions go where a response header takes a value.
+                ResponseHeader {
+                    name: "X-Receipt-Ref".into(),
+                    value: template("receipt-{input.order_id}"),
                 },
             ],
         }],
