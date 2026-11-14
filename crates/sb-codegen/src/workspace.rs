@@ -1,7 +1,7 @@
 //! Files shared by every service of the generated workspace.
 
 use sb_model::names::topic_const;
-use sb_model::{MessageKind, Project, Service};
+use sb_model::{FieldType, MessageKind, Project, Service};
 
 use crate::GeneratedFile;
 use crate::proto;
@@ -22,16 +22,17 @@ const RUNTIME_S3: &str = include_str!("../templates/runtime/s3.rs");
 const RUNTIME_WEBAUTHN: &str = include_str!("../templates/runtime/webauthn.rs");
 const RUNTIME_WEBHOOK: &str = include_str!("../templates/runtime/webhook.rs");
 const RUNTIME_RATE_LIMIT: &str = include_str!("../templates/runtime/rate_limit.rs");
+const CONTRACTS_JSON: &str = include_str!("../templates/contracts/json.rs");
 const RUNTIME_CARGO: &str = include_str!("../templates/runtime/Cargo.toml");
 
 pub fn files(project: &Project) -> Vec<GeneratedFile> {
     let proto_name = proto::proto_file_name(project);
-    vec![
+    let mut files = vec![
         GeneratedFile::new("Cargo.toml", root_cargo(project)),
         GeneratedFile::new(".gitignore", "/target\n"),
         GeneratedFile::new("README.md", readme(project)),
         GeneratedFile::new("docker-compose.yml", docker_compose(project)),
-        GeneratedFile::new("contracts/Cargo.toml", CONTRACTS_CARGO),
+        GeneratedFile::new("contracts/Cargo.toml", contracts_cargo(project)),
         GeneratedFile::new("contracts/build.rs", contracts_build(project, &proto_name)),
         GeneratedFile::new("contracts/src/lib.rs", contracts_lib(project)),
         GeneratedFile::new(
@@ -53,7 +54,58 @@ pub fn files(project: &Project) -> Vec<GeneratedFile> {
         GeneratedFile::new("runtime/src/validation.rs", RUNTIME_VALIDATION),
         GeneratedFile::new("runtime/src/webauthn.rs", RUNTIME_WEBAUTHN),
         GeneratedFile::new("runtime/src/webhook.rs", RUNTIME_WEBHOOK),
-    ]
+    ];
+    if json_adapters(project) {
+        files.push(GeneratedFile::new("contracts/src/json.rs", CONTRACTS_JSON));
+    }
+    files
+}
+
+/// The messages that travel as JSON: the API schemas, and the events a mail service renders its mails from.
+fn json_messages(project: &Project) -> Vec<&sb_model::Message> {
+    let mailed = crate::mta::json_messages(project);
+    project
+        .messages
+        .iter()
+        .filter(|m| m.kind == MessageKind::Api || mailed.contains(&m.name))
+        .collect()
+}
+
+/// Whether a JSON message has a `bytes` or `timestamp` field, which need the adapters of `contracts::json`.
+fn json_adapters(project: &Project) -> bool {
+    json_messages(project).iter().any(|m| {
+        m.fields
+            .iter()
+            .any(|f| matches!(f.ty, FieldType::Bytes | FieldType::Timestamp))
+    })
+}
+
+/// The `serde(with)` module that gives a field its JSON form, if the protobuf type has none of its own.
+fn json_adapter(f: &sb_model::Field) -> Option<&'static str> {
+    match (&f.ty, f.repeated, f.optional) {
+        (FieldType::Bytes, true, _) => Some("bytes_list"),
+        (FieldType::Bytes, false, true) => Some("bytes_opt"),
+        (FieldType::Bytes, false, false) => Some("bytes"),
+        (FieldType::Timestamp, true, _) => Some("timestamp_list"),
+        (FieldType::Timestamp, false, _) => Some("timestamp"),
+        _ => None,
+    }
+}
+
+fn contracts_cargo(project: &Project) -> String {
+    let mut cargo = CONTRACTS_CARGO.to_string();
+    if json_adapters(project) {
+        cargo = cargo.replace(
+            "serde.workspace = true\n",
+            "serde.workspace = true\nbase64.workspace = true\nchrono.workspace = true\n",
+        );
+        // The unit tests of the adapters read JSON.
+        cargo = cargo.replace(
+            "[build-dependencies]",
+            "[dev-dependencies]\nserde_json.workspace = true\n\n[build-dependencies]",
+        );
+    }
+    cargo
 }
 
 fn root_cargo(project: &Project) -> String {
@@ -164,12 +216,7 @@ fn contracts_build(project: &Project, proto_name: &str) -> String {
         "let descriptors = protox::compile([\"{proto_name}\"], [\"proto\"])?;"
     ));
     // The API schemas travel as JSON, and so do the events a mail service renders its mails from.
-    let mailed = crate::mta::json_messages(project);
-    let api: Vec<_> = project
-        .messages
-        .iter()
-        .filter(|m| m.kind == MessageKind::Api || mailed.contains(&m.name))
-        .collect();
+    let api = json_messages(project);
     if api.is_empty() {
         c.line("tonic_prost_build::configure().compile_fds(descriptors)?;");
     } else {
@@ -182,6 +229,17 @@ fn contracts_build(project: &Project, proto_name: &str) -> String {
         c.line("    .type_attribute(&path, \"#[derive(serde::Serialize, serde::Deserialize)]\")");
         c.line("    .type_attribute(&path, \"#[serde(default)]\");");
         c.close();
+        // `bytes` and `timestamp` have no JSON form of their own: base64 and RFC 3339 (see `contracts::json`).
+        for m in &api {
+            for f in &m.fields {
+                if let Some(adapter) = json_adapter(f) {
+                    c.line(format!(
+                        "builder = builder.field_attribute(\".{package}.{}.{}\", \"#[serde(with = \\\"crate::json::{adapter}\\\")]\");",
+                        m.name, f.name
+                    ));
+                }
+            }
+        }
         c.line("builder.compile_fds(descriptors)?;");
     }
     c.line("println!(\"cargo:rerun-if-changed=proto\");");
@@ -195,6 +253,10 @@ fn contracts_lib(project: &Project) -> String {
     c.line("// @generated by service-builder. Do not edit: changes are overwritten on export.");
     c.line("//! Messages and gRPC stubs generated from the project schemas, plus topic names.");
     c.blank();
+    if json_adapters(project) {
+        c.line("pub mod json;");
+        c.blank();
+    }
     c.open("pub mod pb");
     c.line(format!(
         "tonic::include_proto!(\"{}\");",

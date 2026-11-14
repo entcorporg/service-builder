@@ -100,6 +100,13 @@ pub fn generate(project: &Project, service: &Service) -> Result<Vec<GeneratedFil
     }
     if has_routes {
         files.push(file("transport/http.rs", http_rs(project, service)));
+        // The document of the routes, next to the crate: read by whoever builds a client, and served when asked for.
+        if let Some(doc) = crate::openapi::openapi_json(project, service) {
+            files.push(GeneratedFile::new(
+                format!("{}/openapi.json", dir(service)),
+                doc,
+            ));
+        }
     }
     if has_consumers {
         files.push(file("transport/kafka.rs", kafka_rs(project, service)));
@@ -168,7 +175,7 @@ fn cargo_toml(service: &Service) -> String {
     let http = if service.routes.is_empty() {
         ""
     } else {
-        "axum.workspace = true\ntower-http.workspace = true\n"
+        "axum.workspace = true\ntower-http.workspace = true\nserde_json.workspace = true\n"
     };
     // Passkeys bring OpenSSL in and object storage the AWS SDK: only the services that use them build them.
     let mut features = vec![];
@@ -852,6 +859,10 @@ fn http_rs(project: &Project, service: &Service) -> String {
     let verb = |m: HttpMethod| m.as_str().to_lowercase();
     // Only the first method of a path is a free function; the others chain on the `MethodRouter`.
     let mut verbs: Vec<String> = paths.iter().map(|(_, rs)| verb(rs[0].method)).collect();
+    let serves_openapi = project.openapi.serve;
+    if serves_openapi {
+        verbs.push("get".into());
+    }
     verbs.sort();
     verbs.dedup();
     let any_params = service
@@ -878,8 +889,15 @@ fn http_rs(project: &Project, service: &Service) -> String {
         found
     });
     c.line(format!(
-        "    extract::{{{}{}State}},",
+        "    extract::{{{}{}{}State}},",
         if any_image { "DefaultBodyLimit, " } else { "" },
+        if service.routes.iter().any(|r| !r.method.has_body()
+            && !required_fields(project, r, &route_params(&r.path).unwrap_or_default()).is_empty())
+        {
+            "RawQuery, "
+        } else {
+            ""
+        },
         if any_params { "Path, " } else { "" }.to_owned()
             + if service.routes.iter().any(|r| !r.method.has_body()) {
                 "Query, "
@@ -938,6 +956,12 @@ fn http_rs(project: &Project, service: &Service) -> String {
         }
         c.line(format!("    .route({path:?}, {chain})"));
     }
+    if serves_openapi {
+        c.line(format!(
+            "    .route({:?}, get(openapi_document))",
+            project.openapi.path
+        ));
+    }
     c.line("    .layer(cors(config))");
     c.line("    .with_state(ctx);");
     c.line("let listener = tokio::net::TcpListener::bind((\"0.0.0.0\", config.http_port)).await?;");
@@ -964,6 +988,16 @@ fn http_rs(project: &Project, service: &Service) -> String {
     c.close();
     c.close();
 
+    if serves_openapi {
+        c.blank();
+        c.line("/// The OpenAPI 3.1 document of these routes, written next to the crate when the code is generated.");
+        c.line("const OPENAPI: &str = include_str!(\"../../openapi.json\");");
+        c.blank();
+        c.open("async fn openapi_document() -> impl IntoResponse");
+        c.line("([(axum::http::header::CONTENT_TYPE, \"application/json\")], OPENAPI)");
+        c.close();
+    }
+
     for r in &service.routes {
         let params = route_params(&r.path).unwrap_or_default();
         let status = match r.status {
@@ -972,6 +1006,11 @@ fn http_rs(project: &Project, service: &Service) -> String {
             _ => "StatusCode::OK",
         };
         let sourced = sourced_fields(project, r);
+        let required = required_fields(project, r, &params);
+        let needs = needs_presence_check(project, r, &params);
+        // A body is read as a `Value` first when some of its fields must be there: presence cannot be seen on the struct.
+        let checked = r.method.has_body() && needs && hmac_of(r).is_none();
+        let query_checked = !r.method.has_body() && !required.is_empty();
         let m = if params.is_empty() && sourced.is_empty() {
             ""
         } else {
@@ -990,15 +1029,16 @@ fn http_rs(project: &Project, service: &Service) -> String {
             // The signature covers the exact bytes: they are read as JSON only once it checks out.
             c.line("headers: HeaderMap,");
             c.line("body: Bytes,");
-        } else if !sourced.is_empty() {
-            c.line("headers: HeaderMap,");
-            c.line(if r.method.has_body() {
-                format!("Json({m}input): Json<pb::{}>,", r.request)
-            } else {
-                format!("Query({m}input): Query<pb::{}>,", r.request)
-            });
         } else {
-            c.line(if r.method.has_body() {
+            if !sourced.is_empty() {
+                c.line("headers: HeaderMap,");
+            }
+            if query_checked {
+                c.line("RawQuery(raw_query): RawQuery,");
+            }
+            c.line(if checked {
+                "Json(body): Json<serde_json::Value>,".to_string()
+            } else if r.method.has_body() {
                 format!("Json({m}input): Json<pb::{}>,", r.request)
             } else {
                 format!("Query({m}input): Query<pb::{}>,", r.request)
@@ -1018,27 +1058,73 @@ fn http_rs(project: &Project, service: &Service) -> String {
             c.line(format!(
                 "eda_runtime::webhook::check({secret_env:?}, headers.get({header:?}).and_then(|v| v.to_str().ok()), &body, {tolerance})?;"
             ));
+            if needs {
+                c.line("let body: serde_json::Value = serde_json::from_slice(&body)");
+                c.line("    .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?;");
+                c.line(format!(
+                    "{}(&body).map_err(invalid)?;",
+                    required_fn(&r.name)
+                ));
+                c.line(format!(
+                    "let {m}input: pb::{} = serde_json::from_value(body)",
+                    r.request
+                ));
+                c.line("    .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?;");
+            } else {
+                c.line(format!(
+                    "let {m}input = Json::<pb::{}>::from_bytes(&body)",
+                    r.request
+                ));
+                c.line("    .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.body_text()))?");
+                c.line("    .0;");
+            }
+        } else if checked {
+            // What a client left out is refused by name; what it sent is then read as the schema.
             c.line(format!(
-                "let {m}input = Json::<pb::{}>::from_bytes(&body)",
+                "{}(&body).map_err(invalid)?;",
+                required_fn(&r.name)
+            ));
+            c.line(format!(
+                "let {m}input: pb::{} = serde_json::from_value(body).map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;",
                 r.request
             ));
-            c.line("    .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.body_text()))?");
-            c.line("    .0;");
+        }
+        if query_checked {
+            for (field, _) in &required {
+                c.line(format!(
+                    "if !eda_runtime::http::query_has(raw_query.as_deref(), {field:?}) {{ return Err(invalid(\"{field} : is required\".into())); }}"
+                ));
+            }
         }
         for param in &params {
             c.line(format!("input.{param} = param(&path, {param:?})?;"));
         }
         for (field, source) in &sourced {
             // Always overwritten, so that nothing a client puts in the body or the query stands for a header.
-            c.line(match source {
+            let read = match source {
                 RequestSource::Header { name } => format!(
-                    "input.{field} = headers.get({:?}).and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();",
+                    "headers.get({:?}).and_then(|v| v.to_str().ok()).map(str::to_string)",
                     name.to_ascii_lowercase()
                 ),
                 RequestSource::Cookie { name } => format!(
-                    "input.{field} = eda_runtime::http::cookie(headers.get_all(axum::http::header::COOKIE).iter().filter_map(|v| v.to_str().ok()), {name:?}).unwrap_or_default();"
+                    "eda_runtime::http::cookie(headers.get_all(axum::http::header::COOKIE).iter().filter_map(|v| v.to_str().ok()), {name:?})"
                 ),
-            });
+            };
+            let what = match source {
+                RequestSource::Header { name } => format!("header `{name}`"),
+                RequestSource::Cookie { name } => format!("cookie `{name}`"),
+            };
+            if project
+                .message(&r.request)
+                .and_then(|m| m.field(field))
+                .is_some_and(|f| f.lenient)
+            {
+                c.line(format!("input.{field} = {read}.unwrap_or_default();"));
+            } else {
+                c.line(format!(
+                    "input.{field} = {read}.ok_or_else(|| invalid(\"{field} : is required (sent in the {what})\".into()))?;"
+                ));
+            }
         }
         if project.has_rules(&r.request) {
             // The rules of the schema, before any step: the first that fails is a 400.
@@ -1050,11 +1136,21 @@ fn http_rs(project: &Project, service: &Service) -> String {
         c.line(format!("flows::api::{}(&ctx, input)", r.name));
         c.line("    .await");
         if reply {
-            c.line("    .map(|reply| {");
+            c.line("    .map_err(ApiError::from)");
+            c.line("    .and_then(|reply| {");
             c.line(format!(
                 "        let status = reply.status.and_then(|s| StatusCode::from_u16(s).ok()).unwrap_or({status});"
             ));
             c.line("        let mut response = (status, Json(reply.body)).into_response();");
+            c.line("        for (name, value) in &reply.headers {");
+            c.line("            // A name or value the flow computed that is not a valid header is a flaw of the flow, not of the client.");
+            c.line("            let pair = axum::http::HeaderName::try_from(name.as_str()).ok().zip(Some(value).filter(|v| eda_runtime::http::header_value_ok(v)).and_then(|v| HeaderValue::from_str(v).ok()));");
+            c.line("            let Some((name, value)) = pair else {");
+            c.line("                tracing::error!(header = %name, \"response header refused: its value is not a valid header value\");");
+            c.line("                return Err(ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, \"internal error\"));");
+            c.line("            };");
+            c.line("            response.headers_mut().append(name, value);");
+            c.line("        }");
             c.line("        for cookie in &reply.cookies {");
             c.line(
                 "            if let Ok(value) = HeaderValue::from_str(&cookie.header_value()) {",
@@ -1062,12 +1158,12 @@ fn http_rs(project: &Project, service: &Service) -> String {
             c.line("                response.headers_mut().append(axum::http::header::SET_COOKIE, value);");
             c.line("            }");
             c.line("        }");
-            c.line("        response");
+            c.line("        Ok(response)");
             c.line("    })");
         } else {
             c.line(format!("    .map(|body| ({status}, Json(body)))"));
+            c.line("    .map_err(ApiError::from)");
         }
-        c.line("    .map_err(ApiError::from)");
         c.close();
     }
 
@@ -1081,6 +1177,24 @@ fn http_rs(project: &Project, service: &Service) -> String {
         c.close();
     }
 
+    let needs_invalid = service.routes.iter().any(|r| {
+        let params = route_params(&r.path).unwrap_or_default();
+        needs_presence_check(project, r, &params)
+            || !required_fields(project, r, &params).is_empty()
+            || sourced_fields(project, r).iter().any(|(f, _)| {
+                project
+                    .message(&r.request)
+                    .and_then(|m| m.field(f))
+                    .is_some_and(|f| !f.lenient)
+            })
+    }) || service.routes.iter().any(|r| project.has_rules(&r.request));
+    if needs_invalid {
+        c.blank();
+        c.open("fn invalid(message: String) -> ApiError");
+        c.line("ApiError::new(StatusCode::BAD_REQUEST, message)");
+        c.close();
+    }
+    required_rs(&mut c, project, service);
     rules_rs(&mut c, project, service);
 
     c.blank();
@@ -1237,10 +1351,6 @@ fn rules_rs(c: &mut Code, project: &Project, service: &Service) {
     if received.is_empty() {
         return;
     }
-    c.blank();
-    c.open("fn invalid(message: String) -> ApiError");
-    c.line("ApiError::new(StatusCode::BAD_REQUEST, message)");
-    c.close();
     for name in received {
         let Some(m) = project.message(name) else {
             continue;
@@ -1314,6 +1424,225 @@ fn sourced_fields<'a>(
             .filter_map(|f| f.source.as_ref().map(|s| (f.name.as_str(), s)))
             .collect()
     })
+}
+
+fn required_fn(route: &str) -> String {
+    format!("require_{route}")
+}
+
+/// The fields of the request a client has to send in the body or the query string: not optional, not lenient, and
+/// not filled by the path or by a header or cookie (which are checked where they are read).
+fn required_fields<'a>(
+    project: &'a Project,
+    route: &sb_model::Route,
+    params: &[String],
+) -> Vec<(&'a str, &'a sb_model::Field)> {
+    project.message(&route.request).map_or(vec![], |m| {
+        m.fields
+            .iter()
+            .filter(|f| {
+                !f.optional && !f.lenient && f.source.is_none() && !params.contains(&f.name)
+            })
+            .map(|f| (f.name.as_str(), f))
+            .collect()
+    })
+}
+
+/// Whether a schema, or one nested in it, has a field that must be sent.
+fn message_requires(project: &Project, name: &str, seen: &mut Vec<String>) -> bool {
+    if seen.iter().any(|n| n == name) {
+        return false;
+    }
+    seen.push(name.to_string());
+    project.message(name).is_some_and(|m| {
+        m.fields.iter().any(|f| {
+            (!f.optional && !f.lenient)
+                || matches!(&f.ty, FieldType::Message { name } if message_requires(project, name, seen))
+        })
+    })
+}
+
+/// Whether the body of a route has to be looked at before it is read as the schema: a required field somewhere in it.
+fn needs_presence_check(project: &Project, route: &sb_model::Route, params: &[String]) -> bool {
+    if !required_fields(project, route, params).is_empty() {
+        return true;
+    }
+    project.message(&route.request).is_some_and(|m| {
+        m.fields.iter().any(|f| {
+            f.source.is_none()
+                && !params.contains(&f.name)
+                && matches!(&f.ty, FieldType::Message { name } if message_requires(project, name, &mut vec![]))
+        })
+    })
+}
+
+/// The check of one field of a JSON object: refused when a required one is not sent, then the fields of the nested
+/// schema, with their path in the message (`company.name`, `lines[2].sku`).
+fn require_field(c: &mut Code, project: &Project, f: &sb_model::Field) {
+    let name = &f.name;
+    if !f.optional && !f.lenient {
+        c.line(format!(
+            "if !eda_runtime::http::sent(v, {name:?}) {{ return Err(\"{name} : is required\".into()); }}"
+        ));
+    }
+    if let FieldType::Message { name: inner } = &f.ty
+        && message_requires(project, inner, &mut vec![])
+    {
+        let check = required_fn(&snake(inner));
+        if f.repeated {
+            c.line(format!(
+                "for (i, item) in v.get({name:?}).and_then(|a| a.as_array()).into_iter().flatten().enumerate() {{ {check}_nested(item).map_err(|e| format!(\"{name}[{{i}}].{{e}}\"))?; }}"
+            ));
+        } else {
+            c.line(format!(
+                "if let Some(item) = v.get({name:?}).filter(|o| o.is_object()) {{ {check}_nested(item).map_err(|e| format!(\"{name}.{{e}}\"))?; }}"
+            ));
+        }
+    }
+}
+
+/// The presence checks of the routes: one function for the fields of a request, one for each schema nested in it.
+fn required_rs(c: &mut Code, project: &Project, service: &Service) {
+    let mut nested: Vec<String> = vec![];
+    // (function, a body that carries everything, the fields a client has to send), for the tests of the checks.
+    let mut tested: Vec<(String, String, Vec<&str>)> = vec![];
+    for r in &service.routes {
+        let params = route_params(&r.path).unwrap_or_default();
+        if r.method.has_body() && needs_presence_check(project, r, &params) {
+            let m = project.message(&r.request).expect("validated");
+            c.blank();
+            c.line(format!(
+                "/// What the body of `{}` has to carry, by name: a field left out is a 400, not a default value.",
+                r.name
+            ));
+            c.open(format!(
+                "fn {}(v: &serde_json::Value) -> Result<(), String>",
+                required_fn(&r.name)
+            ));
+            for f in m
+                .fields
+                .iter()
+                .filter(|f| f.source.is_none() && !params.contains(&f.name))
+            {
+                require_field(c, project, f);
+            }
+            c.line("Ok(())");
+            c.close();
+            let mut full = serde_json::Map::new();
+            for f in m
+                .fields
+                .iter()
+                .filter(|f| f.source.is_none() && !params.contains(&f.name))
+                .filter(|f| !f.optional && !f.lenient)
+            {
+                full.insert(f.name.clone(), presence_sample(project, f, &mut vec![]));
+            }
+            tested.push((
+                required_fn(&r.name),
+                serde_json::Value::Object(full).to_string(),
+                required_fields(project, r, &params)
+                    .into_iter()
+                    .map(|(n, _)| n)
+                    .collect(),
+            ));
+            // The schemas nested in the request, and the ones nested in them.
+            let mut todo: Vec<&str> = m
+                .fields
+                .iter()
+                .filter_map(|f| match &f.ty {
+                    FieldType::Message { name } => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            while let Some(name) = todo.pop() {
+                if nested.iter().any(|n| n == name) || !message_requires(project, name, &mut vec![])
+                {
+                    continue;
+                }
+                nested.push(name.to_string());
+                if let Some(inner) = project.message(name) {
+                    todo.extend(inner.fields.iter().filter_map(|f| match &f.ty {
+                        FieldType::Message { name } => Some(name.as_str()),
+                        _ => None,
+                    }));
+                }
+            }
+        }
+    }
+    for name in nested {
+        let Some(m) = project.message(&name) else {
+            continue;
+        };
+        c.blank();
+        c.open(format!(
+            "fn {}_nested(v: &serde_json::Value) -> Result<(), String>",
+            required_fn(&snake(&name))
+        ));
+        for f in &m.fields {
+            require_field(c, project, f);
+        }
+        c.line("Ok(())");
+        c.close();
+    }
+    let tests: Vec<_> = tested
+        .iter()
+        .filter(|(_, _, fields)| !fields.is_empty())
+        .collect();
+    if !tests.is_empty() {
+        c.blank();
+        c.line("#[cfg(test)]");
+        c.open("mod tests");
+        c.line("use super::*;");
+        for (function, full, fields) in tests {
+            c.blank();
+            c.line("#[test]");
+            c.open(format!("fn {function}_names_the_field_left_out()"));
+            c.line(format!(
+                "let full: serde_json::Value = serde_json::from_str({full:?}).unwrap();"
+            ));
+            c.line(format!("assert!({function}(&full).is_ok());"));
+            c.open(format!("for field in {fields:?}"));
+            c.line("let mut left_out = full.clone();");
+            c.line("left_out.as_object_mut().unwrap().remove(field);");
+            c.line(format!(
+                "assert_eq!({function}(&left_out), Err(format!(\"{{field}} : is required\")));"
+            ));
+            c.line("// `null` is as good as absent; an empty text is a value.");
+            c.line("let mut nulled = full.clone();");
+            c.line("nulled[field] = serde_json::Value::Null;");
+            c.line(format!("assert!({function}(&nulled).is_err());"));
+            c.close();
+            c.close();
+        }
+        c.close();
+    }
+}
+
+/// A JSON value that carries what a client has to send for this field, nested fields included.
+fn presence_sample(
+    project: &Project,
+    f: &sb_model::Field,
+    seen: &mut Vec<String>,
+) -> serde_json::Value {
+    use serde_json::{Value, json};
+    let one = match &f.ty {
+        FieldType::Message { name } if !seen.contains(name) => {
+            seen.push(name.clone());
+            let mut object = serde_json::Map::new();
+            for inner in project
+                .message(name)
+                .iter()
+                .flat_map(|m| &m.fields)
+                .filter(|f| !f.optional && !f.lenient)
+            {
+                object.insert(inner.name.clone(), presence_sample(project, inner, seen));
+            }
+            seen.pop();
+            Value::Object(object)
+        }
+        _ => json!(""),
+    };
+    if f.repeated { json!([]) } else { one }
 }
 
 fn hmac_of(route: &sb_model::Route) -> Option<(&str, &str, u32)> {
@@ -1440,7 +1769,7 @@ fn needs_reply(route: &sb_model::Route) -> bool {
     let mut extras = false;
     for step in &route.steps {
         step.walk(&mut |s| {
-            extras |= matches!(s, Step::Respond { status, cookies, .. } if status.is_some() || !cookies.is_empty())
+            extras |= matches!(s, Step::Respond { status, cookies, headers, .. } if status.is_some() || !cookies.is_empty() || !headers.is_empty())
         });
     }
     extras
@@ -1797,6 +2126,7 @@ fn steps(
                 fields,
                 status,
                 cookies,
+                headers,
                 ..
             } => {
                 let response = response.ok_or_else(|| {
@@ -1815,6 +2145,15 @@ fn steps(
                             ".cookie({})",
                             cookie_code(project, scope, cookie)?
                         ));
+                    }
+                    for header in headers {
+                        let value = lower(
+                            project,
+                            scope,
+                            &header.value,
+                            &TypeRef::scalar(FieldType::String),
+                        )?;
+                        out.push_str(&format!(".header({:?}, {value})", header.name));
                     }
                     c.line(format!("return Ok({out});"));
                 } else {

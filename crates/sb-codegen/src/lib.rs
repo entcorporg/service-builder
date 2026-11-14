@@ -4,6 +4,7 @@
 
 mod expr;
 mod mta;
+pub mod openapi;
 pub mod pods;
 mod proto;
 pub mod rawcheck;
@@ -186,6 +187,7 @@ mod tests {
                 "services/notifications/src/transport/kafka.rs",
                 "services/notifications/src/transport/mod.rs",
                 "services/orders/Cargo.toml",
+                "services/orders/openapi.json",
                 "services/orders/src/app/bootstrap.rs",
                 "services/orders/src/app/config.rs",
                 "services/orders/src/app/ctx.rs",
@@ -303,7 +305,9 @@ mod tests {
         assert!(http.contains(".route(\"/orders\", post(handle_place_order))"));
         assert!(http.contains(".route(\"/orders/{order_id}\", get(handle_get_order))"));
         // A body for POST (+ the status of the route), a query string for GET, path parameters read by name.
-        assert!(http.contains("Json(input): Json<pb::PlaceOrderBody>"));
+        // (its fields are required: the body is looked at as JSON first, then read as the schema)
+        assert!(http.contains("Json(body): Json<serde_json::Value>"));
+        assert!(http.contains("require_place_order(&body).map_err(invalid)?;"));
         // `place_order` sets a status and a cookie in its Respond: it answers with a `Reply`; `get_order` does not.
         assert!(http.contains(") -> Result<Response, ApiError>"));
         assert!(http.contains(".unwrap_or(StatusCode::CREATED)"));
@@ -369,7 +373,7 @@ mod tests {
                         field: "status".into(),
                         value: path("view.status"),
                     },
-                ], status: None, cookies: vec![]},
+                ], status: None, cookies: vec![], headers: vec![]},
         ];
         let files = generate(&p).unwrap();
         let api = file(&files, "services/orders/src/flows/api.rs");
@@ -872,16 +876,14 @@ mod tests {
         );
         // ...checked against the header, the secret of the environment and the tolerance, and only then read.
         let check = handler.find("eda_runtime::webhook::check(\"STRIPE_WEBHOOK_SECRET\", headers.get(\"Stripe-Signature\")").unwrap();
-        let parse = handler
-            .find("Json::<pb::StripeEvent>::from_bytes(&body)")
-            .unwrap();
+        let parse = handler.find("serde_json::from_slice(&body)").unwrap();
         assert!(
             check < parse,
             "the signature is verified before the body is read"
         );
         assert!(handler.contains("&body, 300)?;"));
         // The other routes keep their extractor.
-        assert!(http.contains("Json(input): Json<pb::PlaceOrderBody>"));
+        assert!(http.contains("Json(body): Json<serde_json::Value>"));
         // A service that cannot verify its webhooks does not start.
         assert!(
             file(&files, "services/orders/src/app/config.rs")
@@ -968,13 +970,6 @@ mod tests {
         );
         // A schema without rules costs nothing, and the other routes are left alone.
         assert!(!http.contains("check_place_order_body"));
-        assert!(
-            !file(
-                &generate(&sample::orders()).unwrap(),
-                "services/orders/src/transport/http.rs"
-            )
-            .contains("fn invalid(")
-        );
     }
 
     #[test]
@@ -1811,6 +1806,127 @@ mod tests {
             file(&files, "services/orders/src/flows/rpc.rs")
                 .contains("// publish to orders.created")
         );
+    }
+
+    #[test]
+    fn response_headers_are_set_by_the_reply_and_refused_when_invalid() {
+        let files = generate(&sample::showcase()).unwrap();
+        let flows = file(&files, "services/orders/src/flows/api.rs");
+        let receipt = &flows[flows.find("pub async fn put_receipt(").unwrap()..];
+        assert!(receipt.contains(".header(\"Cache-Control\", \"no-store\".to_string())"));
+        assert!(receipt.contains(".header(\"X-Order-Id\", input.order_id.clone())"));
+        // The handler checks what the flow computed before it goes on the wire: a bad value is a 500, never a split header.
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        assert!(http.contains("eda_runtime::http::header_value_ok(v)"));
+        assert!(http.contains("response header refused"));
+    }
+
+    #[test]
+    fn the_openapi_document_is_written_and_served_only_when_asked() {
+        let mut p = sample::showcase();
+        p.openapi.serve = false;
+        let files = generate(&p).unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(file(&files, "services/orders/openapi.json")).unwrap();
+        assert_eq!(doc["openapi"], "3.1.0");
+        // A service without routes has none.
+        assert!(
+            !files
+                .iter()
+                .any(|f| f.path == "services/payments/openapi.json")
+        );
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        assert!(!http.contains("openapi"));
+        p.openapi.serve = true;
+        p.openapi.path = "/docs/api.json".into();
+        let files = generate(&p).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        assert!(http.contains(".route(\"/docs/api.json\", get(openapi_document))"));
+        assert!(http.contains("include_str!(\"../../openapi.json\")"));
+        assert!(http.contains("routing::{get"), "{}", &http[..600]);
+    }
+
+    #[test]
+    fn bytes_and_timestamps_travel_as_base64_and_rfc3339() {
+        let files = generate(&sample::showcase()).unwrap();
+        let build = file(&files, "contracts/build.rs");
+        assert!(
+            build.contains("ReceiptBody.stamp\", \"#[serde(with = \\\"crate::json::bytes\\\")]")
+        );
+        assert!(build.contains(
+            "ReceiptBody.issued_at\", \"#[serde(with = \\\"crate::json::timestamp\\\")]"
+        ));
+        assert!(file(&files, "contracts/src/lib.rs").contains("pub mod json;"));
+        assert!(file(&files, "contracts/Cargo.toml").contains("base64.workspace = true"));
+        assert!(file(&files, "contracts/src/json.rs").contains("pub mod timestamp_list"));
+        // Nothing of it for a project that has neither.
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!plain.iter().any(|f| f.path == "contracts/src/json.rs"));
+        assert!(!file(&plain, "contracts/Cargo.toml").contains("chrono"));
+        assert!(!file(&plain, "contracts/build.rs").contains("field_attribute"));
+    }
+
+    #[test]
+    fn a_field_left_out_is_refused_unless_it_is_lenient() {
+        let mut p = sample::orders();
+        let files = generate(&p).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        // POST: the body is read as JSON first, so that absence can be told from a default.
+        assert!(
+            http.contains("fn require_place_order(v: &serde_json::Value) -> Result<(), String>")
+        );
+        assert!(http.contains("if !eda_runtime::http::sent(v, \"amount\") { return Err(\"amount : is required\".into()); }"));
+        // The same schema with every field lenient reads the body as before.
+        for m in p.messages.iter_mut().filter(|m| m.name == "PlaceOrderBody") {
+            for f in &mut m.fields {
+                f.lenient = true;
+            }
+        }
+        let files = generate(&p).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        assert!(!http.contains("require_place_order"));
+        assert!(http.contains("Json(input): Json<pb::PlaceOrderBody>"));
+    }
+
+    #[test]
+    fn required_query_parameters_and_sources_are_checked_by_name() {
+        let mut p = sample::orders();
+        let get = p
+            .messages
+            .iter_mut()
+            .find(|m| m.name == "GetOrderRequest")
+            .unwrap();
+        get.fields
+            .push(sb_model::Field::new("expand", sb_model::FieldType::String));
+        let mut lenient = sb_model::Field::new("lang", sb_model::FieldType::String);
+        lenient.lenient = true;
+        get.fields.push(lenient);
+        let files = generate(&p).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        assert!(http.contains("RawQuery(raw_query): RawQuery,"));
+        assert!(http.contains("eda_runtime::http::query_has(raw_query.as_deref(), \"expand\")"));
+        assert!(!http.contains("query_has(raw_query.as_deref(), \"lang\")"));
+        // A header field is required too, unless lenient: then it stays empty when absent.
+        let get = p
+            .messages
+            .iter_mut()
+            .find(|m| m.name == "GetOrderRequest")
+            .unwrap();
+        get.fields[1].source = Some(sb_model::RequestSource::Header {
+            name: "X-Trace".into(),
+        });
+        let files = generate(&p).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        assert!(http.contains("input.expand = headers.get(\"x-trace\").and_then(|v| v.to_str().ok()).map(str::to_string).ok_or_else("));
+        let get = p
+            .messages
+            .iter_mut()
+            .find(|m| m.name == "GetOrderRequest")
+            .unwrap();
+        get.fields[1].lenient = true;
+        let files = generate(&p).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        assert!(http.contains("input.expand = headers.get(\"x-trace\").and_then(|v| v.to_str().ok()).map(str::to_string).unwrap_or_default();"));
     }
 
     #[test]
