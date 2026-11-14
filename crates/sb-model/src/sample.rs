@@ -1980,6 +1980,7 @@ pub fn add_sql_reads(p: &mut Project) {
     let string = || FieldType::String;
     let bearer = || {
         let mut token = field("token", string());
+        token.lenient = true; // the flow answers 401 itself
         token.source = Some(RequestSource::Header {
             name: "Authorization".into(),
         });
@@ -1996,7 +1997,12 @@ pub fn add_sql_reads(p: &mut Project) {
         "PostsQuery",
         vec![
             bearer(),
-            field("search", string()),
+            // Absent, the search is empty and matches every title.
+            {
+                let mut search = field("search", string());
+                search.lenient = true;
+                search
+            },
             optional("page_size", FieldType::Int32),
             optional("after_title", string()),
             optional("after_id", string()),
@@ -2324,6 +2330,8 @@ pub fn add_basket_lines(p: &mut Project) {
     note.optional = true;
     let mut lines = msg_field("lines", "OrderLine");
     lines.repeated = true;
+    // Absent, the list is empty and the flow refuses it with its own message.
+    lines.lenient = true;
     let mut coupon = field("coupon", string());
     coupon.optional = true;
     p.messages.push(api(
