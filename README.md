@@ -190,8 +190,9 @@ La CI le fait.
   ± une durée, comparaison d'expiration : seule l'horloge de la base, dans un bloc SQL), pas de `break` ni d'appel de
   sous-flux, pas d'accès à l'élément *n* d'une liste, pas d'expressions régulières, et une `Variable` de type schéma
   reste en Rust. Un nombre n'est jamais converti en silence : `toInt64`, `toDouble`… s'écrivent.
-- Le bloc SQL n'a pas encore d'agrégats (`COUNT` par groupe, `SUM`, `GROUP BY`), de jointure à soi-même (alias) ni de `OR` entre
-  conditions ; le total d'une page est le seul `COUNT`.
+- Le bloc SQL n'a pas encore d'agrégats (`COUNT` par groupe, `SUM`, `GROUP BY`), de jointure d'une table à elle-même (alias) ni de `OR` entre
+  conditions ; le total d'une page est le seul `COUNT`. Renommer une colonne jointe change le nom du champ de la ligne
+  (`<table>_<colonne>`) : le schéma rempli et les lectures du flux suivent, pas le code Rust d'une étape *Code Rust*.
 - La spécification OpenAPI ne décrit pas les statuts qu'un bloc *Code Rust* choisirait lui-même, ni l'authentification
   comme schéma de sécurité (un jeton lu d'un en-tête y est un paramètre).
 - Les appels HTTP sortants (*Appeler une API HTTP*) tournent dans la transaction du flux : un délai (30 s au plus, 60 s avec

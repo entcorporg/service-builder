@@ -295,7 +295,7 @@ tables, des listes), « Construire la réponse par la logique » ajoute une vari
 remplie en Rust avec `tx`, dont chaque champ alimente la réponse ; le bloc SQL le fait sans écrire de Rust. Une variable peut en effet porter un schéma entier,
 construit en Rust (`E_LET_VALUE` si on essaie autre chose). « ← Architecture » ramène au canvas.
 
-Pas encore : pagination, appel d'une API HTTP externe, jointures entre tables dans le bloc SQL (une requête plus riche s'écrit en Rust avec `tx`).
+Pas encore : agrégats (`GROUP BY`, `SUM`) et jointure d'une table à elle-même dans le bloc SQL (une requête plus riche s'écrit en Rust avec `tx`) ; les appels d'une API externe ont leur propre étape (*Appeler une API HTTP*).
 
 ### Tables et bloc SQL
 
@@ -983,7 +983,7 @@ flowchart LR
 - **Étape Code Rust** : `tx` est disponible pour écrire ses propres données. Un `return` anticipé doit appeler
   `tx.commit().await?` avant, sinon tout est annulé (événements compris).
 
-Ce qui n'est pas modélisé s'écrit à la main dans une étape *Code Rust* : une jointure, un appel à une API externe.
+Ce qui n'est pas modélisé s'écrit à la main dans une étape *Code Rust* : un agrégat ou une jointure d'une table à elle-même, un corps JSON imbriqué pour un appel à une API externe.
 
 ### Pourquoi générer plutôt qu'interpréter ?
 
