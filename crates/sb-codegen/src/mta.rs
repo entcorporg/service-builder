@@ -294,9 +294,11 @@ fn event_rules(service: &Service) -> String {
 fn seed(service: &Service) -> String {
     let mut out = String::from("/// Les mails du projet.\npub const SEED: &[Seed] = &[\n");
     for t in &service.templates {
+        // A mail composed as blocks is seeded as the HTML and the text derived from them.
+        let (html, text) = t.bodies();
         out.push_str(&format!(
             "    (\n        {:?},\n        {:?},\n        {:?},\n        {:?},\n    ),\n",
-            t.event_type, t.subject, t.html, t.text
+            t.event_type, t.subject, html, text
         ));
     }
     out.push_str("];");

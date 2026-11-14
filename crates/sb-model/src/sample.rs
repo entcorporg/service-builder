@@ -827,6 +827,7 @@ pub fn showcase() -> Project {
     add_avatars(&mut p);
     add_notes(&mut p);
     add_mailer(&mut p);
+    add_mail_design(&mut p);
     add_live_events(&mut p);
     p
 }
@@ -1930,8 +1931,50 @@ pub fn add_mailer(p: &mut Project) {
             html: "<p>Hello {{ name }},</p>\n<p>Your account <b>{{ email }}</b> is ready.</p>\n"
                 .into(),
             text: "Hello {{ name }},\n\nYour account {{ email }} is ready.\n".into(),
+            design: None,
         }],
         realtime: None,
+    });
+}
+
+/// Makes the welcome mail of `Mailer` a composed one: a heading, a paragraph, a button, a divider, two columns and a footer,
+/// with variables of the event in the texts. The hand-written HTML and text it replaces are gone from the project (they
+/// are derived). It needs [`add_mailer`].
+pub fn add_mail_design(p: &mut Project) {
+    use crate::maildesign::{MailBlock, MailColumn, MailDesign, MailSettings};
+    let mailer = p
+        .services
+        .iter_mut()
+        .find(|s| s.name == "Mailer")
+        .expect("add_mailer first");
+    let template = &mut mailer.templates[0];
+    template.html.clear();
+    template.text.clear();
+    template.design = Some(MailDesign {
+        settings: MailSettings {
+            preheader: "Your account {{ email }} is ready".into(),
+            footer: "You receive this mail because {{ email }} signed up.".into(),
+            ..Default::default()
+        },
+        blocks: vec![
+            MailBlock::heading("Welcome, {{ name }}"),
+            MailBlock::paragraph("Your account {{ email }} is ready."),
+            MailBlock::button("Open my account", "https://example.com/login"),
+            MailBlock::divider(),
+            MailBlock::Columns {
+                columns: vec![
+                    MailColumn {
+                        blocks: vec![MailBlock::paragraph("Questions? Reply to this mail.")],
+                    },
+                    MailColumn {
+                        blocks: vec![MailBlock::image(
+                            "https://example.com/logo.png",
+                            "Company logo",
+                        )],
+                    },
+                ],
+            },
+        ],
     });
 }
 

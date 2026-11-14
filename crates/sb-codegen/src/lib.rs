@@ -1572,6 +1572,74 @@ mod tests {
     }
 
     #[test]
+    fn a_composed_mail_is_seeded_as_the_html_and_the_text_derived_from_its_blocks() {
+        let mut p = with_mailer();
+        sample::add_mail_design(&mut p);
+        let files = generate(&p).unwrap();
+        let mailer = p.services.iter().find(|s| s.name == "Mailer").unwrap();
+        let (html, text) = mailer.templates[0].bodies();
+        let seed = file(&files, "services/mailer/src/seed.rs");
+        // What is seeded is exactly what the model derives, quoted as a Rust string.
+        assert!(seed.contains(&format!("{html:?}")));
+        assert!(seed.contains(&format!("{text:?}")));
+        // The text, asserted whole: it is read by people whose client shows no HTML.
+        assert_eq!(
+            text,
+            "Welcome, {{ name }}\n===================\n\nYour account {{ email }} is ready.\n\nOpen my account: https://example.com/login\n\n----\n\nQuestions? Reply to this mail.\n\nCompany logo\n\n-- \nYou receive this mail because {{ email }} signed up.\n"
+        );
+        // Rendered the way the service does it: an `.html` template is escaped by Tera, the text is not.
+        let mut tera = tera::Tera::default();
+        tera.add_raw_templates([("m.html", html.as_str()), ("m.txt", text.as_str())])
+            .unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("name", "<Ann> & co");
+        ctx.insert("email", "ann@example.com");
+        let html = tera.render("m.html", &ctx).unwrap();
+        assert!(
+            html.contains(">Welcome, &lt;Ann&gt; &amp; co</h1>"),
+            "{html}"
+        );
+        assert!(html.contains("Your account ann@example.com is ready."));
+        assert!(html.contains("<a href=\"https://example.com/login\""));
+        assert!(html.contains("<table role=\"presentation\""));
+        assert!(!html.contains("{{") && !html.contains("<script"));
+        assert!(
+            tera.render("m.txt", &ctx)
+                .unwrap()
+                .starts_with("Welcome, <Ann> & co\n")
+        );
+    }
+
+    #[test]
+    fn a_composed_mail_with_an_unknown_variable_is_refused() {
+        let mut p = with_mailer();
+        sample::add_mail_design(&mut p);
+        p.services
+            .iter_mut()
+            .find(|s| s.name == "Mailer")
+            .unwrap()
+            .templates[0]
+            .design
+            .as_mut()
+            .unwrap()
+            .blocks[0] = sb_model::MailBlock::heading("Hi {{ nobody }}");
+        let Err(CodegenError::Invalid(found)) = generate(&p) else {
+            panic!("accepted an unknown variable")
+        };
+        assert!(found.iter().any(|d| d.code == "E_MAIL_VARIABLE_UNKNOWN"));
+    }
+
+    #[test]
+    fn a_hand_written_mail_is_seeded_as_it_always_was() {
+        let p = with_mailer();
+        let files = generate(&p).unwrap();
+        let t = &p.services[3].templates[0];
+        assert!(t.design.is_none());
+        let seed = file(&files, "services/mailer/src/seed.rs");
+        assert!(seed.contains(&format!("{:?}", t.html)) && seed.contains(&format!("{:?}", t.text)));
+    }
+
+    #[test]
     fn the_showcase_generates_a_workspace_of_every_feature() {
         let files = generate(&sample::showcase()).unwrap();
         for path in [
