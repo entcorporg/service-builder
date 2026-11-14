@@ -249,6 +249,7 @@ pub fn orders() -> Project {
         ],
         http_port: Some(8081),
         tables: vec![orders_table()],
+        dropped_tables: vec![],
         routes: vec![
             Route {
                 name: "place_order".into(),
@@ -396,6 +397,7 @@ pub fn orders() -> Project {
         http_port: None,
         routes: vec![],
         tables: vec![],
+        dropped_tables: vec![],
         consumers: vec![Consumer {
             name: "on_order_created".into(),
             topic: "orders.created".into(),
@@ -452,6 +454,7 @@ pub fn orders() -> Project {
         http_port: None,
         routes: vec![],
         tables: vec![],
+        dropped_tables: vec![],
         consumers: vec![
             Consumer {
                 name: "on_payment_completed".into(),
@@ -828,7 +831,23 @@ pub fn showcase() -> Project {
     add_notes(&mut p);
     add_mailer(&mut p);
     add_live_events(&mut p);
+    add_schema_changes(&mut p);
     p
+}
+
+/// The journal of changes of the first service's tables, as a project that lived a while keeps it: `orders.amount` was
+/// called `total` and was an `int32` (renamed, then widened), `orders` had a `legacy_flag` column and the service had a
+/// table `order_drafts`, both dropped. A database migrated before any of this keeps its rows through all four.
+pub fn add_schema_changes(p: &mut Project) {
+    let svc = &mut p.services[0];
+    if let Some(orders) = svc.tables.iter_mut().find(|t| t.name == "orders")
+        && let Some(amount) = orders.columns.iter_mut().find(|c| c.name == "amount")
+    {
+        amount.renamed_from = vec!["total".into()];
+        amount.retyped_from = Some(ColumnType::Int32);
+        orders.dropped_columns.push("legacy_flag".into());
+    }
+    svc.dropped_tables.push("order_drafts".into());
 }
 
 /// Adds to the first service a login: a rate limit per e-mail, the stored hash read with a query of its own (absent
@@ -1906,6 +1925,7 @@ pub fn add_mailer(p: &mut Project) {
         http_port: Some(8084),
         routes: vec![],
         tables: vec![],
+        dropped_tables: vec![],
         consumers: vec![Consumer {
             name: "welcome".into(),
             topic: "accounts.registered".into(),
@@ -1945,6 +1965,7 @@ pub fn add_realtime(p: &mut Project) {
         http_port: Some(8085),
         routes: vec![],
         tables: vec![],
+        dropped_tables: vec![],
         consumers: vec![],
         jobs: vec![],
         position: Position { x: 920.0, y: 640.0 },

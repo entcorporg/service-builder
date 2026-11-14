@@ -60,6 +60,7 @@ pub fn add_service(app: &mut App, kind: ServiceKind) {
             http_port,
             routes: vec![],
             tables: vec![],
+            dropped_tables: vec![],
             consumers: vec![],
             jobs: vec![],
             position: at,

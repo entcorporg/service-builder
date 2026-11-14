@@ -192,6 +192,7 @@ fn new_service(name: &str, port: u16, http_port: Option<u16>, n: f64) -> Service
         http_port,
         routes: vec![],
         tables: vec![],
+        dropped_tables: vec![],
         consumers: vec![],
         jobs: vec![],
         position: Position {
