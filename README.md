@@ -187,8 +187,9 @@ La CI le fait.
 - Le bloc SQL lit une seule table à la fois : pas de jointure, pas de pagination (une limite, pas de décalage).
 - L'API HTTP n'a pas de spécification OpenAPI générée ; un champ absent d'une requête prend sa valeur par défaut au
   lieu d'être refusé ; une réponse pose un statut et des cookies, pas d'en-têtes libres.
-- Pas d'appel à une API HTTP externe (Stripe, Twilio…) : seuls les webhooks entrants signés sont modélisés
-  (`verifyHmac`). Un appel sortant s'écrit dans l'étape *Code Rust*.
+- Les appels HTTP sortants (*Appeler une API HTTP*) tournent dans la transaction du flux : un délai (30 s au plus, 60 s avec
+  les réessais) y garde une connexion et les verrous déjà pris ; pas de file d'appels après le commit. Le corps JSON est plat
+  (pas d'objet imbriqué) et la réponse est lue en JSON seulement.
 - Le HTML et le texte des mails se saisissent à la main : pas d'éditeur visuel de gabarits.
 - Les tables se conçoivent dans la vue **Tables** et se lisent avec le bloc SQL ; les migrations sont additives (pas de
   renommage ni de suppression de colonne).
