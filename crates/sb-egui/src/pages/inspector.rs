@@ -136,6 +136,40 @@ fn project(app: &mut App, ui: &mut Ui) {
     if let Some(v) = set {
         app.edit(|p| p.outbox.max_attempts = v.clamp(1, 100) as u32);
     }
+
+    // The document of the routes is always written with the export; this only decides whether the services serve it.
+    let openapi = app.project().openapi.clone();
+    let (serve, path) = section(
+        ui,
+        "Spécification OpenAPI",
+        "publish",
+        |_| {},
+        |ui| {
+            let serve = field(
+                ui,
+                "Servir",
+                "Chaque service qui a des routes écrit son document OpenAPI 3.1 (openapi.json) avec l’export. Coché, il le sert aussi sur la route ci-dessous, sans authentification.",
+                |ui| {
+                    crate::widgets::check(ui, openapi.serve, "Le service répond avec son document")
+                },
+            );
+            let path = openapi.serve.then(|| {
+                field(
+                    ui,
+                    "Route",
+                    "Chemin du document sur le port HTTP de chaque service. Il ne doit pas être celui d’une route GET.",
+                    |ui| commit_entry(ui, "openapi-path", &openapi.path, true, "/openapi.json", false),
+                )
+            });
+            (serve, path.flatten())
+        },
+    );
+    if let Some(v) = serve {
+        app.edit(|p| p.openapi.serve = v);
+    }
+    if let Some(v) = path {
+        app.edit(|p| p.openapi.path = v);
+    }
 }
 
 fn service(app: &mut App, ui: &mut Ui, name: &str) {
