@@ -4,7 +4,7 @@
 //! Diagnostics point at the faulty element with a JSON pointer into the project
 //! document, e.g. `/services/0/rpcs/1/steps/2/then/0`.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -1827,6 +1827,7 @@ impl<'a> Checker<'a> {
             values,
             order_by,
             missing,
+            joins,
             ..
         } = step
         else {
@@ -1847,16 +1848,31 @@ impl<'a> Checker<'a> {
 
         for (i, c) in conditions.iter().enumerate() {
             let cp = format!("{path}/where/{i}");
-            match column(&c.column) {
+            match env.service.sql_column(table, joins, &c.column) {
                 None => self.error(
                     "E_UNKNOWN_COLUMN",
                     format!("{cp}/column"),
-                    format!("table `{table}` has no column `{}`", c.column),
+                    Self::unknown_sql_column(table, joins, &c.column),
                 ),
-                Some(col) => self.sql_value(scope, &c.value, col, &format!("{cp}/value")),
+                Some((ct, col, left)) => {
+                    self.sql_test(scope, c, col, left, &cp);
+                    if ct.name != *table && ct.tenant_column.as_deref() == Some(col.name.as_str()) {
+                        self.error(
+                            "E_TENANT_MANUAL",
+                            format!("{cp}/column"),
+                            format!(
+                                "`{}` is filtered on by the generator for `{}`: leave it out",
+                                col.name, ct.name
+                            ),
+                        );
+                    }
+                }
             }
         }
         self.tenant_in_sql(t, scope, path, step);
+        if !joins.is_empty() {
+            self.sql_joins(env, scope, path, step);
+        }
         if matches!(op, SqlOp::Update | SqlOp::Delete) && conditions.is_empty() {
             self.error(
                 "E_SQL_NO_WHERE",
@@ -1875,15 +1891,16 @@ impl<'a> Checker<'a> {
                     );
                 }
                 if let Some(o) = order_by
-                    && column(o).is_none()
+                    && env.service.sql_column(table, joins, o).is_none()
                 {
                     self.error(
                         "E_UNKNOWN_COLUMN",
                         format!("{path}/orderBy"),
-                        format!("table `{table}` has no column `{o}`"),
+                        Self::unknown_sql_column(table, joins, o),
                     );
                 }
-                self.sql_result(path, step, t, scope);
+                self.sql_page(env, scope, path, step);
+                self.sql_result(env, path, step, t, scope);
             }
             SqlOp::Insert | SqlOp::Update => {
                 let mut seen = HashSet::new();
@@ -1913,7 +1930,7 @@ impl<'a> Checker<'a> {
                     );
                 }
                 if !columns.is_empty() {
-                    self.sql_result(path, step, t, scope);
+                    self.sql_result(env, path, step, t, scope);
                 }
                 if *op == SqlOp::Insert {
                     for col in t.columns.iter().filter(|c| {
@@ -1932,9 +1949,16 @@ impl<'a> Checker<'a> {
             }
             SqlOp::Delete => {
                 if !columns.is_empty() {
-                    self.sql_result(path, step, t, scope);
+                    self.sql_result(env, path, step, t, scope);
                 }
             }
+        }
+        if *op != SqlOp::Select && (!joins.is_empty() || Self::sql_read_only_fields(step)) {
+            self.error(
+                "E_SQL_JOIN_OP",
+                path,
+                "joins, extra sort keys and pagination only exist in a select",
+            );
         }
 
         if let Some(m) = missing {
@@ -1971,6 +1995,31 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The variable that scopes a table to its tenant is bound, and fits the column.
+    fn tenant_scope(&mut self, t: &Table, scope: &Scope, path: &str) {
+        let Some(name) = &t.tenant_column else {
+            return;
+        };
+        let Some(col) = t.column(name) else { return };
+        let want = Self::column_type(col);
+        match resolve_path(self.project, scope, name) {
+            Ok(found) if found.adapt_to(&want).is_some() => {}
+            Ok(_) => self.error(
+                "E_TENANT_SCOPE",
+                path,
+                format!("the variable `{name}` that scopes `{}` to its tenant is not a {}", t.name, col.ty.sql()),
+            ),
+            Err(_) => self.error(
+                "E_TENANT_SCOPE",
+                path,
+                format!(
+                    "table `{}` is filtered by its tenant: bind a variable `{name}` first (a `let` from the verified token)",
+                    t.name
+                ),
+            ),
+        }
+    }
+
     /// A step on a table with a tenant: the variable of that name must be bound, as the column is, and the author does not
     /// write the column nor `deleted_at`: the generator does.
     fn tenant_in_sql(&mut self, t: &Table, scope: &Scope, path: &str, step: &Step) {
@@ -1984,25 +2033,9 @@ impl<'a> Checker<'a> {
             return;
         };
         if let Some(name) = &t.tenant_column
-            && let Some(col) = t.column(name)
+            && t.column(name).is_some()
         {
-            let want = Self::column_type(col);
-            match resolve_path(self.project, scope, name) {
-                Ok(found) if found.adapt_to(&want).is_some() => {}
-                Ok(_) => self.error(
-                    "E_TENANT_SCOPE",
-                    path,
-                    format!("the variable `{name}` that scopes `{}` to its tenant is not a {}", t.name, col.ty.sql()),
-                ),
-                Err(_) => self.error(
-                    "E_TENANT_SCOPE",
-                    path,
-                    format!(
-                        "table `{}` is filtered by its tenant: bind a variable `{name}` first (a `let` from the verified token)",
-                        t.name
-                    ),
-                ),
-            }
+            self.tenant_scope(t, scope, path);
             let written = values.iter().any(|a| &a.field == name);
             let compared = conditions.iter().any(|c| &c.column == name);
             if written || compared {
@@ -2022,6 +2055,375 @@ impl<'a> Checker<'a> {
                 format!("{path}/values"),
                 format!("`{DELETED_AT}` is set by a delete: leave it out"),
             );
+        }
+    }
+
+    fn unknown_sql_column(table: &str, joins: &[SqlJoin], name: &str) -> String {
+        match name.split_once('.') {
+            Some((t, _)) if t != table && !joins.iter().any(|j| j.table == t) => {
+                format!("`{t}` is not in the query: join it first (`{name}`)")
+            }
+            Some((t, c)) => format!("table `{t}` has no column `{c}`"),
+            None => format!("table `{table}` has no column `{name}`"),
+        }
+    }
+
+    /// Whether a step carries a field that only a select understands.
+    fn sql_read_only_fields(step: &Step) -> bool {
+        let Step::Sql {
+            then_by,
+            limit_from,
+            offset,
+            cursor,
+            total_bind,
+            more_bind,
+            last_bind,
+            ..
+        } = step
+        else {
+            return false;
+        };
+        !then_by.is_empty()
+            || limit_from.is_some()
+            || offset.is_some()
+            || !cursor.is_empty()
+            || total_bind.is_some()
+            || more_bind.is_some()
+            || last_bind.is_some()
+    }
+
+    /// A condition of a `where`: its value is typed after the column (or a list of them, or a text), by what is tested.
+    fn sql_test(&mut self, scope: &Scope, c: &SqlCondition, col: &Column, left: bool, path: &str) {
+        let value = format!("{path}/value");
+        match c.test {
+            SqlTest::Compare => self.sql_value(scope, &c.value, col, &value),
+            SqlTest::In => {
+                if matches!(c.value, Expr::Now) {
+                    self.error("E_SQL_TEST_VALUE", &value, "`now()` is not a list");
+                    return;
+                }
+                let list = TypeRef {
+                    repeated: true,
+                    ..TypeRef::scalar(col.ty.field_type())
+                };
+                self.check_expr(scope, &c.value, Some(&list), &value);
+            }
+            SqlTest::Contains | SqlTest::StartsWith => {
+                if col.ty != ColumnType::String {
+                    self.error(
+                        "E_SQL_TEST_VALUE",
+                        format!("{path}/test"),
+                        format!(
+                            "a text search needs a text column: `{}` is {}",
+                            col.name,
+                            col.ty.sql()
+                        ),
+                    );
+                }
+                if matches!(c.value, Expr::Now) {
+                    self.error("E_SQL_TEST_VALUE", &value, "`now()` is not a text");
+                    return;
+                }
+                self.check_expr(
+                    scope,
+                    &c.value,
+                    Some(&TypeRef::scalar(FieldType::String)),
+                    &value,
+                );
+            }
+            SqlTest::IsNull | SqlTest::IsNotNull => {
+                if !col.nullable && !left {
+                    self.warn(
+                        "W_SQL_NEVER_NULL",
+                        format!("{path}/test"),
+                        format!(
+                            "`{}` is never null: the condition is decided already",
+                            col.name
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    /// The joins of a select: tables of the service, once each, matched by columns of the same type; the rules of each
+    /// joined table (tenant) need their variable, as the table of the step does.
+    fn sql_joins(&mut self, env: &Env, scope: &Scope, path: &str, step: &Step) {
+        let Step::Sql { table, joins, .. } = step else {
+            return;
+        };
+        let mut seen: Vec<&str> = vec![table.as_str()];
+        for (i, j) in joins.iter().enumerate() {
+            let jp = format!("{path}/joins/{i}");
+            let Some(jt) = env.service.table(&j.table) else {
+                self.error(
+                    "E_SQL_JOIN_TABLE",
+                    format!("{jp}/table"),
+                    format!("`{}` has no table `{}`", env.service.name, j.table),
+                );
+                continue;
+            };
+            if seen.contains(&j.table.as_str()) {
+                self.error(
+                    "E_SQL_JOIN_DUPLICATE",
+                    format!("{jp}/table"),
+                    format!(
+                        "table `{}` is already in the query: a table is joined once",
+                        j.table
+                    ),
+                );
+            }
+            if j.on.is_empty() {
+                self.error(
+                    "E_SQL_JOIN_ON",
+                    format!("{jp}/on"),
+                    "say which columns match (a join without a condition pairs every row with every row)",
+                );
+            }
+            for (k, on) in j.on.iter().enumerate() {
+                let op = format!("{jp}/on/{k}");
+                // The left side can only be a table that comes before.
+                let before: Vec<SqlJoin> = joins[..i].to_vec();
+                let left = env.service.sql_column(table, &before, &on.column);
+                let right = jt.column(&on.ref_column);
+                if left.is_none() {
+                    self.error(
+                        "E_SQL_JOIN_ON",
+                        format!("{op}/column"),
+                        Self::unknown_sql_column(table, &before, &on.column),
+                    );
+                }
+                if right.is_none() {
+                    self.error(
+                        "E_SQL_JOIN_ON",
+                        format!("{op}/refColumn"),
+                        format!("table `{}` has no column `{}`", j.table, on.ref_column),
+                    );
+                }
+                if let (Some((_, l, _)), Some(r)) = (left, right)
+                    && l.ty != r.ty
+                {
+                    self.error(
+                        "E_SQL_JOIN_TYPE",
+                        &op,
+                        format!(
+                            "`{}` is {} and `{}.{}` is {}: only columns of the same type match",
+                            on.column,
+                            l.ty.sql(),
+                            j.table,
+                            r.name,
+                            r.ty.sql()
+                        ),
+                    );
+                }
+            }
+            seen.push(&j.table);
+            self.tenant_scope(jt, scope, &jp);
+        }
+        // Two columns that would give the same field of the row.
+        let mut fields: HashSet<String> = HashSet::new();
+        let Step::Sql { columns, .. } = step else {
+            return;
+        };
+        for (i, o) in env
+            .service
+            .sql_out_columns(table, joins, columns)
+            .iter()
+            .enumerate()
+        {
+            if !fields.insert(o.field.clone()) {
+                self.error(
+                    "E_SQL_COLUMN_CLASH",
+                    format!("{path}/columns/{i}"),
+                    format!("two columns give the field `{}` of the row", o.field),
+                );
+            }
+        }
+    }
+
+    /// The pagination of a select, and the sort keys it relies on.
+    fn sql_page(&mut self, env: &Env, scope: &Scope, path: &str, step: &Step) {
+        let Step::Sql {
+            table,
+            many,
+            into,
+            order_by,
+            then_by,
+            limit,
+            limit_from,
+            offset,
+            cursor,
+            total_bind,
+            more_bind,
+            last_bind,
+            joins,
+            ..
+        } = step
+        else {
+            return;
+        };
+        for (i, k) in then_by.iter().enumerate() {
+            if env.service.sql_column(table, joins, &k.column).is_none() {
+                self.error(
+                    "E_UNKNOWN_COLUMN",
+                    format!("{path}/thenBy/{i}/column"),
+                    Self::unknown_sql_column(table, joins, &k.column),
+                );
+            }
+        }
+        if let Some(e) = limit_from {
+            self.sql_int(scope, e, &format!("{path}/limitFrom"));
+        }
+        if let Some(e) = offset {
+            self.sql_int(scope, e, &format!("{path}/offset"));
+        }
+        let paged = limit_from.is_some()
+            || offset.is_some()
+            || !cursor.is_empty()
+            || more_bind.is_some()
+            || last_bind.is_some();
+        if paged && (!*many || limit.is_none()) {
+            self.error(
+                "E_SQL_PAGE_NEEDS_LIMIT",
+                format!("{path}/limit"),
+                "a page needs a list of rows (`many`) and a `limit`, the largest page",
+            );
+        }
+        if offset.is_some() && !cursor.is_empty() {
+            self.error(
+                "E_SQL_PAGE_CONFLICT",
+                format!("{path}/offset"),
+                "an offset and a cursor are two ways to pick the page: keep one",
+            );
+        }
+        if (offset.is_some() || !cursor.is_empty()) && order_by.is_none() {
+            self.warn(
+                "W_SQL_PAGE_NO_ORDER",
+                format!("{path}/orderBy"),
+                "without a sort, the database may order the rows differently from one page to the next",
+            );
+        }
+        if last_bind.is_some() && into.is_none() {
+            self.error(
+                "E_SQL_LAST_INTO",
+                format!("{path}/lastBind"),
+                "the last row is typed by the schema the rows are converted into: choose one (`into`)",
+            );
+        }
+        if !cursor.is_empty() {
+            let keys: Vec<&str> = order_by
+                .iter()
+                .map(String::as_str)
+                .chain(then_by.iter().map(|k| k.column.as_str()))
+                .collect();
+            if cursor.len() != keys.len() {
+                self.error(
+                    "E_SQL_CURSOR_ARITY",
+                    format!("{path}/cursor"),
+                    format!(
+                        "the cursor has {} value(s) and the sort has {} key(s): one value per key",
+                        cursor.len(),
+                        keys.len()
+                    ),
+                );
+            }
+            let mut unique_per_table: HashMap<&str, Vec<&str>> = HashMap::new();
+            for (i, (k, e)) in keys.iter().zip(cursor).enumerate() {
+                let Some((kt, kc, left)) = env.service.sql_column(table, joins, k) else {
+                    continue;
+                };
+                if kc.nullable || left {
+                    self.error(
+                        "E_SQL_CURSOR_NULLABLE",
+                        format!("{path}/cursor/{i}"),
+                        format!(
+                            "`{k}` can be null: a null sorts at an end and cannot be compared, so it cannot carry a cursor"
+                        ),
+                    );
+                }
+                if matches!(e, Expr::Now) {
+                    self.error(
+                        "E_SQL_TEST_VALUE",
+                        format!("{path}/cursor/{i}"),
+                        "`now()` is not a cursor value",
+                    );
+                } else {
+                    let mut want = Self::column_type(kc);
+                    want.optional = true;
+                    self.check_expr(scope, e, Some(&want), &format!("{path}/cursor/{i}"));
+                }
+                unique_per_table.entry(&kt.name).or_default().push(&kc.name);
+            }
+            // The last key must break every tie, or a row can be skipped or shown twice between two pages.
+            let mut tables: Vec<(&str, Option<&SqlJoin>)> = vec![(table.as_str(), None)];
+            tables.extend(joins.iter().map(|j| (j.table.as_str(), Some(j))));
+            let total = tables.iter().all(|(name, join)| {
+                let Some(t) = env.service.table(name) else {
+                    return true;
+                };
+                let identifies = |have: &[&str]| {
+                    let covers = |cols: &[String]| {
+                        !cols.is_empty() && cols.iter().all(|c| have.contains(&c.as_str()))
+                    };
+                    let pk: Vec<String> = t.primary_key().iter().map(|c| c.to_string()).collect();
+                    covers(&pk)
+                        || t.uniques.iter().any(|u| covers(&u.columns))
+                        || t.indexes.iter().any(|x| x.unique && covers(&x.columns))
+                };
+                // A joined table matched on a whole unique key gives at most one row per row: it cannot create a tie.
+                let matched: Vec<&str> = join
+                    .map(|j| j.on.iter().map(|o| o.ref_column.as_str()).collect())
+                    .unwrap_or_default();
+                identifies(&unique_per_table.get(name).cloned().unwrap_or_default())
+                    || (join.is_some() && identifies(&matched))
+            });
+            if !total {
+                self.warn(
+                    "W_SQL_CURSOR_NOT_UNIQUE",
+                    format!("{path}/cursor"),
+                    "the sort does not identify a row (add the primary key, or a unique column, as the last key of every table): rows that tie can be skipped or repeated between pages",
+                );
+            }
+        }
+        for (name, p) in [(total_bind, "totalBind"), (more_bind, "moreBind")] {
+            if let Some(v) = name {
+                if !*many {
+                    self.error(
+                        "E_SQL_PAGE_NEEDS_LIMIT",
+                        format!("{path}/{p}"),
+                        "a total and a next page only exist for a list of rows (`many`)",
+                    );
+                }
+                self.check_var_name(v, &format!("{path}/{p}"));
+            }
+        }
+        if let Some(v) = last_bind {
+            self.check_var_name(v, &format!("{path}/lastBind"));
+        }
+    }
+
+    /// A page size or an offset: a whole number from the flow, or written in the step.
+    fn sql_int(&mut self, scope: &Scope, e: &Expr, path: &str) {
+        match e {
+            Expr::Literal { value } if value.as_u64().is_some() => {}
+            Expr::Literal { .. } | Expr::Now => {
+                self.error("E_SQL_PAGE_VALUE", path, "a whole number, zero or more")
+            }
+            Expr::Raw { .. } => {
+                self.check_expr(scope, e, None, path);
+            }
+            // A path, a text or an operation: typed by the same table as everywhere else.
+            Expr::Path { .. } | Expr::Template { .. } | Expr::Call { .. } => {
+                if let Some(ty) = self.check_expr(scope, e, None, path)
+                    && (ty.repeated || !matches!(ty.ty, FieldType::Int32 | FieldType::Int64))
+                {
+                    self.error(
+                        "E_SQL_PAGE_VALUE",
+                        path,
+                        format!("this is {ty}: a page size or an offset is an int32 or an int64"),
+                    );
+                }
+            }
         }
     }
 
@@ -2046,7 +2448,7 @@ impl<'a> Checker<'a> {
 
     /// The variable that receives the rows of a step: what a select reads, or what an insert, update or delete
     /// returns (`RETURNING`). Typed after the ticked columns, or after the schema they are converted into.
-    fn sql_result(&mut self, path: &str, step: &Step, t: &Table, scope: &mut Scope) {
+    fn sql_result(&mut self, env: &Env, path: &str, step: &Step, _t: &Table, scope: &mut Scope) {
         let Step::Sql {
             id,
             table,
@@ -2054,20 +2456,25 @@ impl<'a> Checker<'a> {
             columns,
             many,
             into,
+            joins,
+            total_bind,
+            more_bind,
+            last_bind,
             ..
         } = step
         else {
             return;
         };
         for (i, name) in columns.iter().enumerate() {
-            if t.column(name).is_none() {
+            if env.service.sql_column(table, joins, name).is_none() {
                 self.error(
                     "E_UNKNOWN_COLUMN",
                     format!("{path}/columns/{i}"),
-                    format!("table `{table}` has no column `{name}`"),
+                    Self::unknown_sql_column(table, joins, name),
                 );
             }
         }
+        let outs = env.service.sql_out_columns(table, joins, columns);
         let Some(var) = bind else {
             self.error(
                 "E_SQL_BIND",
@@ -2079,7 +2486,7 @@ impl<'a> Checker<'a> {
         self.check_var_name(var, &format!("{path}/bind"));
         let ty = match into {
             Some(schema) => {
-                self.sql_into(path, table, columns, t, schema);
+                self.sql_into(path, table, &outs, schema);
                 TypeRef {
                     repeated: *many,
                     ..TypeRef::message(schema)
@@ -2097,10 +2504,20 @@ impl<'a> Checker<'a> {
             }
         };
         scope.bind(var.clone(), ty);
+        // What a page adds: the number of rows that match, whether a page follows, the last row.
+        if let Some(v) = total_bind {
+            scope.bind(v.clone(), TypeRef::scalar(FieldType::Int64));
+        }
+        if let Some(v) = more_bind {
+            scope.bind(v.clone(), TypeRef::scalar(FieldType::Bool));
+        }
+        if let (Some(v), Some(schema)) = (last_bind, into) {
+            scope.bind(v.clone(), TypeRef::message(schema));
+        }
     }
 
     /// `into`: every field of the schema is filled by the column of the same name, with the same type.
-    fn sql_into(&mut self, path: &str, table: &str, columns: &[String], t: &Table, schema: &str) {
+    fn sql_into(&mut self, path: &str, table: &str, outs: &[SqlOutColumn], schema: &str) {
         let Some(msg) = self.project.message(schema) else {
             self.error(
                 "E_UNKNOWN_MESSAGE",
@@ -2113,15 +2530,15 @@ impl<'a> Checker<'a> {
             return;
         }
         for f in &msg.fields {
-            let ok = match t.column(&f.name).filter(|_| columns.contains(&f.name)) {
+            let ok = match outs.iter().find(|o| o.field == f.name) {
                 None => Err(format!("no ticked column `{}` fills it", f.name)),
-                Some(c) if f.repeated || f.ty != c.ty.field_type() => Err(format!(
+                Some(o) if f.repeated || f.ty != o.column.ty.field_type() => Err(format!(
                     "`{}` is a {} column, the field is {}",
-                    c.name,
-                    c.ty.sql(),
+                    o.field,
+                    o.column.ty.sql(),
                     TypeRef::of_field(f)
                 )),
-                Some(c) if c.nullable && !f.optional => {
+                Some(o) if o.optional && !f.optional => {
                     Err("the column can be null but the field is not optional".to_string())
                 }
                 Some(_) => Ok(()),
@@ -6253,13 +6670,13 @@ mod tests {
         );
         let mut p = with_notes();
         if let Step::Sql { conditions, .. } = note_sql(&mut p, 6) {
-            conditions.push(SqlCondition {
-                column: "tenant_id".into(),
-                op: CmpOp::Eq,
-                value: Expr::Path {
+            conditions.push(SqlCondition::new(
+                "tenant_id",
+                CmpOp::Eq,
+                Expr::Path {
                     path: "tenant_id".into(),
                 },
-            });
+            ));
         }
         assert!(
             errors(&p).contains(&"E_TENANT_MANUAL".to_string()),
@@ -7248,5 +7665,263 @@ mod tests {
                 validate(&p)
             );
         }
+    }
+
+    fn with_reads() -> Project {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_sql_reads(&mut p);
+        p
+    }
+
+    /// The paged read of the sample, to break one thing at a time.
+    fn reads_step(p: &mut Project) -> &mut Step {
+        let route = p.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == "list_posts")
+            .unwrap();
+        &mut route.steps[3]
+    }
+
+    fn reads_codes(p: &Project) -> Vec<String> {
+        validate(p).into_iter().map(|d| d.code).collect()
+    }
+
+    #[test]
+    fn a_paged_read_across_two_tenant_tables_is_valid() {
+        let p = with_reads();
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+        // The page binds its variables: the rows, the total, whether a page follows, the last row.
+        let route = p.services[0]
+            .routes
+            .iter()
+            .find(|r| r.name == "list_posts")
+            .unwrap();
+        let typed = p.with_sql_rows();
+        let _ = typed;
+        assert!(matches!(route.steps[4], Step::Respond { .. }));
+    }
+
+    #[test]
+    fn a_project_without_joins_keeps_its_file_as_it_was() {
+        // The new fields are left out of the file when they are empty, and an old file without them opens.
+        let p = sample::orders();
+        let text = serde_json::to_string(&p).unwrap();
+        for word in [
+            "\"joins\"",
+            "\"thenBy\"",
+            "\"cursor\"",
+            "\"limitFrom\"",
+            "\"totalBind\"",
+        ] {
+            assert!(!text.contains(word), "{word}");
+        }
+        let old: Step = serde_json::from_str(
+            r#"{"type":"sql","id":"s","op":"select","table":"orders","bind":"o","columns":["id"],
+                "where":[{"column":"id","op":"eq","value":{"kind":"path","path":"input.id"}}]}"#,
+        )
+        .unwrap();
+        let Step::Sql {
+            joins, conditions, ..
+        } = old
+        else {
+            panic!()
+        };
+        assert!(joins.is_empty());
+        assert_eq!(conditions[0].test, SqlTest::Compare);
+    }
+
+    #[test]
+    fn joins_are_checked() {
+        let broken = |edit: &dyn Fn(&mut Step)| {
+            let mut p = with_reads();
+            edit(reads_step(&mut p));
+            reads_codes(&p)
+        };
+        let codes = broken(&|s| {
+            if let Step::Sql { joins, .. } = s {
+                joins[0].table = "nowhere".into();
+            }
+        });
+        assert!(codes.contains(&"E_SQL_JOIN_TABLE".to_string()), "{codes:?}");
+        let codes = broken(&|s| {
+            if let Step::Sql { joins, .. } = s {
+                joins[0].table = "posts".into();
+            }
+        });
+        assert!(
+            codes.contains(&"E_SQL_JOIN_DUPLICATE".to_string()),
+            "{codes:?}"
+        );
+        let codes = broken(&|s| {
+            if let Step::Sql { joins, .. } = s {
+                joins[0].on.clear();
+            }
+        });
+        assert!(codes.contains(&"E_SQL_JOIN_ON".to_string()), "{codes:?}");
+        let codes = broken(&|s| {
+            if let Step::Sql { joins, .. } = s {
+                joins[0].on[0].ref_column = "deleted_at".into();
+            }
+        });
+        assert!(codes.contains(&"E_SQL_JOIN_TYPE".to_string()), "{codes:?}");
+        // A column of a table that is not in the query, and two columns that give the same field.
+        let codes = broken(&|s| {
+            if let Step::Sql { columns, .. } = s {
+                columns.push("orders.status".into());
+            }
+        });
+        assert!(codes.contains(&"E_UNKNOWN_COLUMN".to_string()), "{codes:?}");
+        let codes = broken(&|s| {
+            if let Step::Sql { columns, .. } = s {
+                columns.push("title".into());
+            }
+        });
+        assert!(
+            codes.contains(&"E_SQL_COLUMN_CLASH".to_string()),
+            "{codes:?}"
+        );
+        // Joins only exist in a select.
+        let codes = broken(&|s| {
+            if let Step::Sql { op, .. } = s {
+                *op = SqlOp::Delete;
+            }
+        });
+        assert!(codes.contains(&"E_SQL_JOIN_OP".to_string()), "{codes:?}");
+    }
+
+    #[test]
+    fn the_rules_of_a_joined_table_hold_too() {
+        // The tenant variable is needed for the joined table even when the table of the step has no tenant.
+        let mut p = with_reads();
+        for t in &mut p.services[0].tables {
+            if t.name == "posts" {
+                t.tenant_column = None;
+                t.soft_delete = false;
+            }
+        }
+        let route = p.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == "list_posts")
+            .unwrap();
+        route.steps.remove(2);
+        assert!(
+            reads_codes(&p).contains(&"E_TENANT_SCOPE".to_string()),
+            "{:?}",
+            reads_codes(&p)
+        );
+        // Filtering on the tenant of a joined table by hand is refused, as it is for the table of the step.
+        let mut p = with_reads();
+        if let Step::Sql { conditions, .. } = reads_step(&mut p) {
+            conditions.push(SqlCondition::new(
+                "authors.tenant_id",
+                CmpOp::Eq,
+                Expr::Path {
+                    path: "tenant_id".into(),
+                },
+            ));
+        }
+        assert!(
+            reads_codes(&p).contains(&"E_TENANT_MANUAL".to_string()),
+            "{:?}",
+            reads_codes(&p)
+        );
+    }
+
+    #[test]
+    fn pages_and_cursors_are_checked() {
+        let broken = |edit: &dyn Fn(&mut Step)| {
+            let mut p = with_reads();
+            edit(reads_step(&mut p));
+            validate(&p)
+        };
+        let has = |d: &[Diagnostic], code: &str| d.iter().any(|x| x.code == code);
+        // A page needs its largest size.
+        let d = broken(&|s| {
+            if let Step::Sql { limit, .. } = s {
+                *limit = None;
+            }
+        });
+        assert!(has(&d, "E_SQL_PAGE_NEEDS_LIMIT"), "{d:?}");
+        // An offset and a cursor are two ways to do one thing.
+        let d = broken(&|s| {
+            if let Step::Sql { offset, .. } = s {
+                *offset = Some(Expr::Literal { value: 10.into() });
+            }
+        });
+        assert!(has(&d, "E_SQL_PAGE_CONFLICT"), "{d:?}");
+        // One value per sort key.
+        let d = broken(&|s| {
+            if let Step::Sql { cursor, .. } = s {
+                cursor.pop();
+            }
+        });
+        assert!(has(&d, "E_SQL_CURSOR_ARITY"), "{d:?}");
+        // A key that can be null cannot carry a cursor: the left joined `authors.name` can.
+        let d = broken(&|s| {
+            if let Step::Sql { order_by, .. } = s {
+                *order_by = Some("authors.name".into());
+            }
+        });
+        assert!(has(&d, "E_SQL_CURSOR_NULLABLE"), "{d:?}");
+        // A sort that does not identify a row is a warning, not an error.
+        let d = broken(&|s| {
+            if let Step::Sql {
+                then_by, cursor, ..
+            } = s
+            {
+                then_by.clear();
+                cursor.pop();
+            }
+        });
+        assert!(has(&d, "W_SQL_CURSOR_NOT_UNIQUE"), "{d:?}");
+        assert!(!d.iter().any(|x| x.severity == Severity::Error), "{d:?}");
+        // The last row is typed by the schema the rows are converted into.
+        let d = broken(&|s| {
+            if let Step::Sql { into, .. } = s {
+                *into = None;
+            }
+        });
+        assert!(has(&d, "E_SQL_LAST_INTO"), "{d:?}");
+        // A page size is a whole number.
+        let d = broken(&|s| {
+            if let Step::Sql { limit_from, .. } = s {
+                *limit_from = Some(Expr::Path {
+                    path: "input.search".into(),
+                });
+            }
+        });
+        assert!(has(&d, "E_SQL_PAGE_VALUE"), "{d:?}");
+    }
+
+    #[test]
+    fn the_tests_of_a_condition_are_typed_by_what_they_do() {
+        let broken = |test: SqlTest, column: &str, value: Expr| {
+            let mut p = with_reads();
+            if let Step::Sql { conditions, .. } = reads_step(&mut p) {
+                conditions.push(SqlCondition {
+                    column: column.into(),
+                    op: CmpOp::Eq,
+                    value,
+                    test,
+                });
+            }
+            validate(&p)
+        };
+        let text = || Expr::Path {
+            path: "input.search".into(),
+        };
+        // A list is needed after `in`; a text column after `contains`.
+        let d = broken(SqlTest::In, "title", text());
+        assert!(d.iter().any(|x| x.severity == Severity::Error), "{d:?}");
+        let d = broken(SqlTest::Contains, "deleted_at", text());
+        assert!(d.iter().any(|x| x.code == "E_SQL_TEST_VALUE"), "{d:?}");
+        // Null tests take no value, and warn when the column is never null.
+        let d = broken(SqlTest::IsNull, "authors.name", text());
+        assert_eq!(d, vec![], "{d:?}");
+        let d = broken(SqlTest::IsNotNull, "title", text());
+        assert!(d.iter().any(|x| x.code == "W_SQL_NEVER_NULL"), "{d:?}");
     }
 }

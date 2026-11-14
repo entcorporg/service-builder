@@ -336,6 +336,43 @@ Le bloc **SQL** est un bloc de logique à part entière. Il lit une table du ser
   compte inconnu. Routes seulement, et seulement pour une ligne : `E_SQL_MISSING_OUTSIDE_ROUTE`, `E_SQL_MISSING_USELESS`,
   `E_SQL_MISSING_STATUS`, `E_SQL_MISSING_MESSAGE`.
 
+**Lectures avancées** (une lecture seulement, `select`) :
+
+- **Jointures** (`joins`) : d'autres tables du service, `inner` (seules les lignes qui ont une correspondance) ou `left` (toutes
+  les lignes d'avant, colonnes nulles sans correspondance). Chaque jointure dit ses paires de colonnes (`on`, toutes ensemble) ; dans
+  l'éditeur on choisit une **clé étrangère** déclarée (dans un sens ou dans l'autre) qui remplit les paires, ou on les règle à la
+  main dans des listes. Une table n'est jointe qu'une fois. Les colonnes d'une table jointe s'écrivent `table.colonne` (dans
+  `columns`, `where`, `orderBy`, `thenBy` ; sans préfixe, c'est la table du bloc) et leur champ dans la ligne s'appelle
+  `table_colonne` (le préfixe peut être fixé par `alias` sur la jointure ; un renommage de la table le pose pour que les schémas
+  « vers un schéma » gardent leurs noms de champs). Les colonnes d'une table jointée à gauche sont **optionnelles**. Le SQL d'un
+  bloc sans jointure est inchangé, mot pour mot.
+- **Les règles de chaque table tiennent** : le filtre `tenantColumn` et `deleted_at` de chaque table jointe sont posés par le
+  générateur dans le `ON` de la jointure (et non dans le `WHERE`, pour qu'une jointure à gauche reste une jointure à gauche : une
+  ligne d'un autre tenant, ou supprimée, n'est « pas de correspondance », elle ne fait pas disparaître la ligne de gauche). Le
+  tenant d'une table jointe vient de la variable de même nom que la colonne, comme pour la table du bloc (`E_TENANT_SCOPE` si elle
+  manque) ; filtrer soi-même sa colonne est refusé (`E_TENANT_MANUAL`).
+- **Tests de condition** (`test` sur chaque condition) : `compare` (défaut, avec `op`), `in` (appartient à une liste du flux,
+  `= ANY`), `contains` / `startsWith` (colonne texte, insensible à la casse ; les `%` et `_` de la valeur sont du texte, pas des
+  jokers), `isNull` / `isNotNull` (sans valeur). `E_SQL_TEST_VALUE`, `W_SQL_NEVER_NULL`.
+- **Tri sur plusieurs colonnes** : `orderBy` + `descending`, puis `thenBy` (colonne, sens).
+- **Pagination** (une liste, avec `limit`, la plus grande page) : `limitFrom` (taille demandée par le flux, ramenée entre 1 et
+  `limit` ; absente, c'est `limit`), `offset` (lignes sautées, plafonné à 1 000 000) **ou** `cursor` (pagination par clé : une valeur
+  par clé de tri, celles de la dernière ligne de la page précédente ; une valeur absente, donc un champ optionnel, lit la première
+  page ; la comparaison est développée clé par clé, elle accepte des sens différents). Un curseur exige des colonnes de tri non
+  nulles (`E_SQL_CURSOR_NULLABLE`) et une valeur par clé (`E_SQL_CURSOR_ARITY`) ; `W_SQL_CURSOR_NOT_UNIQUE` avertit quand le tri
+  ne désigne pas une ligne (mettre la clé primaire en dernier), sinon des lignes ex æquo peuvent être sautées ou répétées entre deux
+  pages. Trois variables optionnelles : `totalBind` (int64, nombre de lignes qui correspondent, hors page : une seconde requête),
+  `moreBind` (bool, une ligne suit : on lit une ligne de plus que la page) et `lastBind` (la dernière ligne de la page, typée par
+  le schéma `into` : c'est d'elle que le flux tire le curseur suivant). Un offset avec un curseur est `E_SQL_PAGE_CONFLICT`,
+  une page sans liste ni `limit` est `E_SQL_PAGE_NEEDS_LIMIT`.
+- Codes des jointures : `E_SQL_JOIN_OP` (un `insert`, `update` ou `delete` n'a ni jointure ni page), `E_SQL_JOIN_TABLE`,
+  `E_SQL_JOIN_DUPLICATE`, `E_SQL_JOIN_ON`, `E_SQL_JOIN_TYPE` (colonnes de types différents), `E_SQL_COLUMN_CLASH` (deux colonnes
+  donnent le même champ).
+- Vérifié sur le code généré avec PostgreSQL 16 : jointure à gauche (un auteur supprimé ou d'un autre tenant donne `null`, le
+  post reste), jointure interne, `IN`, décalage, tri `DESC` puis `ASC`, trois pages de curseur sans doublon ni trou avec total et
+  « page suivante », jokers échappés, bornes (0 donne une ligne, une taille énorme donne `limit`), isolation de deux tenants.
+  Non vérifié : de gros volumes (aucun index n'est créé pour un tri ou une jointure : c'est à l'auteur, dans la vue Tables).
+
 Les requêtes sont paramétrées (`$1`, `$2`…) : aucune valeur n'est collée dans le SQL. Techniquement, la ligne lue par un
 bloc est un message dérivé (`OrdersRowH6`) que `Project::with_sql_rows` ajoute au projet avant la validation et la
 génération ; il n'est jamais écrit dans un fichier projet ni dans le `.proto`.

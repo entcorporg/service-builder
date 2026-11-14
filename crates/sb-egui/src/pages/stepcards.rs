@@ -144,6 +144,14 @@ fn field_name(key: &str) -> String {
         "values" => "Valeurs",
         "set" => "Modifications",
         "filters" | "where" => "Conditions",
+        "joins" => "Jointures",
+        "thenBy" => "Tri secondaire",
+        "limitFrom" => "Taille de page (depuis le flux)",
+        "offset" => "Décalage (lignes sautées)",
+        "cursor" => "Curseur (page suivante)",
+        "totalBind" => "Total : variable (nombre de lignes)",
+        "moreBind" => "Page suivante ? : variable (oui/non)",
+        "lastBind" => "Dernière ligne : variable",
         "code" => "Code Rust",
         _ => "",
     };
@@ -283,6 +291,22 @@ fn form(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, index: usize) {
     for (i, (spec, text)) in all.iter().enumerate() {
         // The `Retry-After` header only means something for 429 and 503.
         if is_fail && spec.key == "retryAfter" && !matches!(fail_status.as_str(), "429" | "503") {
+            continue;
+        }
+        // Joins, extra sorts and pages are for a read: an insert, an update or a delete does not show them.
+        if matches!(step, Step::Sql { op, .. } if *op != sb_model::SqlOp::Select)
+            && matches!(
+                spec.key.as_str(),
+                "joins"
+                    | "thenBy"
+                    | "limitFrom"
+                    | "offset"
+                    | "cursor"
+                    | "totalBind"
+                    | "moreBind"
+                    | "lastBind"
+            )
+        {
             continue;
         }
         let fid = ui.make_persistent_id(("step-field", step.id(), &spec.key));

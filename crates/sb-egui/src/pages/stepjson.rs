@@ -8,8 +8,8 @@ use eframe::egui::{self, Align, Frame, Layout, Margin, RichText, Stroke, Ui, Vec
 use sb_app::scope::Var;
 use sb_app::stepform::{self, Kind};
 use sb_model::{
-    Assignment, CmpOp, Cookie, Expr, Field, JwksSource, SameSite, SqlCondition, SqlMissing, Step,
-    Table,
+    Assignment, CmpOp, Column, Cookie, Expr, Field, JwksSource, SameSite, SqlCondition, SqlJoin,
+    SqlJoinKind, SqlJoinOn, SqlMissing, SqlSort, SqlTest, Step, Table,
 };
 use serde_json::Value;
 
@@ -78,15 +78,24 @@ pub fn structured(
         | ("verifyJwt", "schema")
         | ("sql", "into") => true,
         ("sql", "values") => table.is_some(),
+        ("sql", "table") => true,
+        ("sql", "columns" | "orderBy" | "joins" | "thenBy" | "cursor") => table.is_some(),
         _ => matches!(spec.kind, Kind::Assignments),
     };
     if !known {
         return None;
     }
     ui.label(RichText::new(name).size(11.0).color(FAINT));
+    let query = Query::of(app, service, &v);
     let out = match (kind, spec.key.as_str()) {
         ("respond", "cookies") => cookies(app, ui, id, text, vars),
-        ("sql", "where") => conditions(app, ui, id, table.as_ref(), text, vars),
+        ("sql", "table") => table_pick(app, ui, id, service, text),
+        ("sql", "columns") => columns_ticks(ui, &query?, text),
+        ("sql", "orderBy") => order_pick(ui, id, &query?, text),
+        ("sql", "joins") => joins(app, ui, id, service, &query?, text),
+        ("sql", "thenBy") => then_by(ui, id, &query?, text),
+        ("sql", "cursor") => cursor(app, ui, id, &query?, &v, text, vars),
+        ("sql", "where") => conditions(app, ui, id, query.as_ref(), text, vars),
         ("sql", "missing") => missing(ui, id, text),
         ("sql", "values") => column_values(app, ui, id, &table?, text, vars),
         ("verifyJwt", "source") => jwks_source(ui, id, text),
@@ -135,6 +144,37 @@ fn op_name(op: CmpOp) -> &'static str {
 
 fn op_names() -> Vec<String> {
     OPS.iter().map(|(n, _)| (*n).to_string()).collect()
+}
+
+/// What a condition tests, as it is read in the list: the comparison operators, then the other tests.
+const TESTS: [(&str, SqlTest); 5] = [
+    ("est dans la liste", SqlTest::In),
+    ("contient", SqlTest::Contains),
+    ("commence par", SqlTest::StartsWith),
+    ("est nul", SqlTest::IsNull),
+    ("n’est pas nul", SqlTest::IsNotNull),
+];
+
+fn test_names() -> Vec<String> {
+    let mut v = op_names();
+    v.extend(TESTS.iter().map(|(n, _)| (*n).to_string()));
+    v
+}
+
+fn test_name(c: &SqlCondition) -> String {
+    match TESTS.iter().find(|(_, t)| *t == c.test) {
+        Some((n, _)) => (*n).to_string(),
+        None => op_name(c.op).to_string(),
+    }
+}
+
+fn set_test(c: &mut SqlCondition, word: &str) {
+    if let Some((_, t)) = TESTS.iter().find(|(n, _)| *n == word) {
+        c.test = *t;
+    } else if let Some((_, o)) = OPS.iter().find(|(n, _)| *n == word) {
+        c.test = SqlTest::Compare;
+        c.op = *o;
+    }
 }
 
 fn status_words() -> Vec<String> {
@@ -305,23 +345,29 @@ fn conditions(
     app: &mut App,
     ui: &mut Ui,
     id: egui::Id,
-    table: Option<&Table>,
+    query: Option<&Query>,
     text: &str,
     vars: &[Var],
 ) -> Option<String> {
     let mut list = parse::<Vec<SqlCondition>>(text);
     let mut changed = false;
     let mut remove = None;
-    let columns: Vec<String> = table
-        .map(|t| t.columns.iter().map(|c| c.name.clone()).collect())
-        .unwrap_or_default();
-    let names = op_names();
+    let columns: Vec<String> = query.map(Query::choices).unwrap_or_default();
+    let names = test_names();
     ui.spacing_mut().item_spacing.y = 6.0;
     for (i, c) in list.clone().into_iter().enumerate() {
-        let column = table.and_then(|t| t.columns.iter().find(|x| x.name == c.column));
+        let column = query.and_then(|q| q.column(&c.column));
         // In a narrow column the value goes under the column and the operator.
         let narrow = ui.available_width() < 440.0;
-        let target = column.map(|x| Field::new(&x.name, x.ty.field_type()));
+        let target = column.map(|x| {
+            let mut f = Field::new(&x.name, x.ty.field_type());
+            match c.test {
+                SqlTest::In => f.repeated = true,
+                SqlTest::Contains | SqlTest::StartsWith => f.ty = sb_model::FieldType::String,
+                _ => {}
+            }
+            f
+        });
         let mut value = |ui: &mut Ui, reserve: f32| -> Option<Expr> {
             let edited = fill(ui, reserve, |ui| {
                 sql_expr_editor(
@@ -347,20 +393,19 @@ fn conditions(
                 changed = true;
             }
             if let Some(v) =
-                super::assignments::pick(ui, (id, "op", i), op_name(c.op), &names, 52.0)
-                && let Some((_, o)) = OPS.iter().find(|(n, _)| *n == v)
+                super::assignments::pick(ui, (id, "op", i), &test_name(&c), &names, 110.0)
             {
-                list[i].op = *o;
+                set_test(&mut list[i], &v);
                 changed = true;
             }
-            if !narrow {
+            if !narrow && c.test.has_value() {
                 new_value = value(ui, 32.0);
             }
             if icon_btn(ui, "trash", "Retirer la condition", true).clicked() {
                 remove = Some(i);
             }
         });
-        if narrow {
+        if narrow && c.test.has_value() {
             new_value = value(ui, 0.0);
         }
         if let Some(e) = new_value {
@@ -375,13 +420,13 @@ fn conditions(
     if link(ui, "+ Ajouter une condition").clicked()
         && let Some(first) = columns.first().cloned()
     {
-        list.push(SqlCondition {
-            column: first,
-            op: CmpOp::Eq,
-            value: Expr::Raw {
+        list.push(SqlCondition::new(
+            first,
+            CmpOp::Eq,
+            Expr::Raw {
                 code: String::new(),
             },
-        });
+        ));
         changed = true;
     }
     changed.then(|| push(&list))
@@ -632,4 +677,457 @@ fn jwks_source(ui: &mut Ui, id: egui::Id, text: &str) -> Option<String> {
         }
     }
     out
+}
+
+// ---- tables, columns and joins of a read ----
+
+/// The tables a select reads (the step's, then the joined ones), to pick columns by name.
+struct Query {
+    base: String,
+    tables: Vec<Table>,
+}
+
+impl Query {
+    fn of(app: &App, service: usize, step: &Value) -> Option<Query> {
+        let base = step["table"].as_str()?.to_string();
+        let joins: Vec<SqlJoin> = serde_json::from_value(step["joins"].clone()).unwrap_or_default();
+        let p = app.project();
+        let svc = p.services.get(service)?;
+        let mut tables = vec![svc.table(&base)?.clone()];
+        for j in &joins {
+            if let Some(t) = svc.table(&j.table) {
+                tables.push(t.clone());
+            }
+        }
+        Some(Query { base, tables })
+    }
+
+    fn column(&self, name: &str) -> Option<&Column> {
+        let (t, c) = name.split_once('.').unwrap_or((&self.base, name));
+        self.tables.iter().find(|x| x.name == t)?.column(c)
+    }
+
+    /// Every column, as the step writes it: bare for the table of the step, `table.column` for a joined one.
+    fn choices(&self) -> Vec<String> {
+        self.choices_of(self.tables.len())
+    }
+
+    /// The columns of the first `n` tables.
+    fn choices_of(&self, n: usize) -> Vec<String> {
+        self.tables
+            .iter()
+            .take(n)
+            .flat_map(|t| {
+                t.columns.iter().map(|c| {
+                    if t.name == self.base {
+                        c.name.clone()
+                    } else {
+                        format!("{}.{}", t.name, c.name)
+                    }
+                })
+            })
+            .collect()
+    }
+}
+
+fn table_pick(
+    app: &mut App,
+    ui: &mut Ui,
+    id: egui::Id,
+    service: usize,
+    text: &str,
+) -> Option<String> {
+    let names: Vec<String> = app
+        .project()
+        .services
+        .get(service)
+        .map(|s| s.tables.iter().map(|t| t.name.clone()).collect())
+        .unwrap_or_default();
+    if names.is_empty() {
+        small(
+            ui,
+            "Ce service n’a pas encore de table : créez-en une dans la vue Tables.",
+        );
+    }
+    super::assignments::pick(ui, id.with("table"), text, &names, f32::MAX)
+}
+
+/// The columns to read, ticked table by table (the joined ones are prefixed by their table).
+fn columns_ticks(ui: &mut Ui, q: &Query, text: &str) -> Option<String> {
+    let now: Vec<String> = text
+        .split(',')
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect();
+    let mut out = None;
+    for (n, t) in q.tables.iter().enumerate() {
+        if q.tables.len() > 1 {
+            small(ui, &t.name);
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            for c in &t.columns {
+                let key = if n == 0 {
+                    c.name.clone()
+                } else {
+                    format!("{}.{}", t.name, c.name)
+                };
+                if let Some(on) = widgets::check(ui, now.contains(&key), &c.name) {
+                    // Kept in the order of the tables, so that the row does not shuffle as boxes are ticked.
+                    let mut next = now.clone();
+                    next.retain(|x| *x != key);
+                    if on {
+                        next.push(key);
+                    }
+                    let order = q.choices();
+                    next.sort_by_key(|x| order.iter().position(|o| o == x).unwrap_or(usize::MAX));
+                    out = Some(next.join(", "));
+                }
+            }
+        });
+    }
+    out
+}
+
+fn order_pick(ui: &mut Ui, id: egui::Id, q: &Query, text: &str) -> Option<String> {
+    let none = "aucun tri".to_string();
+    let mut options = vec![none.clone()];
+    options.extend(q.choices());
+    let current = if text.trim().is_empty() {
+        none.clone()
+    } else {
+        text.to_string()
+    };
+    super::assignments::pick(ui, id.with("order"), &current, &options, f32::MAX)
+        .map(|v| if v == none { String::new() } else { v })
+}
+
+/// The foreign keys that link a table to the ones before it, as join conditions: a key of the joined table that points at
+/// one of them, or a key of one of them that points at the joined table.
+fn foreign_key_pairs(q: &Query, before: usize, joined: &Table) -> Vec<(String, Vec<SqlJoinOn>)> {
+    let name_of = |t: &Table, c: &str| {
+        if t.name == q.base {
+            c.to_string()
+        } else {
+            format!("{}.{c}", t.name)
+        }
+    };
+    let mut out = vec![];
+    for earlier in q.tables.iter().take(before) {
+        for fk in &joined.foreign_keys {
+            if fk.ref_table == earlier.name {
+                out.push((
+                    format!(
+                        "{}({}) → {}({})",
+                        joined.name,
+                        fk.columns.join(", "),
+                        earlier.name,
+                        fk.ref_columns.join(", ")
+                    ),
+                    fk.columns
+                        .iter()
+                        .zip(&fk.ref_columns)
+                        .map(|(own, theirs)| SqlJoinOn {
+                            column: name_of(earlier, theirs),
+                            ref_column: own.clone(),
+                        })
+                        .collect(),
+                ));
+            }
+        }
+        for fk in &earlier.foreign_keys {
+            if fk.ref_table == joined.name {
+                out.push((
+                    format!(
+                        "{}({}) → {}({})",
+                        earlier.name,
+                        fk.columns.join(", "),
+                        joined.name,
+                        fk.ref_columns.join(", ")
+                    ),
+                    fk.columns
+                        .iter()
+                        .zip(&fk.ref_columns)
+                        .map(|(own, theirs)| SqlJoinOn {
+                            column: name_of(earlier, own),
+                            ref_column: theirs.clone(),
+                        })
+                        .collect(),
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// The tables joined to the one of the step, each matched along a foreign key (picked in a list) or by pairs of columns.
+fn joins(
+    app: &mut App,
+    ui: &mut Ui,
+    id: egui::Id,
+    service: usize,
+    q: &Query,
+    text: &str,
+) -> Option<String> {
+    let mut list = parse::<Vec<SqlJoin>>(text);
+    let all: Vec<Table> = app
+        .project()
+        .services
+        .get(service)
+        .map(|s| s.tables.clone())
+        .unwrap_or_default();
+    let kinds = ["interne".to_string(), "à gauche".to_string()];
+    let mut changed = false;
+    let mut remove = None;
+    ui.spacing_mut().item_spacing.y = 6.0;
+    for (i, j) in list.clone().into_iter().enumerate() {
+        Frame::new()
+            .fill(PANEL2)
+            .stroke(Stroke::new(1.0, BORDER))
+            .corner_radius(10)
+            .inner_margin(Margin::same(8))
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 6.0;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let now = if j.kind == SqlJoinKind::Left {
+                        &kinds[1]
+                    } else {
+                        &kinds[0]
+                    };
+                    if let Some(v) =
+                        super::assignments::pick(ui, (id, "kind", i), now, &kinds, 90.0)
+                    {
+                        list[i].kind = if v == kinds[1] {
+                            SqlJoinKind::Left
+                        } else {
+                            SqlJoinKind::Inner
+                        };
+                        changed = true;
+                    }
+                    let others: Vec<String> = all
+                        .iter()
+                        .filter(|t| {
+                            t.name != q.base
+                                && (t.name == j.table
+                                    || !list.iter().any(|other| other.table == t.name))
+                        })
+                        .map(|t| t.name.clone())
+                        .collect();
+                    if let Some(v) =
+                        super::assignments::pick(ui, (id, "table", i), &j.table, &others, 160.0)
+                    {
+                        // A new table: the first foreign key that links it gives the conditions.
+                        list[i].on = all
+                            .iter()
+                            .find(|t| t.name == v)
+                            .and_then(|t| foreign_key_pairs(q, i + 1, t).into_iter().next())
+                            .map(|(_, on)| on)
+                            .unwrap_or_default();
+                        list[i].table = v;
+                        changed = true;
+                    }
+                    if icon_btn(ui, "trash", "Retirer la jointure", true).clicked() {
+                        remove = Some(i);
+                    }
+                });
+                let jt = all.iter().find(|t| t.name == j.table);
+                let left_choices = q.choices_of(i + 1);
+                let right_choices: Vec<String> = jt
+                    .map(|t| t.columns.iter().map(|c| c.name.clone()).collect())
+                    .unwrap_or_default();
+                let mut drop_pair = None;
+                for (k, on) in j.on.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        if let Some(v) = super::assignments::pick(
+                            ui,
+                            (id, "on-l", i, k),
+                            &on.column,
+                            &left_choices,
+                            140.0,
+                        ) {
+                            list[i].on[k].column = v;
+                            changed = true;
+                        }
+                        ui.label("=");
+                        if let Some(v) = super::assignments::pick(
+                            ui,
+                            (id, "on-r", i, k),
+                            &format!("{}.{}", j.table, on.ref_column),
+                            &right_choices
+                                .iter()
+                                .map(|c| format!("{}.{c}", j.table))
+                                .collect::<Vec<_>>(),
+                            140.0,
+                        ) {
+                            list[i].on[k].ref_column =
+                                v.split_once('.').map(|(_, c)| c.to_string()).unwrap_or(v);
+                            changed = true;
+                        }
+                        if icon_btn(ui, "trash", "Retirer cette paire", true).clicked() {
+                            drop_pair = Some(k);
+                        }
+                    });
+                }
+                if let Some(k) = drop_pair {
+                    list[i].on.remove(k);
+                    changed = true;
+                }
+                let fks = jt
+                    .map(|t| foreign_key_pairs(q, i + 1, t))
+                    .unwrap_or_default();
+                if !fks.is_empty() {
+                    let labels: Vec<String> = fks.iter().map(|(l, _)| l.clone()).collect();
+                    ui.horizontal(|ui| {
+                        small(ui, "d’après la clé étrangère");
+                        if let Some(v) =
+                            super::assignments::pick(ui, (id, "fk", i), "choisir…", &labels, 260.0)
+                            && let Some((_, on)) = fks.iter().find(|(l, _)| *l == v)
+                        {
+                            list[i].on = on.clone();
+                            changed = true;
+                        }
+                    });
+                }
+                if link(ui, "+ Ajouter une paire de colonnes").clicked()
+                    && let (Some(l), Some(r)) = (left_choices.first(), right_choices.first())
+                {
+                    list[i].on.push(SqlJoinOn {
+                        column: l.clone(),
+                        ref_column: r.clone(),
+                    });
+                    changed = true;
+                }
+            });
+    }
+    if let Some(i) = remove {
+        list.remove(i);
+        changed = true;
+    }
+    if link(ui, "+ Joindre une table").clicked()
+        && let Some(t) = all
+            .iter()
+            .find(|t| t.name != q.base && !list.iter().any(|j| j.table == t.name))
+    {
+        let on = foreign_key_pairs(q, q.tables.len(), t)
+            .into_iter()
+            .next()
+            .map(|(_, on)| on)
+            .unwrap_or_default();
+        list.push(SqlJoin {
+            kind: SqlJoinKind::Inner,
+            table: t.name.clone(),
+            alias: None,
+            on,
+        });
+        changed = true;
+    }
+    changed.then(|| push(&list))
+}
+
+/// The sort keys after the first one.
+fn then_by(ui: &mut Ui, id: egui::Id, q: &Query, text: &str) -> Option<String> {
+    let mut list = parse::<Vec<SqlSort>>(text);
+    let choices = q.choices();
+    let mut changed = false;
+    let mut remove = None;
+    for (i, k) in list.clone().into_iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if let Some(v) =
+                super::assignments::pick(ui, (id, "col", i), &k.column, &choices, 160.0)
+            {
+                list[i].column = v;
+                changed = true;
+            }
+            if let Some(on) = widgets::check(ui, k.descending, "décroissant") {
+                list[i].descending = on;
+                changed = true;
+            }
+            if icon_btn(ui, "trash", "Retirer ce tri", true).clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        list.remove(i);
+        changed = true;
+    }
+    if link(ui, "+ Ajouter un tri").clicked()
+        && let Some(first) = choices.first()
+    {
+        list.push(SqlSort {
+            column: first.clone(),
+            descending: false,
+        });
+        changed = true;
+    }
+    changed.then(|| push(&list))
+}
+
+/// The cursor: the value of each sort key for the row after which the page starts.
+fn cursor(
+    app: &mut App,
+    ui: &mut Ui,
+    id: egui::Id,
+    q: &Query,
+    step: &Value,
+    text: &str,
+    vars: &[Var],
+) -> Option<String> {
+    let mut keys: Vec<String> = step["orderBy"]
+        .as_str()
+        .map(String::from)
+        .into_iter()
+        .collect();
+    if let Ok(more) = serde_json::from_value::<Vec<SqlSort>>(step["thenBy"].clone()) {
+        keys.extend(more.into_iter().map(|k| k.column));
+    }
+    if keys.is_empty() {
+        small(
+            ui,
+            "Choisissez d’abord un tri : le curseur a une valeur par clé de tri.",
+        );
+        return None;
+    }
+    let mut list = parse::<Vec<Expr>>(text);
+    list.resize(keys.len(), Expr::Literal { value: Value::Null });
+    let mut changed = false;
+    for (i, key) in keys.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.add_sized(
+                [110.0, 22.0],
+                egui::Label::new(RichText::new(key).font(mono(SM))).truncate(),
+            );
+            let mut target = q
+                .column(key)
+                .map(|x| Field::new(&x.name, x.ty.field_type()));
+            if let Some(t) = target.as_mut() {
+                t.optional = true;
+            }
+            let edited = fill(ui, 0.0, |ui| {
+                sql_expr_editor(
+                    app,
+                    ui,
+                    (id, "cursor", i),
+                    target.as_ref(),
+                    false,
+                    Some(&list[i]),
+                    vars,
+                    false,
+                )
+            });
+            if let Some(e) = edited.flatten() {
+                list[i] = e;
+                changed = true;
+            }
+        });
+    }
+    small(
+        ui,
+        "Un champ de la requête absent (optionnel) donne la première page.",
+    );
+    changed.then(|| push(&list))
 }

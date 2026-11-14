@@ -190,7 +190,8 @@ La CI le fait.
   ± une durée, comparaison d'expiration : seule l'horloge de la base, dans un bloc SQL), pas de `break` ni d'appel de
   sous-flux, pas d'accès à l'élément *n* d'une liste, pas d'expressions régulières, et une `Variable` de type schéma
   reste en Rust. Un nombre n'est jamais converti en silence : `toInt64`, `toDouble`… s'écrivent.
-- Le bloc SQL lit une seule table à la fois : pas de jointure, pas de pagination (une limite, pas de décalage).
+- Le bloc SQL n'a pas encore d'agrégats (`COUNT` par groupe, `SUM`, `GROUP BY`), de jointure à soi-même (alias) ni de `OR` entre
+  conditions ; le total d'une page est le seul `COUNT`.
 - L'API HTTP n'a pas de spécification OpenAPI générée ; un champ absent d'une requête prend sa valeur par défaut au
   lieu d'être refusé ; une réponse pose un statut et des cookies, pas d'en-têtes libres.
 - Pas d'appel à une API HTTP externe (Stripe, Twilio…) : seuls les webhooks entrants signés sont modélisés

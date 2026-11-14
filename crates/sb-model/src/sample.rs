@@ -322,6 +322,14 @@ pub fn orders() -> Project {
                         descending: false,
                         limit: None,
                         missing: None,
+                        joins: vec![],
+                        then_by: vec![],
+                        limit_from: None,
+                        offset: None,
+                        cursor: vec![],
+                        total_bind: None,
+                        more_bind: None,
+                        last_bind: None,
                     },
                     Step::Publish {
                         id: "h2".into(),
@@ -368,12 +376,21 @@ pub fn orders() -> Project {
                             column: "order_id".into(),
                             op: CmpOp::Eq,
                             value: path("input.order_id"),
+                            test: Default::default(),
                         }],
                         values: vec![],
                         order_by: None,
                         descending: false,
                         limit: None,
                         missing: None,
+                        joins: vec![],
+                        then_by: vec![],
+                        limit_from: None,
+                        offset: None,
+                        cursor: vec![],
+                        total_bind: None,
+                        more_bind: None,
+                        last_bind: None,
                     },
                     Step::Respond {
                         id: "h4".into(),
@@ -567,21 +584,25 @@ pub fn add_single_use_token(p: &mut Project) {
                         column: "token_hash".into(),
                         op: CmpOp::Eq,
                         value: path("token_hash"),
+                        test: Default::default(),
                     },
                     SqlCondition {
                         column: "kind".into(),
                         op: CmpOp::Eq,
                         value: lit("email"),
+                        test: Default::default(),
                     },
                     SqlCondition {
                         column: "used".into(),
                         op: CmpOp::Eq,
                         value: lit(false),
+                        test: Default::default(),
                     },
                     SqlCondition {
                         column: "expires_at".into(),
                         op: CmpOp::Gt,
                         value: Expr::Now,
+                        test: Default::default(),
                     },
                 ],
                 values: vec![set("used", lit(true))],
@@ -592,6 +613,14 @@ pub fn add_single_use_token(p: &mut Project) {
                     status: 400,
                     message: "invalid or expired token".into(),
                 }),
+                joins: vec![],
+                then_by: vec![],
+                limit_from: None,
+                offset: None,
+                cursor: vec![],
+                total_bind: None,
+                more_bind: None,
+                last_bind: None,
             },
             Step::Respond {
                 id: "t3".into(),
@@ -627,12 +656,21 @@ pub fn add_cleaner_job(p: &mut Project) {
                     column: "expires_at".into(),
                     op: CmpOp::Le,
                     value: Expr::Now,
+                    test: Default::default(),
                 }],
                 values: vec![],
                 order_by: None,
                 descending: false,
                 limit: None,
                 missing: None,
+                joins: vec![],
+                then_by: vec![],
+                limit_from: None,
+                offset: None,
+                cursor: vec![],
+                total_bind: None,
+                more_bind: None,
+                last_bind: None,
             },
         ],
     });
@@ -841,6 +879,7 @@ pub fn showcase() -> Project {
     add_passkeys(&mut p);
     add_avatars(&mut p);
     add_notes(&mut p);
+    add_sql_reads(&mut p);
     add_mailer(&mut p);
     add_live_events(&mut p);
     add_basket_lines(&mut p);
@@ -1153,6 +1192,7 @@ pub fn add_totp(p: &mut Project) {
                 column: "account".into(),
                 op: CmpOp::Eq,
                 value: path("input.account"),
+                test: Default::default(),
             }]
         } else {
             vec![]
@@ -1162,6 +1202,14 @@ pub fn add_totp(p: &mut Project) {
         descending: false,
         limit: None,
         missing,
+        joins: vec![],
+        then_by: vec![],
+        limit_from: None,
+        offset: None,
+        cursor: vec![],
+        total_bind: None,
+        more_bind: None,
+        last_bind: None,
     };
     let ack = |id: &str| Step::Respond {
         id: id.into(),
@@ -1749,12 +1797,21 @@ pub fn add_notes(p: &mut Project) {
             status: 404,
             message: "no such note".into(),
         }),
+        joins: vec![],
+        then_by: vec![],
+        limit_from: None,
+        offset: None,
+        cursor: vec![],
+        total_bind: None,
+        more_bind: None,
+        last_bind: None,
     };
     let by_id = || {
         vec![SqlCondition {
             column: "note_id".into(),
             op: CmpOp::Eq,
             value: path("input.note_id"),
+            test: Default::default(),
         }]
     };
     let route = |name: &str, method, route: &str, request: &str, response: &str, steps| Route {
@@ -1863,6 +1920,200 @@ pub fn add_notes(p: &mut Project) {
         "NoteDone",
         steps,
     ));
+}
+
+/// Adds to the first service a page of posts with their author: two tables of a tenant (soft delete too), a left join along
+/// the foreign key, a text search, a sort on two columns, and a page cut by a keyset cursor taken from the request, with the
+/// total and whether a page follows. The tenant and `deleted_at` rules of both tables are applied by the generator. It needs
+/// [`add_jwt`], whose `AccessClaims` and signing key it uses.
+pub fn add_sql_reads(p: &mut Project) {
+    let string = || FieldType::String;
+    let bearer = || {
+        let mut token = field("token", string());
+        token.source = Some(RequestSource::Header {
+            name: "Authorization".into(),
+        });
+        token
+    };
+    let optional = |name: &str, ty: FieldType| {
+        let mut f = field(name, ty);
+        f.optional = true;
+        f
+    };
+    let mut repeated_items = msg_field("items", "PostItem");
+    repeated_items.repeated = true;
+    p.messages.push(api(
+        "PostsQuery",
+        vec![
+            bearer(),
+            field("search", string()),
+            optional("page_size", FieldType::Int32),
+            optional("after_title", string()),
+            optional("after_id", string()),
+        ],
+    ));
+    p.messages.push(api(
+        "PostItem",
+        vec![
+            field("post_id", string()),
+            field("title", string()),
+            optional("authors_name", string()),
+        ],
+    ));
+    p.messages.push(api(
+        "PostsPage",
+        vec![
+            repeated_items,
+            field("total", FieldType::Int64),
+            field("more", FieldType::Bool),
+            optional("next_title", string()),
+            optional("next_id", string()),
+        ],
+    ));
+
+    let tenant_table = |name: &str, columns: Vec<Column>| {
+        let mut t = Table::new(name, columns);
+        t.tenant_column = Some("tenant_id".into());
+        t.soft_delete = true;
+        t
+    };
+    let deleted_at = || {
+        let mut c = Column::new(DELETED_AT, ColumnType::Timestamp);
+        c.nullable = true;
+        c
+    };
+    let mut author_id = Column::new("author_id", ColumnType::String);
+    author_id.primary_key = true;
+    let authors = tenant_table(
+        "authors",
+        vec![
+            Column::new("tenant_id", ColumnType::String),
+            author_id,
+            Column::new("name", ColumnType::String),
+            deleted_at(),
+        ],
+    );
+    let mut post_id = Column::new("post_id", ColumnType::String);
+    post_id.primary_key = true;
+    let mut author = Column::new("author_id", ColumnType::String);
+    author.nullable = true;
+    let mut posts = tenant_table(
+        "posts",
+        vec![
+            Column::new("tenant_id", ColumnType::String),
+            post_id,
+            Column::new("title", ColumnType::String),
+            author,
+            deleted_at(),
+        ],
+    );
+    posts.foreign_keys.push(ForeignKey {
+        name: "fk_posts_author".into(),
+        columns: vec!["author_id".into()],
+        ref_table: "authors".into(),
+        ref_columns: vec!["author_id".into()],
+        on_delete: ReferentialAction::NoAction,
+        on_update: ReferentialAction::NoAction,
+    });
+    p.services[0].tables.push(authors);
+    p.services[0].tables.push(posts);
+
+    let steps = vec![
+        Step::VerifyJwt {
+            id: "q1".into(),
+            token: path("input.token"),
+            bearer: true,
+            source: JwksSource::Keys {
+                key_envs: vec!["JWT_SIGNING_KEY".into()],
+            },
+            issuer: "orders".into(),
+            schema: "AccessClaims".into(),
+            bind: "claims".into(),
+        },
+        Step::Branch {
+            id: "q2".into(),
+            condition: Condition::Compare {
+                left: path("claims.tid"),
+                op: CmpOp::Eq,
+                right: lit(""),
+            },
+            then: vec![Step::Fail {
+                id: "q3".into(),
+                status: 403,
+                message: "this account has no tenant".into(),
+                retry_after: None,
+            }],
+            otherwise: vec![],
+        },
+        Step::Let {
+            id: "q4".into(),
+            name: "tenant_id".into(),
+            value_type: FieldType::String,
+            optional: false,
+            repeated: false,
+            value: path("claims.tid"),
+        },
+        Step::Sql {
+            id: "q5".into(),
+            op: SqlOp::Select,
+            table: "posts".into(),
+            bind: Some("posts".into()),
+            columns: vec!["post_id".into(), "title".into(), "authors.name".into()],
+            many: true,
+            into: Some("PostItem".into()),
+            conditions: vec![SqlCondition {
+                column: "title".into(),
+                op: CmpOp::Eq,
+                value: path("input.search"),
+                test: SqlTest::Contains,
+            }],
+            values: vec![],
+            order_by: Some("title".into()),
+            descending: false,
+            limit: Some(50),
+            missing: None,
+            joins: vec![SqlJoin {
+                kind: SqlJoinKind::Left,
+                table: "authors".into(),
+                alias: None,
+                on: vec![SqlJoinOn {
+                    column: "author_id".into(),
+                    ref_column: "author_id".into(),
+                }],
+            }],
+            then_by: vec![SqlSort {
+                column: "post_id".into(),
+                descending: false,
+            }],
+            limit_from: Some(path("input.page_size")),
+            offset: None,
+            cursor: vec![path("input.after_title"), path("input.after_id")],
+            total_bind: Some("total".into()),
+            more_bind: Some("more".into()),
+            last_bind: Some("last".into()),
+        },
+        Step::Respond {
+            id: "q6".into(),
+            fields: vec![
+                set("items", path("posts")),
+                set("total", path("total")),
+                set("more", path("more")),
+                set("next_title", path("last.title")),
+                set("next_id", path("last.post_id")),
+            ],
+            status: None,
+            cookies: vec![],
+        },
+    ];
+    p.services[0].routes.push(Route {
+        name: "list_posts".into(),
+        method: HttpMethod::Get,
+        path: "/tenant/posts".into(),
+        request: "PostsQuery".into(),
+        response: "PostsPage".into(),
+        status: 200,
+        steps,
+    });
 }
 
 /// Adds a mail service, `Mailer`, and what feeds it: `signup` (see [`add_signup`]) now publishes `accounts.registered`, and
@@ -2139,6 +2390,14 @@ pub fn add_basket_lines(p: &mut Project) {
                     descending: false,
                     limit: None,
                     missing: None,
+                    joins: vec![],
+                    then_by: vec![],
+                    limit_from: None,
+                    offset: None,
+                    cursor: vec![],
+                    total_bind: None,
+                    more_bind: None,
+                    last_bind: None,
                 },
             ],
         },
@@ -2188,12 +2447,21 @@ pub fn add_basket_lines(p: &mut Project) {
                 column: "order_id".into(),
                 op: CmpOp::Eq,
                 value: path("input.order_id"),
+                test: SqlTest::Compare,
             }],
             values: vec![],
             order_by: Some("sku".into()),
             descending: false,
             limit: None,
             missing: None,
+            joins: vec![],
+            then_by: vec![],
+            limit_from: None,
+            offset: None,
+            cursor: vec![],
+            total_bind: None,
+            more_bind: None,
+            last_bind: None,
         },
         Step::ForEach {
             id: "l10".into(),

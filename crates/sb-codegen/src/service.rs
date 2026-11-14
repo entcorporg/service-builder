@@ -2324,6 +2324,33 @@ fn placeholder(n: usize, col: &Column) -> String {
     }
 }
 
+/// The page size or the offset of a select as an `Option<i64>`: a whole number from the flow (int32 or int64, optional or
+/// not), or written in the step.
+fn lower_int(project: &Project, scope: &Scope, expr: &Expr) -> Result<String, CodegenError> {
+    match expr {
+        // A path, a text or an operation: its type comes from the one typing table.
+        Expr::Path { .. } | Expr::Template { .. } | Expr::Call { .. } => {
+            let ty = sb_model::typing::expr_type(project, scope, expr, None)
+                .map_err(CodegenError::Internal)?
+                .ok_or_else(|| CodegenError::Internal("untyped page size".into()))?;
+            let code = lower(project, scope, expr, &ty)?;
+            Ok(if ty.optional {
+                format!("{code}.map(|v| v as i64)")
+            } else {
+                format!("Some({code} as i64)")
+            })
+        }
+        Expr::Literal { value } => match value.as_i64() {
+            Some(n) => Ok(format!("Some({n}_i64)")),
+            None => Err(CodegenError::Internal(
+                "a page size or an offset is a whole number".into(),
+            )),
+        },
+        Expr::Raw { code } => Ok(format!("Some(({}) as i64)", code.trim())),
+        Expr::Now => Err(CodegenError::Internal("`now()` is not a page size".into())),
+    }
+}
+
 fn sql_step(
     c: &mut Code,
     project: &Project,
@@ -2345,6 +2372,14 @@ fn sql_step(
         descending,
         limit,
         missing,
+        joins,
+        then_by,
+        limit_from,
+        offset,
+        cursor,
+        total_bind,
+        more_bind,
+        last_bind,
     } = step
     else {
         return Ok(());
@@ -2366,11 +2401,11 @@ fn sql_step(
                 value: own,
             });
         } else {
-            conditions.push(sb_model::SqlCondition {
-                column: tenant.clone(),
-                op: sb_model::CmpOp::Eq,
-                value: own,
-            });
+            conditions.push(sb_model::SqlCondition::new(
+                tenant.clone(),
+                sb_model::CmpOp::Eq,
+                own,
+            ));
         }
     }
     if t.soft_delete && op != SqlOp::Insert {
@@ -2390,8 +2425,22 @@ fn sql_step(
             CodegenError::Internal(format!("table `{table}` has no column `{name}`"))
         })
     };
+    // With joins every column is written with its table; without, the statement is the one it always was.
+    let joined = !joins.is_empty();
+    let qual = |owner: &str, column: &Column| {
+        if joined {
+            format!("{}.{}", quoted(owner), quoted(&column.name))
+        } else {
+            quoted(&column.name)
+        }
+    };
+    let resolve = |name: &str| {
+        service
+            .sql_column(table, joins, name)
+            .ok_or_else(|| CodegenError::Internal(format!("`{name}` is not a column of the query")))
+    };
 
-    // Parameters, in the order of the placeholders: the values written, then the WHERE. The database clock
+    // Parameters, in the order of the placeholders: the values written, then the joins, then the WHERE. The database clock
     // (`now()`) is part of the statement itself and takes no parameter.
     let mut binds: Vec<String> = Vec::new();
     let mut set_sql = Vec::new();
@@ -2404,59 +2453,208 @@ fn sql_step(
         binds.push(lower(project, scope, &a.value, &column_type_ref(column))?);
         set_sql.push((quoted(&column.name), placeholder(binds.len(), column)));
     }
-    let mut where_sql = Vec::new();
-    for cond in conditions {
-        let column = col(&cond.column)?;
-        let right = if matches!(cond.value, Expr::Now) {
-            "now()".to_string()
-        } else {
+    // The rules of every joined table are in its `ON`, so that a left join stays a left join: a row of the other tenant, or
+    // a deleted one, is no match rather than a reason to drop the row.
+    let mut from = quoted(table);
+    for j in joins {
+        let jt = service
+            .table(&j.table)
+            .ok_or_else(|| CodegenError::Internal(format!("unknown table `{}`", j.table)))?;
+        let mut on = Vec::new();
+        for pair in &j.on {
+            let (lt, lc, _) = resolve(&pair.column)?;
+            let rc = jt.column(&pair.ref_column).ok_or_else(|| {
+                CodegenError::Internal(format!("`{}` has no column `{}`", j.table, pair.ref_column))
+            })?;
+            on.push(format!("{} = {}", qual(&lt.name, lc), qual(&jt.name, rc)));
+        }
+        if let Some(tenant) = &jt.tenant_column {
+            let tc = jt.column(tenant).ok_or_else(|| {
+                CodegenError::Internal(format!("`{}` has no column `{tenant}`", j.table))
+            })?;
             binds.push(lower(
                 project,
                 scope,
-                &cond.value,
-                &column_type_ref(column),
+                &Expr::Path {
+                    path: tenant.clone(),
+                },
+                &column_type_ref(tc),
             )?);
-            placeholder(binds.len(), column)
-        };
-        where_sql.push(format!(
-            "{} {} {right}",
-            quoted(&column.name),
-            cond.sql_op()
+            on.push(format!(
+                "{} = {}",
+                qual(&jt.name, tc),
+                placeholder(binds.len(), tc)
+            ));
+        }
+        if jt.soft_delete {
+            on.push(format!(
+                "{}.{} IS NULL",
+                quoted(&jt.name),
+                quoted(sb_model::DELETED_AT)
+            ));
+        }
+        from.push_str(&format!(
+            " {} {} ON {}",
+            match j.kind {
+                sb_model::SqlJoinKind::Inner => "INNER JOIN",
+                sb_model::SqlJoinKind::Left => "LEFT JOIN",
+            },
+            quoted(&jt.name),
+            on.join(" AND ")
         ));
     }
-    if live_only {
-        where_sql.push(format!("{} IS NULL", quoted(sb_model::DELETED_AT)));
+    let mut where_sql = Vec::new();
+    for cond in conditions {
+        let (ct, column, _) = resolve(&cond.column)?;
+        let lhs = qual(&ct.name, column);
+        match cond.test {
+            sb_model::SqlTest::Compare => {
+                let right = if matches!(cond.value, Expr::Now) {
+                    "now()".to_string()
+                } else {
+                    binds.push(lower(
+                        project,
+                        scope,
+                        &cond.value,
+                        &column_type_ref(column),
+                    )?);
+                    placeholder(binds.len(), column)
+                };
+                where_sql.push(format!("{lhs} {} {right}", cond.sql_op()));
+            }
+            sb_model::SqlTest::In => {
+                let list = TypeRef {
+                    repeated: true,
+                    ..TypeRef::scalar(column.ty.field_type())
+                };
+                binds.push(lower(project, scope, &cond.value, &list)?);
+                let cast = if column.ty.is_text_cast() {
+                    format!("::{}[]", column.ty.sql().to_lowercase())
+                } else {
+                    String::new()
+                };
+                where_sql.push(format!("{lhs} = ANY(${}{cast})", binds.len()));
+            }
+            sb_model::SqlTest::Contains | sb_model::SqlTest::StartsWith => {
+                let text = lower(
+                    project,
+                    scope,
+                    &cond.value,
+                    &TypeRef::scalar(sb_model::FieldType::String),
+                )?;
+                // `%` and `_` of the value are text, not wildcards: the escape character is the backslash.
+                let escaped = format!(
+                    r#"({text}).replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")"#
+                );
+                binds.push(if cond.test == sb_model::SqlTest::Contains {
+                    format!(r#"format!("%{{}}%", {escaped})"#)
+                } else {
+                    format!(r#"format!("{{}}%", {escaped})"#)
+                });
+                where_sql.push(format!("{lhs} ILIKE ${} ESCAPE '\\'", binds.len()));
+            }
+            sb_model::SqlTest::IsNull => where_sql.push(format!("{lhs} IS NULL")),
+            sb_model::SqlTest::IsNotNull => where_sql.push(format!("{lhs} IS NOT NULL")),
+        }
     }
-    let where_clause = if where_sql.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", where_sql.join(" AND "))
+    if live_only {
+        where_sql.push(format!(
+            "{} IS NULL",
+            qual(table, col(sb_model::DELETED_AT)?)
+        ));
+    }
+    let where_of = |parts: &[String]| {
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", parts.join(" AND "))
+        }
     };
+    // What a count has to repeat: the statement as it is before the page is cut.
+    let counted = (binds.len(), where_of(&where_sql));
 
-    let query = |sql: &str| -> String {
+    // Keyset pagination: the rows after the one the cursor names, in the order of the sort. Each key is compared once the
+    // keys before it are equal, so it works with any mix of directions. An absent first value reads the first page.
+    let sort: Vec<(&str, bool)> = order_by
+        .iter()
+        .map(|o| (o.as_str(), *descending))
+        .chain(then_by.iter().map(|k| (k.column.as_str(), k.descending)))
+        .collect();
+    if *op == SqlOp::Select && !cursor.is_empty() {
+        let mut keys = Vec::new();
+        for ((name, desc), value) in sort.iter().zip(cursor) {
+            let (kt, kc, _) = resolve(name)?;
+            let mut want = column_type_ref(kc);
+            want.optional = true;
+            binds.push(lower(project, scope, value, &want)?);
+            let ph = format!("${}::{}", binds.len(), kc.ty.sql().to_lowercase());
+            keys.push((qual(&kt.name, kc), *desc, ph));
+        }
+        let mut any = Vec::new();
+        for i in 0..keys.len() {
+            let mut all: Vec<String> = keys[..i]
+                .iter()
+                .map(|(k, _, ph)| format!("{k} = {ph}"))
+                .collect();
+            let (k, desc, ph) = &keys[i];
+            all.push(format!("{k} {} {ph}", if *desc { "<" } else { ">" }));
+            any.push(format!("({})", all.join(" AND ")));
+        }
+        if let Some((_, _, first)) = keys.first() {
+            where_sql.push(format!("({first} IS NULL OR {})", any.join(" OR ")));
+        }
+    }
+    let where_clause = where_of(&where_sql);
+
+    let query = |sql: &str, binds: &[String]| -> String {
         let mut q = format!("sqlx::query({sql:?})");
-        for b in &binds {
+        for b in binds {
             q.push_str(&format!(".bind({b})"));
         }
         q
     };
 
     // The columns a select reads, or that an insert, update or delete gives back (`RETURNING`).
-    let selected: Vec<&Column> = columns.iter().map(|n| col(n)).collect::<Result<_, _>>()?;
-    let exprs: Vec<String> = selected
+    let outs = service.sql_out_columns(table, joins, columns);
+    let exprs: Vec<String> = outs
         .iter()
-        .map(|cl| {
-            let name = quoted(&cl.name);
-            match cl.ty {
+        .map(|o| {
+            let name = qual(&o.table.name, o.column);
+            let alias = quoted(&o.field);
+            match o.column.ty {
                 // ISO 8601 / RFC 3339, in UTC, whatever the session time zone.
                 ColumnType::Timestamp => format!(
-                    "to_char({name} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS {name}"
+                    "to_char({name} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS {alias}"
                 ),
-                ColumnType::Uuid | ColumnType::Jsonb => format!("{name}::text AS {name}"),
+                ColumnType::Uuid | ColumnType::Jsonb => format!("{name}::text AS {alias}"),
+                _ if joined => format!("{name} AS {alias}"),
                 _ => name,
             }
         })
         .collect();
+
+    // The page: a size and an offset asked by the flow, held to the bounds the author gave.
+    let var = bind.as_deref();
+    let paged_size = limit_from.is_some() || more_bind.is_some();
+    let max = limit.unwrap_or(1);
+    if *op == SqlOp::Select && *many && (paged_size || offset.is_some()) {
+        let v = var.unwrap_or("rows");
+        if paged_size {
+            let asked = match limit_from {
+                Some(e) => lower_int(project, scope, e)?,
+                None => "None".to_string(),
+            };
+            c.line(format!(
+                "let {v}_sql_limit: i64 = {asked}.unwrap_or({max}_i64).clamp(1, {max}_i64);"
+            ));
+        }
+        if let Some(e) = offset {
+            c.line(format!(
+                "let {v}_sql_offset: i64 = {}.unwrap_or(0).clamp(0, 1_000_000_i64);",
+                lower_int(project, scope, e)?
+            ));
+        }
+    }
 
     let mut sql = match op {
         SqlOp::Insert => {
@@ -2479,22 +2677,37 @@ fn sql_step(
         }
         SqlOp::Delete => format!("DELETE FROM {}{where_clause}", quoted(table)),
         SqlOp::Select => {
-            let mut sql = format!(
-                "SELECT {} FROM {}{where_clause}",
-                exprs.join(", "),
-                quoted(table)
-            );
-            if let Some(o) = order_by {
-                sql.push_str(&format!(
-                    " ORDER BY {}{}",
-                    quoted(&col(o)?.name),
-                    if *descending { " DESC" } else { "" }
-                ));
+            let mut sql = format!("SELECT {} FROM {from}{where_clause}", exprs.join(", "));
+            if !sort.is_empty() {
+                let keys: Result<Vec<String>, CodegenError> = sort
+                    .iter()
+                    .map(|(name, desc)| {
+                        let (kt, kc, _) = resolve(name)?;
+                        Ok(format!(
+                            "{}{}",
+                            qual(&kt.name, kc),
+                            if *desc { " DESC" } else { "" }
+                        ))
+                    })
+                    .collect();
+                sql.push_str(&format!(" ORDER BY {}", keys?.join(", ")));
             }
-            match (many, limit) {
-                (true, Some(n)) => sql.push_str(&format!(" LIMIT {n}")),
-                (false, _) => sql.push_str(" LIMIT 1"),
-                _ => {}
+            let v = var.unwrap_or("rows");
+            if !*many {
+                sql.push_str(" LIMIT 1");
+            } else if paged_size {
+                binds.push(if more_bind.is_some() {
+                    format!("{v}_sql_limit + 1")
+                } else {
+                    format!("{v}_sql_limit")
+                });
+                sql.push_str(&format!(" LIMIT ${}", binds.len()));
+            } else if let Some(n) = limit {
+                sql.push_str(&format!(" LIMIT {n}"));
+            }
+            if offset.is_some() && *many {
+                binds.push(format!("{v}_sql_offset"));
+                sql.push_str(&format!(" OFFSET ${}", binds.len()));
             }
             sql
         }
@@ -2502,13 +2715,13 @@ fn sql_step(
 
     // Nothing to read back: run it.
     if *op != SqlOp::Select && columns.is_empty() {
-        c.line(format!("{}.execute(&mut *tx).await?;", query(&sql)));
+        c.line(format!("{}.execute(&mut *tx).await?;", query(&sql, &binds)));
         return Ok(());
     }
     if *op != SqlOp::Select {
         sql.push_str(&format!(" RETURNING {}", exprs.join(", ")));
     }
-    let var = bind.as_deref().ok_or_else(|| {
+    let var = var.ok_or_else(|| {
         CodegenError::Internal("a SQL step that reads rows needs a variable".into())
     })?;
     // What the route answers when one row was expected and none came back.
@@ -2526,6 +2739,20 @@ fn sql_step(
         }
         lit
     };
+    // The number of rows that match, whatever the page.
+    if let Some(total) = total_bind {
+        let mut q = format!(
+            "sqlx::query_scalar::<_, i64>({:?})",
+            format!("SELECT count(*) FROM {from}{}", counted.1)
+        );
+        for b in &binds[..counted.0] {
+            q.push_str(&format!(".bind({b})"));
+        }
+        c.line(format!(
+            "let {total}: i64 = {q}.fetch_one(&mut *tx).await?;"
+        ));
+        scope.bind(total, TypeRef::scalar(sb_model::FieldType::Int64));
+    }
     match (into, many) {
         (Some(schema), true) => {
             let ty = format!("pb::{schema}");
@@ -2533,9 +2760,23 @@ fn sql_step(
                 .message(schema)
                 .ok_or_else(|| CodegenError::Internal(format!("unknown message `{schema}`")))?;
             let lit = fill(&ty, msg.fields.iter().map(|f| f.name.as_str()).collect());
-            c.line(format!("let {var}: Vec<{ty}> = {}", query(&sql)));
-            c.line("    .fetch_all(&mut *tx)");
-            c.line("    .await?");
+            if let Some(more) = more_bind {
+                // One row more than the page was read: its presence is the answer, and it is not part of the page.
+                c.line(format!(
+                    "let mut {var}_sql_raw = {}.fetch_all(&mut *tx).await?;",
+                    query(&sql, &binds)
+                ));
+                c.line(format!(
+                    "let {more}: bool = {var}_sql_raw.len() > {var}_sql_limit as usize;"
+                ));
+                c.line(format!("{var}_sql_raw.truncate({var}_sql_limit as usize);"));
+                c.line(format!("let {var}: Vec<{ty}> = {var}_sql_raw"));
+                scope.bind(more, TypeRef::scalar(sb_model::FieldType::Bool));
+            } else {
+                c.line(format!("let {var}: Vec<{ty}> = {}", query(&sql, &binds)));
+                c.line("    .fetch_all(&mut *tx)");
+                c.line("    .await?");
+            }
             c.line("    .iter()");
             c.line(format!("    .map(|row| -> anyhow::Result<{ty}> {{"));
             c.line(format!(
@@ -2550,6 +2791,12 @@ fn sql_step(
                     ..TypeRef::message(schema)
                 },
             );
+            if let Some(last) = last_bind {
+                c.line(format!(
+                    "let {last}: {ty} = {var}.last().cloned().unwrap_or_default();"
+                ));
+                scope.bind(last, TypeRef::message(schema));
+            }
         }
         (_, true) => {
             return Err(CodegenError::Internal(
@@ -2572,7 +2819,7 @@ fn sql_step(
                 }
                 None => {
                     let name = sql_row_name(table, id);
-                    let lit = fill(&name, selected.iter().map(|cl| cl.name.as_str()).collect());
+                    let lit = fill(&name, outs.iter().map(|o| o.field.as_str()).collect());
                     (
                         name,
                         format!("{lit}}}"),
@@ -2584,12 +2831,14 @@ fn sql_step(
             if into.is_none() {
                 // The row is a struct of its own, local to the step.
                 c.line(format!("struct {ty} {{"));
-                for cl in &selected {
-                    c.line(format!("    {}: {},", cl.name, column_rust(cl)));
+                for o in &outs {
+                    let mut shown = o.column.clone();
+                    shown.nullable = o.optional;
+                    c.line(format!("    {}: {},", o.field, column_rust(&shown)));
                 }
                 c.line("}");
             }
-            c.line(format!("let row = {}", query(&sql)));
+            c.line(format!("let row = {}", query(&sql, &binds)));
             c.line("    .fetch_optional(&mut *tx)");
             c.line("    .await?");
             c.line(format!("    .ok_or_else(|| {missing_error})?;"));
