@@ -468,6 +468,23 @@ fn field_row(
                 }
             });
         }
+        if m.kind == MessageKind::Api && !f.optional {
+            // A requested field is required: left out, it is a 400 that names it. Lenient, it takes its default value.
+            let lenient = ui.scope(|ui| {
+                widgets::check(
+                    ui,
+                    f.lenient,
+                    RichText::new("déf.").font(mono(11.0)).color(MUTED),
+                )
+            });
+            lenient.response.on_hover_text(
+                "Valeur par défaut si absent : décoché, un champ absent de la requête est refusé (400) ; coché, il prend \
+                 sa valeur par défaut (0, texte vide…). Un texte vide envoyé compte comme présent.",
+            );
+            if let Some(on) = lenient.inner {
+                change(app, &m.name, index, |x| x.lenient = on);
+            }
+        }
         if icon_btn(ui, "trash", &format!("Supprimer {}", f.name), true).clicked() {
             app.edit(|p| {
                 if let Some(x) = message_mut(p, &m.name)

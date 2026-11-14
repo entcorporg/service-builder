@@ -8,8 +8,8 @@ use eframe::egui::{self, Align, Frame, Layout, Margin, RichText, Stroke, Ui, Vec
 use sb_app::scope::Var;
 use sb_app::stepform::{self, Kind};
 use sb_model::{
-    Assignment, CmpOp, Column, Cookie, Expr, Field, JwksSource, SameSite, SqlCondition, SqlJoin,
-    SqlJoinKind, SqlJoinOn, SqlMissing, SqlSort, SqlTest, Step, Table,
+    Assignment, CmpOp, Column, Cookie, Expr, Field, JwksSource, ResponseHeader, SameSite,
+    SqlCondition, SqlJoin, SqlJoinKind, SqlJoinOn, SqlMissing, SqlSort, SqlTest, Step, Table,
 };
 use serde_json::Value;
 
@@ -72,6 +72,7 @@ pub fn structured(
     // What is drawn depends on the field: decide first whether there is an editor, then draw the name above it.
     let known = match (kind, spec.key.as_str()) {
         ("respond", "cookies")
+        | ("respond", "headers")
         | ("sql", "where")
         | ("sql", "missing")
         | ("verifyJwt", "source")
@@ -89,6 +90,7 @@ pub fn structured(
     let query = Query::of(app, service, &v);
     let out = match (kind, spec.key.as_str()) {
         ("respond", "cookies") => cookies(app, ui, id, text, vars),
+        ("respond", "headers") => response_headers(app, ui, id, text, vars),
         ("sql", "table") => table_pick(app, ui, id, service, text),
         ("sql", "columns") => columns_ticks(ui, &query?, text),
         ("sql", "orderBy") => order_pick(ui, id, &query?, text),
@@ -603,6 +605,90 @@ fn cookies(app: &mut App, ui: &mut Ui, id: egui::Id, text: &str, vars: &[Var]) -
         ));
         changed = true;
     }
+    changed.then(|| push(&list))
+}
+
+// ---- response headers ----
+
+/// Free headers of the answer of a route: a name and a value read from the flow (a field, a literal...).
+fn response_headers(
+    app: &mut App,
+    ui: &mut Ui,
+    id: egui::Id,
+    text: &str,
+    vars: &[Var],
+) -> Option<String> {
+    let mut list = parse::<Vec<ResponseHeader>>(text);
+    let mut changed = false;
+    let mut remove = None;
+    ui.spacing_mut().item_spacing.y = 6.0;
+    for (i, h) in list.clone().into_iter().enumerate() {
+        Frame::new()
+            .fill(PANEL2)
+            .stroke(Stroke::new(1.0, BORDER))
+            .corner_radius(10)
+            .inner_margin(Margin::symmetric(10, 8))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 6.0;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    fill(ui, 32.0, |ui| {
+                        if let Some(v) = commit_entry(
+                            ui,
+                            (id, "hname", i),
+                            &h.name,
+                            true,
+                            "nom de l'en-tête (Cache-Control…)",
+                            false,
+                        ) {
+                            list[i].name = v;
+                            changed = true;
+                        }
+                    });
+                    if icon_btn(
+                        ui,
+                        "trash",
+                        &format!("Supprimer l'en-tête {}", h.name),
+                        true,
+                    )
+                    .clicked()
+                    {
+                        remove = Some(i);
+                    }
+                });
+                let text_target = Field::new("", sb_model::FieldType::String);
+                if let Some(Some(e)) = expr_editor(
+                    app,
+                    ui,
+                    (id, "hvalue", i),
+                    Some(&text_target),
+                    false,
+                    Some(&h.value),
+                    vars,
+                ) {
+                    list[i].value = e;
+                    changed = true;
+                }
+            });
+    }
+    if let Some(i) = remove {
+        list.remove(i);
+        changed = true;
+    }
+    if link(ui, "+ Ajouter un en-tête").clicked() {
+        list.push(ResponseHeader {
+            name: "Cache-Control".into(),
+            value: Expr::Literal {
+                value: Value::String("no-store".into()),
+            },
+        });
+        changed = true;
+    }
+    small(
+        ui,
+        "Les cookies, Content-Type, Retry-After et les en-têtes CORS sont posés ailleurs : ils sont refusés ici.",
+    );
     changed.then(|| push(&list))
 }
 

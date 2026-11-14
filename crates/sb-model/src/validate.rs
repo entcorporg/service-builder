@@ -53,6 +53,7 @@ pub fn validate(project: &Project) -> Vec<Diagnostic> {
     c.services();
     c.graph_warnings();
     c.pods();
+    c.openapi();
     c.out
 }
 
@@ -463,16 +464,15 @@ impl<'a> Checker<'a> {
                         Some(_) => {}
                     }
                 }
-                if m.kind == MessageKind::Api
-                    && matches!(f.ty, FieldType::Bytes | FieldType::Timestamp)
-                {
+                if f.lenient && m.kind != MessageKind::Api {
                     self.error(
-                        "E_API_FIELD_TYPE",
-                        format!("{fp}/type"),
+                        "E_LENIENT_KIND",
+                        format!("{fp}/lenient"),
                         format!(
-                            "field `{}`: `{}` has no JSON form in API schemas yet (use string, bool, int32, int64, float, double or another API schema)",
+                            "field `{}` is lenient, but `{}` is {}: only API schemas are read from a request",
                             f.name,
-                            if f.ty == FieldType::Bytes { "bytes" } else { "timestamp" }
+                            m.name,
+                            kind_label(m.kind)
                         ),
                     );
                 }
@@ -990,7 +990,7 @@ impl<'a> Checker<'a> {
                 "E_SOURCE_TYPE",
                 &sp,
                 format!(
-                    "field `{}` is read from the request: it must be a single required string or uuid (empty when the request lacks it)",
+                    "field `{}` is read from the request: it must be a single required string or uuid (a 400 when the request lacks it, empty when lenient)",
                     f.name
                 ),
             );
@@ -3030,6 +3030,7 @@ impl<'a> Checker<'a> {
                 fields,
                 status,
                 cookies,
+                headers,
                 ..
             } => {
                 match env.handler {
@@ -3049,12 +3050,20 @@ impl<'a> Checker<'a> {
                                 "a status and cookies are HTTP: they only make sense in an HTTP route",
                             );
                         }
+                        if !headers.is_empty() {
+                            self.error(
+                                "E_HEADER_OUTSIDE_ROUTE",
+                                format!("{path}/headers"),
+                                "response headers are HTTP: they only make sense in an HTTP route",
+                            );
+                        }
                     }
                     Handler::Route { response } => {
                         if let Some(msg) = p.message(response) {
                             self.assignments(msg, fields, scope, &format!("{path}/fields"));
                         }
                         self.respond_extras(path, scope, *status, cookies);
+                        self.respond_headers(path, scope, headers);
                     }
                 }
                 true
@@ -3891,6 +3900,110 @@ impl<'a> Checker<'a> {
                 );
             }
             self.check_expr(scope, &c.value, Some(&text), &format!("{cp}/value"));
+        }
+    }
+
+    /// Where the services serve their OpenAPI document: a plain path that no `GET` route of a service already uses.
+    fn openapi(&mut self) {
+        let cfg = &self.project.openapi;
+        if !cfg.serve {
+            return;
+        }
+        let path = cfg.path.as_str();
+        let plain = path.starts_with('/')
+            && path.len() > 1
+            && path.len() <= 100
+            && path
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"/-_.".contains(&b))
+            && !path.contains("//");
+        if !plain {
+            self.error(
+                "E_OPENAPI_PATH",
+                "/openapi/path",
+                "the OpenAPI path starts with `/` and holds letters, digits, `/`, `-`, `_` and `.` only (e.g. `/openapi.json`)",
+            );
+            return;
+        }
+        for s in &self.project.services {
+            if let Some(r) = s
+                .routes
+                .iter()
+                .find(|r| r.method == HttpMethod::Get && r.path == path)
+            {
+                let at = format!("/services/{}/routes/{}", s.name, r.name);
+                self.error(
+                    "E_OPENAPI_PATH",
+                    "/openapi/path",
+                    format!(
+                        "`{path}` is already the route `{}` of `{}` ({at})",
+                        r.name, s.name
+                    ),
+                );
+            }
+        }
+    }
+
+    /// The free headers of a route response: a valid name the runtime does not already use, once, and a value that
+    /// cannot break out of the header.
+    fn respond_headers(&mut self, path: &str, scope: &Scope, headers: &[ResponseHeader]) {
+        let text = TypeRef::scalar(FieldType::String);
+        let mut names = HashSet::new();
+        for (i, h) in headers.iter().enumerate() {
+            let hp = format!("{path}/headers/{i}");
+            // An HTTP token (RFC 9110): what can travel as a header name.
+            let token = !h.name.is_empty()
+                && h.name.len() <= 100
+                && h.name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
+            let lower = h.name.to_ascii_lowercase();
+            if !token {
+                self.error(
+                    "E_HEADER_NAME",
+                    format!("{hp}/name"),
+                    format!(
+                        "`{}` is not a header name: letters, digits and ``!#$%&'*+-.^_`|~`` only, 100 characters at most",
+                        h.name
+                    ),
+                );
+            } else if RESERVED_RESPONSE_HEADERS.contains(&lower.as_str())
+                || lower.starts_with("access-control-")
+            {
+                self.error(
+                    "E_HEADER_RESERVED",
+                    format!("{hp}/name"),
+                    format!(
+                        "`{}` is set by the runtime or by cookies (`Set-Cookie`), the error step (`Retry-After`) or the CORS layer: it cannot be set here",
+                        h.name
+                    ),
+                );
+            } else if !names.insert(lower) {
+                self.error(
+                    "E_HEADER_DUPLICATE",
+                    format!("{hp}/name"),
+                    format!(
+                        "header `{}` is set twice (names are not case sensitive)",
+                        h.name
+                    ),
+                );
+            }
+            // A literal is known now: nothing but visible ASCII and spaces, so no line break can end the header.
+            if let Expr::Literal { value } = &h.value
+                && let Some(text) = value.as_str()
+                && (text
+                    .bytes()
+                    .any(|b| !(b == b' ' || b == b'\t' || (0x21..=0x7e).contains(&b)))
+                    || text.starts_with([' ', '\t'])
+                    || text.ends_with([' ', '\t']))
+            {
+                self.error(
+                    "E_HEADER_VALUE",
+                    format!("{hp}/value"),
+                    "a header value is visible ASCII (and inner spaces), with no line break or space around it",
+                );
+            }
+            self.check_expr(scope, &h.value, Some(&text), &format!("{hp}/value"));
         }
     }
 
@@ -4746,6 +4859,7 @@ mod tests {
             fields: vec![],
             status: None,
             cookies: vec![],
+            headers: vec![],
         });
         assert!(errors(&p).contains(&"E_RESPOND_IN_LOOP".to_string()));
         let route = p.services[0]
@@ -5036,7 +5150,7 @@ mod tests {
     }
 
     #[test]
-    fn api_schemas_have_no_bytes_or_timestamp_yet() {
+    fn api_schemas_carry_bytes_and_timestamps_as_json() {
         let mut p = sample::orders();
         let view = p
             .messages
@@ -5045,7 +5159,98 @@ mod tests {
             .unwrap();
         view.fields
             .push(Field::new("created_at", FieldType::Timestamp));
-        assert!(errors(&p).contains(&"E_API_FIELD_TYPE".into()));
+        view.fields.push(Field::new("receipt", FieldType::Bytes));
+        assert!(!has_errors(&validate(&p)), "{:?}", validate(&p));
+    }
+
+    #[test]
+    fn only_api_schemas_can_be_lenient() {
+        let mut p = sample::orders();
+        let m = p
+            .messages
+            .iter_mut()
+            .find(|m| m.name == "Customer")
+            .unwrap();
+        m.fields[0].lenient = true;
+        assert!(errors(&p).contains(&"E_LENIENT_KIND".into()));
+    }
+
+    fn respond_headers(p: &mut Project) -> &mut Vec<ResponseHeader> {
+        let route = &mut p.services[0].routes[0];
+        let Some(Step::Respond { headers, .. }) = route.steps.last_mut() else {
+            panic!("sample layout changed")
+        };
+        headers
+    }
+
+    #[test]
+    fn response_headers_are_checked() {
+        let header = |name: &str, value: Expr| ResponseHeader {
+            name: name.into(),
+            value,
+        };
+        let lit = |t: &str| Expr::Literal { value: t.into() };
+        let ok = |p: &Project| !has_errors(&validate(p));
+        let mut p = sample::orders();
+        respond_headers(&mut p).push(header("Cache-Control", lit("no-store")));
+        respond_headers(&mut p).push(header(
+            "X-Order",
+            Expr::Path {
+                path: "order_id".into(),
+            },
+        ));
+        assert!(ok(&p), "{:?}", validate(&p));
+        for (code, name, value) in [
+            ("E_HEADER_NAME", "bad name", "x"),
+            ("E_HEADER_NAME", "", "x"),
+            ("E_HEADER_NAME", "X-A\r\nB", "x"),
+            ("E_HEADER_RESERVED", "Set-Cookie", "x"),
+            ("E_HEADER_RESERVED", "content-TYPE", "x"),
+            ("E_HEADER_RESERVED", "Retry-After", "x"),
+            ("E_HEADER_RESERVED", "Access-Control-Allow-Origin", "x"),
+            ("E_HEADER_DUPLICATE", "cache-control", "x"),
+            ("E_HEADER_VALUE", "X-Evil", "a\r\nSet-Cookie: s=1"),
+            ("E_HEADER_VALUE", "X-Evil", "caf\u{e9}"),
+            ("E_HEADER_VALUE", "X-Evil", " padded"),
+        ] {
+            let mut p = p.clone();
+            respond_headers(&mut p).push(header(name, lit(value)));
+            assert!(
+                errors(&p).contains(&code.to_string()),
+                "{code} for {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn response_headers_only_belong_to_routes() {
+        let mut p = sample::orders();
+        let Some(Step::Respond { headers, .. }) = p.services[0].rpcs[0].steps.last_mut() else {
+            panic!("sample layout changed")
+        };
+        headers.push(ResponseHeader {
+            name: "X-A".into(),
+            value: Expr::Literal { value: "a".into() },
+        });
+        assert!(errors(&p).contains(&"E_HEADER_OUTSIDE_ROUTE".into()));
+    }
+
+    #[test]
+    fn the_openapi_path_is_checked_only_when_it_is_served() {
+        let mut p = sample::orders();
+        p.openapi.path = "no-slash".into();
+        assert!(!errors(&p).contains(&"E_OPENAPI_PATH".into()));
+        p.openapi.serve = true;
+        assert!(errors(&p).contains(&"E_OPENAPI_PATH".into()));
+        p.openapi.path = "/orders/{id}".into();
+        assert!(errors(&p).contains(&"E_OPENAPI_PATH".into()));
+        // A path a GET route already answers.
+        p.openapi.path = "/orders".into();
+        p.services[0].routes[0].method = HttpMethod::Get;
+        p.services[0].routes[0].request = "GetOrderRequest".into();
+        assert!(errors(&p).contains(&"E_OPENAPI_PATH".into()));
+        p.openapi.path = "/openapi.json".into();
+        assert!(!errors(&p).contains(&"E_OPENAPI_PATH".into()));
     }
 
     #[test]
@@ -5273,6 +5478,7 @@ mod tests {
                 ],
                 status: None,
                 cookies: vec![],
+                headers: vec![],
             },
         ];
         assert!(errors(&p).is_empty(), "{:?}", errors(&p));
@@ -5731,6 +5937,7 @@ mod tests {
             fields: vec![],
             status: Some(201),
             cookies: vec![],
+            headers: vec![],
         };
         p.services[0].rpcs[0].steps.push(step);
         assert!(
@@ -5991,6 +6198,7 @@ mod tests {
                 fields: vec![],
                 status: None,
                 cookies: vec![],
+                headers: vec![],
             },
             fail(400, None),
             Step::RateLimit {
@@ -7603,6 +7811,7 @@ mod tests {
             fields: vec![],
             status: None,
             cookies: vec![],
+            headers: vec![],
         });
         assert!(errors(&p).contains(&"E_RESPOND_IN_CONSUMER".into()));
     }

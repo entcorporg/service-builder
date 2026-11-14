@@ -240,6 +240,7 @@ pub fn orders() -> Project {
                         ],
                         status: None,
                         cookies: vec![],
+                        headers: vec![],
                     },
                 ],
             },
@@ -258,6 +259,7 @@ pub fn orders() -> Project {
                         fields: vec![set("status", lit("CANCELLED"))],
                         status: None,
                         cookies: vec![],
+                        headers: vec![],
                     },
                 ],
             },
@@ -354,6 +356,7 @@ pub fn orders() -> Project {
                             c.max_age_secs = Some(3600);
                             c
                         }],
+                        headers: vec![],
                     },
                 ],
             },
@@ -401,6 +404,7 @@ pub fn orders() -> Project {
                         ],
                         status: None,
                         cookies: vec![],
+                        headers: vec![],
                     },
                 ],
             },
@@ -630,6 +634,7 @@ pub fn add_single_use_token(p: &mut Project) {
                 fields: vec![set("account_id", path("consumed.account_id"))],
                 status: None,
                 cookies: vec![],
+                headers: vec![],
             },
         ],
     });
@@ -715,6 +720,7 @@ pub fn add_stripe_webhook(p: &mut Project) {
                 fields: vec![set("received", lit(true))],
                 status: None,
                 cookies: vec![],
+                headers: vec![],
             },
         ],
     });
@@ -757,6 +763,7 @@ pub fn add_sealed_text(p: &mut Project) {
                 fields: vec![set("sealed", path("sealed")), set("opened", path("opened"))],
                 status: None,
                 cookies: vec![],
+                headers: vec![],
             },
         ],
     });
@@ -812,6 +819,7 @@ pub fn add_signup(p: &mut Project) {
                 fields: vec![set("email", path("input.email"))],
                 status: None,
                 cookies: vec![],
+                headers: vec![],
             },
         ],
     });
@@ -887,6 +895,7 @@ pub fn showcase() -> Project {
     add_live_events(&mut p);
     add_basket_lines(&mut p);
     add_schema_changes(&mut p);
+    add_receipts(&mut p);
     p
 }
 
@@ -1018,6 +1027,7 @@ pub fn add_login(p: &mut Project) {
                 ],
                 status: None,
                 cookies: vec![session, access],
+                headers: vec![],
             },
         ],
     });
@@ -1043,6 +1053,7 @@ pub fn add_jwt(p: &mut Project) {
     // The token comes from the `Authorization` header, or from the session cookie `login` sets.
     let from = |source: RequestSource| {
         let mut token = field("token", string());
+        token.lenient = true; // the flow answers 401 itself
         token.source = Some(source);
         token
     };
@@ -1103,6 +1114,7 @@ pub fn add_jwt(p: &mut Project) {
                 ],
                 status: None,
                 cookies: vec![],
+                headers: vec![],
             },
         ],
     });
@@ -1124,6 +1136,7 @@ pub fn add_jwt(p: &mut Project) {
                 fields: vec![set("keys", path("published.keys"))],
                 status: None,
                 cookies: vec![],
+                headers: vec![],
             },
         ],
     });
@@ -1155,6 +1168,7 @@ pub fn add_jwt(p: &mut Project) {
                 ],
                 status: None,
                 cookies: vec![],
+                headers: vec![],
             },
         ],
     });
@@ -1235,6 +1249,7 @@ pub fn add_totp(p: &mut Project) {
         fields: vec![set("ok", lit(true))],
         status: None,
         cookies: vec![],
+        headers: vec![],
     };
     let route = |name: &str, path: &str, request: &str, response: &str, steps| Route {
         name: name.into(),
@@ -1284,6 +1299,7 @@ pub fn add_totp(p: &mut Project) {
                 ],
                 status: None,
                 cookies: vec![],
+                headers: vec![],
             },
         ],
     ));
@@ -1347,6 +1363,7 @@ pub fn add_passkeys(p: &mut Project) {
     let string = || FieldType::String;
     let bearer = || {
         let mut token = field("token", string());
+        token.lenient = true; // the flow answers 401 itself
         token.source = Some(RequestSource::Header {
             name: "Authorization".into(),
         });
@@ -1372,6 +1389,7 @@ pub fn add_passkeys(p: &mut Project) {
         .push(api("PasskeyLoginBody", vec![field("account", string())]));
     // A login that names nobody has no account to count the attempts under: the caller is counted instead.
     let mut client = field("client", string());
+    client.lenient = true;
     client.source = Some(RequestSource::Header {
         name: "X-Forwarded-For".into(),
     });
@@ -1411,6 +1429,7 @@ pub fn add_passkeys(p: &mut Project) {
         ],
         status: None,
         cookies: vec![],
+        headers: vec![],
     };
     let routes = &mut p.services[0].routes;
     routes.push(route(
@@ -1449,6 +1468,7 @@ pub fn add_passkeys(p: &mut Project) {
                 fields: vec![set("ok", lit(true))],
                 status: None,
                 cookies: vec![],
+                headers: vec![],
             },
         ],
     ));
@@ -1503,6 +1523,7 @@ pub fn add_passkeys(p: &mut Project) {
                 fields: vec![set("access_token", path("access_token"))],
                 status: None,
                 cookies: vec![],
+                headers: vec![],
             },
         ],
     ));
@@ -1537,6 +1558,7 @@ pub fn add_avatars(p: &mut Project) {
     let string = || FieldType::String;
     let bearer = || {
         let mut token = field("token", string());
+        token.lenient = true; // the flow answers 401 itself
         token.source = Some(RequestSource::Header {
             name: "Authorization".into(),
         });
@@ -1614,6 +1636,7 @@ pub fn add_avatars(p: &mut Project) {
                 fields: vec![set("content_type", path("content_type"))],
                 status: None,
                 cookies: vec![],
+                headers: vec![],
             },
         ],
     ));
@@ -1635,6 +1658,7 @@ pub fn add_avatars(p: &mut Project) {
                 fields: vec![set("image", path("avatar"))],
                 status: None,
                 cookies: vec![],
+                headers: vec![],
             },
         ],
     ));
@@ -1655,6 +1679,7 @@ pub fn add_avatars(p: &mut Project) {
                 fields: vec![set("ok", lit(true))],
                 status: None,
                 cookies: vec![],
+                headers: vec![],
             },
         ],
     ));
@@ -1681,6 +1706,7 @@ pub fn add_avatars(p: &mut Project) {
                 fields: vec![set("url", path("url"))],
                 status: None,
                 cookies: vec![],
+                headers: vec![],
             },
         ],
     );
@@ -1705,6 +1731,7 @@ pub fn add_avatars(p: &mut Project) {
                 fields: vec![set("url", path("url"))],
                 status: None,
                 cookies: vec![],
+                headers: vec![],
             },
         ],
     );
@@ -1720,6 +1747,7 @@ pub fn add_notes(p: &mut Project) {
     let string = || FieldType::String;
     let bearer = || {
         let mut token = field("token", string());
+        token.lenient = true; // the flow answers 401 itself
         token.source = Some(RequestSource::Header {
             name: "Authorization".into(),
         });
@@ -1873,6 +1901,7 @@ pub fn add_notes(p: &mut Project) {
             ],
             status: None,
             cookies: vec![],
+            headers: vec![],
         },
     ]);
     routes.push(route(
@@ -1902,6 +1931,7 @@ pub fn add_notes(p: &mut Project) {
             ],
             status: None,
             cookies: vec![],
+            headers: vec![],
         },
     ]);
     routes.push(route(
@@ -1929,6 +1959,7 @@ pub fn add_notes(p: &mut Project) {
             fields: vec![set("ok", lit(true))],
             status: None,
             cookies: vec![],
+            headers: vec![],
         },
     ]);
     routes.push(route(
@@ -2122,6 +2153,7 @@ pub fn add_sql_reads(p: &mut Project) {
             ],
             status: None,
             cookies: vec![],
+            headers: vec![],
         },
     ];
     p.services[0].routes.push(Route {
@@ -2443,6 +2475,7 @@ pub fn add_basket_lines(p: &mut Project) {
             ],
             status: None,
             cookies: vec![],
+            headers: vec![],
         },
     ];
     p.services[0].routes.push(Route {
@@ -2513,6 +2546,7 @@ pub fn add_basket_lines(p: &mut Project) {
             ],
             status: None,
             cookies: vec![],
+            headers: vec![],
         },
     ];
     p.services[0].routes.push(Route {
@@ -2523,5 +2557,62 @@ pub fn add_basket_lines(p: &mut Project) {
         response: "AddedLines".into(),
         status: 200,
         steps,
+    });
+}
+
+/// Adds to the first service a receipt route that uses what the HTTP API carries beyond text and numbers: a
+/// `timestamp` (RFC 3339 in JSON) and `bytes` (base64), a field that may be left out (`lenient`: it takes its default
+/// instead of a 400), and free response headers whose values come from the flow.
+pub fn add_receipts(p: &mut Project) {
+    // The services also answer `GET /openapi.json` with the document of their routes.
+    p.openapi.serve = true;
+    let mut note = field("note", FieldType::String);
+    note.lenient = true;
+    note.rules = vec![Rule::Length { min: 0, max: 200 }];
+    p.messages.push(api(
+        "ReceiptBody",
+        vec![
+            field("order_id", FieldType::String),
+            field("issued_at", FieldType::Timestamp),
+            field("stamp", FieldType::Bytes),
+            note,
+        ],
+    ));
+    p.messages.push(api(
+        "ReceiptView",
+        vec![
+            field("order_id", FieldType::String),
+            field("issued_at", FieldType::Timestamp),
+            field("stamp", FieldType::Bytes),
+        ],
+    ));
+    p.services[0].routes.push(Route {
+        name: "put_receipt".into(),
+        method: HttpMethod::Put,
+        path: "/orders/{order_id}/receipt".into(),
+        request: "ReceiptBody".into(),
+        response: "ReceiptView".into(),
+        status: 200,
+        steps: vec![Step::Respond {
+            id: "rc1".into(),
+            fields: vec![
+                set("order_id", path("input.order_id")),
+                set("issued_at", path("input.issued_at")),
+                set("stamp", path("input.stamp")),
+            ],
+            status: None,
+            cookies: vec![],
+            // The browser must not keep a receipt, and the client learns where it lives.
+            headers: vec![
+                ResponseHeader {
+                    name: "Cache-Control".into(),
+                    value: lit("no-store"),
+                },
+                ResponseHeader {
+                    name: "X-Order-Id".into(),
+                    value: path("input.order_id"),
+                },
+            ],
+        }],
     });
 }

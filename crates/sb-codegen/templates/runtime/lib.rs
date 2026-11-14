@@ -216,6 +216,8 @@ pub mod http {
         pub body: T,
         pub status: Option<u16>,
         pub cookies: Vec<Cookie>,
+        /// Free headers, in the order the flow set them. The handler refuses a name or value that is not valid.
+        pub headers: Vec<(String, String)>,
     }
 
     impl<T> Reply<T> {
@@ -224,6 +226,7 @@ pub mod http {
                 body,
                 status: None,
                 cookies: Vec::new(),
+                headers: Vec::new(),
             }
         }
 
@@ -236,6 +239,38 @@ pub mod http {
             self.cookies.push(cookie);
             self
         }
+
+        pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+            self.headers.push((name.into(), value.into()));
+            self
+        }
+    }
+
+    /// Whether a text can be the value of a response header: visible ASCII and spaces, nothing that ends the
+    /// header or starts another (no line break, no control character), and no space around it.
+    pub fn header_value_ok(value: &str) -> bool {
+        value.bytes().all(|b| b == b' ' || b == b'\t' || (0x21..=0x7e).contains(&b))
+            && !value.starts_with([' ', '\t'])
+            && !value.ends_with([' ', '\t'])
+    }
+
+    /// Whether a field of a JSON object was sent: present and not `null`. An empty text is present.
+    pub fn sent(object: &serde_json::Value, field: &str) -> bool {
+        object.get(field).is_some_and(|v| !v.is_null())
+    }
+
+    /// Whether a query string (the raw text after `?`) has a parameter `name`, with or without a value.
+    pub fn query_has(query: Option<&str>, name: &str) -> bool {
+        query.unwrap_or_default().split('&').any(|pair| {
+            let key = pair.split_once('=').map_or(pair, |(k, _)| k);
+            // Keys are field names, so only a key that needs decoding (`+`, `%`) takes the slow path.
+            if key.contains(['%', '+']) {
+                let decoded = decode_value(&key.replace('+', " "));
+                decoded.as_deref() == Some(name)
+            } else {
+                key == name
+            }
+        })
     }
 
     #[cfg(test)]
@@ -292,6 +327,35 @@ pub mod http {
             // A stray `%` is kept.
             assert_eq!(cookie(["a=100%"], "a").as_deref(), Some("100%"));
             assert_eq!(cookie(["a=%zz"], "a").as_deref(), Some("%zz"));
+        }
+
+        #[test]
+        fn a_header_value_cannot_break_out() {
+            assert!(header_value_ok("max-age=60, public"));
+            assert!(header_value_ok(""));
+            assert!(!header_value_ok("a\r\nSet-Cookie: x=1"));
+            assert!(!header_value_ok("a\nb"));
+            assert!(!header_value_ok("caf\u{e9}"));
+            assert!(!header_value_ok(" padded"));
+            assert!(!header_value_ok("nul\0"));
+        }
+
+        #[test]
+        fn presence_is_not_emptiness() {
+            let v = serde_json::json!({"a": "", "b": null, "c": 0});
+            assert!(sent(&v, "a") && sent(&v, "c"));
+            assert!(!sent(&v, "b") && !sent(&v, "d"));
+            assert!(query_has(Some("a=&b=1"), "a"));
+            assert!(query_has(Some("flag&b=1"), "flag"));
+            assert!(!query_has(Some("xa=1&a2=2"), "a"));
+            assert!(!query_has(None, "a"));
+            assert!(query_has(Some("a%5Fb=1"), "a_b"));
+        }
+
+        #[test]
+        fn a_reply_carries_headers() {
+            let reply = Reply::new(1).header("Cache-Control", "no-store").header("X-Total-Count", "3");
+            assert_eq!(reply.headers, vec![("Cache-Control".into(), "no-store".into()), ("X-Total-Count".into(), "3".into())]);
         }
 
         #[test]

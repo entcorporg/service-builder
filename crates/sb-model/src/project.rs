@@ -9,7 +9,8 @@ use serde_json::Value;
 
 /// 2: topics declare their `producers` (before, a producer was whatever had a Publish step).
 /// 3: schemas have a `kind` (event, proto or api).
-pub const SCHEMA_VERSION: u32 = 3;
+/// 4: a field of an API schema is required unless it is `lenient` (before, an absent field took its default).
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// The JSON Schema of a project file, derived from the types themselves so that it cannot drift
 /// from what the editor and the generator accept. Doc comments become descriptions.
@@ -38,6 +39,43 @@ pub struct Project {
     /// How the project runs in containers from the Pods page: resources, admin interfaces, reverse proxy.
     #[serde(default, skip_serializing_if = "crate::pods::PodsConfig::is_default")]
     pub pods: crate::pods::PodsConfig,
+    /// Whether the services answer with their own OpenAPI document, and where.
+    #[serde(default, skip_serializing_if = "OpenApiConfig::is_default")]
+    pub openapi: OpenApiConfig,
+}
+
+/// The OpenAPI 3.1 document of each service is always written with the export; this decides whether the service
+/// also serves it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenApiConfig {
+    /// The service answers `GET <path>` with its OpenAPI document (no authentication: it describes the API, not the data).
+    #[serde(default)]
+    pub serve: bool,
+    /// Where it is served, a path of the HTTP API that no route uses.
+    #[serde(default = "default_openapi_path")]
+    pub path: String,
+}
+
+pub const DEFAULT_OPENAPI_PATH: &str = "/openapi.json";
+
+fn default_openapi_path() -> String {
+    DEFAULT_OPENAPI_PATH.to_string()
+}
+
+impl Default for OpenApiConfig {
+    fn default() -> Self {
+        Self {
+            serve: false,
+            path: default_openapi_path(),
+        }
+    }
+}
+
+impl OpenApiConfig {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// How the services publish their events: every event goes through a transactional outbox, and
@@ -116,6 +154,11 @@ pub struct Field {
     /// that what a client sends in the body can never stand for a header.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<RequestSource>,
+    /// API schemas, in a request: an absent field takes its default value (`0`, empty text...) instead of being
+    /// refused with a 400 that names it. Off by default: a field is required unless it is `optional` or lenient.
+    /// Empty text is present; `null` counts as absent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lenient: bool,
 }
 
 impl Field {
@@ -128,6 +171,7 @@ impl Field {
             tag: None,
             rules: vec![],
             source: None,
+            lenient: false,
         }
     }
 }
@@ -933,6 +977,9 @@ pub enum Step {
         /// Routes: `Set-Cookie` headers.
         #[serde(default)]
         cookies: Vec<Cookie>,
+        /// Routes: free response headers (`Cache-Control`, `Location`, `X-Total-Count`...), their value read from the flow.
+        #[serde(default)]
+        headers: Vec<ResponseHeader>,
     },
     /// Counts this attempt under `key` and, past `max` attempts in the last `window_secs`, ends the route
     /// with a 429 and a `Retry-After`. A sliding window per key, kept in the memory of the process.
@@ -1346,6 +1393,34 @@ pub enum JwksSource {
     #[serde(rename_all = "camelCase")]
     Url { url_env: String },
 }
+
+/// A header of a route response, whose value comes from the flow. Cookies have their own list, and the headers the
+/// runtime sets itself (`Content-Type`, `Retry-After`, CORS...) are refused.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ResponseHeader {
+    pub name: String,
+    /// Text: a field, a literal or a value of the flow. A value that is not a valid header value is a 500, logged.
+    pub value: Expr,
+}
+
+/// Names a response header cannot take: the runtime sets them, or they are the business of the connection.
+pub const RESERVED_RESPONSE_HEADERS: &[&str] = &[
+    "set-cookie",
+    "content-type",
+    "content-length",
+    "content-encoding",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+    "upgrade",
+    "te",
+    "trailer",
+    "host",
+    "date",
+    "retry-after",
+    "vary",
+];
 
 /// A `Set-Cookie` of a route response. Safe by default: `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1844,6 +1919,7 @@ impl Project {
             topics: vec![],
             services: vec![],
             pods: Default::default(),
+            openapi: Default::default(),
         }
     }
 
@@ -1983,6 +2059,18 @@ impl Project {
                 };
             }
         }
+        if self.schema_version < 4 {
+            // Before, an absent field of a request took its default: the fields stay as lenient as they were.
+            for m in self
+                .messages
+                .iter_mut()
+                .filter(|m| m.kind == MessageKind::Api)
+            {
+                for f in m.fields.iter_mut().filter(|f| !f.optional) {
+                    f.lenient = true;
+                }
+            }
+        }
         self.schema_version = SCHEMA_VERSION;
     }
 
@@ -2096,6 +2184,45 @@ mod tests {
     }
 
     #[test]
+    fn a_project_saved_before_required_fields_keeps_its_defaults() {
+        let mut json = serde_json::to_value(crate::sample::orders()).unwrap();
+        json["schemaVersion"] = 3.into();
+        // A file of version 3 has no `lenient` at all.
+        for m in json["messages"].as_array_mut().unwrap() {
+            for f in m["fields"].as_array_mut().unwrap() {
+                f.as_object_mut().unwrap().remove("lenient");
+            }
+        }
+        let mut p: Project = serde_json::from_value(json).unwrap();
+        assert!(
+            p.message("PlaceOrderBody")
+                .unwrap()
+                .fields
+                .iter()
+                .all(|f| !f.lenient)
+        );
+        p.migrate();
+        assert_eq!(p.schema_version, SCHEMA_VERSION);
+        assert!(
+            p.message("PlaceOrderBody")
+                .unwrap()
+                .fields
+                .iter()
+                .all(|f| f.lenient)
+        );
+        // Events are not read from a request: untouched.
+        assert!(
+            p.message("OrderCreated")
+                .unwrap()
+                .fields
+                .iter()
+                .all(|f| !f.lenient)
+        );
+        // A new field is required unless it says otherwise.
+        assert!(!Field::new("x", FieldType::String).lenient);
+    }
+
+    #[test]
     fn migrating_declares_the_services_that_already_publish() {
         let mut p = crate::sample::orders();
         for t in &mut p.topics {
@@ -2106,6 +2233,13 @@ mod tests {
         }
         p.schema_version = 1;
         p.migrate();
+        // Version 4: the fields of the API schemas stay as lenient as they were (an absent field took its default).
+        for m in p.messages.iter_mut().filter(|m| m.kind == MessageKind::Api) {
+            assert!(m.fields.iter().all(|f| f.lenient || f.optional));
+            for f in &mut m.fields {
+                f.lenient = false;
+            }
+        }
         assert_eq!(p, crate::sample::orders());
         let kind = |p: &Project, n: &str| p.message(n).unwrap().kind;
         assert_eq!(kind(&p, "OrderCreated"), MessageKind::Event);

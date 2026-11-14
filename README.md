@@ -192,8 +192,8 @@ La CI le fait.
   reste en Rust. Un nombre n'est jamais converti en silence : `toInt64`, `toDouble`… s'écrivent.
 - Le bloc SQL n'a pas encore d'agrégats (`COUNT` par groupe, `SUM`, `GROUP BY`), de jointure à soi-même (alias) ni de `OR` entre
   conditions ; le total d'une page est le seul `COUNT`.
-- L'API HTTP n'a pas de spécification OpenAPI générée ; un champ absent d'une requête prend sa valeur par défaut au
-  lieu d'être refusé ; une réponse pose un statut et des cookies, pas d'en-têtes libres.
+- La spécification OpenAPI ne décrit pas les statuts qu'un bloc *Code Rust* choisirait lui-même, ni l'authentification
+  comme schéma de sécurité (un jeton lu d'un en-tête y est un paramètre).
 - Pas d'appel à une API HTTP externe (Stripe, Twilio…) : seuls les webhooks entrants signés sont modélisés
   (`verifyHmac`). Un appel sortant s'écrit dans l'étape *Code Rust*.
 - Le HTML et le texte des mails se saisissent à la main : pas d'éditeur visuel de gabarits.
