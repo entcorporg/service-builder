@@ -185,8 +185,8 @@ La CI le fait.
   un consumer) et *service → topic* (cela déclare le producteur) ; publier et appeler un RPC se configurent dans les
   étapes de l'inspecteur.
 - Le bloc SQL lit une seule table à la fois : pas de jointure, pas de pagination (une limite, pas de décalage).
-- L'API HTTP n'a pas de spécification OpenAPI générée ; un champ absent d'une requête prend sa valeur par défaut au
-  lieu d'être refusé ; une réponse pose un statut et des cookies, pas d'en-têtes libres.
+- La spécification OpenAPI ne décrit pas les statuts qu'un bloc *Code Rust* choisirait lui-même, ni l'authentification
+  comme schéma de sécurité (un jeton lu d'un en-tête y est un paramètre).
 - Pas d'appel à une API HTTP externe (Stripe, Twilio…) : seuls les webhooks entrants signés sont modélisés
   (`verifyHmac`). Un appel sortant s'écrit dans l'étape *Code Rust*.
 - Le HTML et le texte des mails se saisissent à la main : pas d'éditeur visuel de gabarits.

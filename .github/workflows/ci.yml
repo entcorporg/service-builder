@@ -109,6 +109,20 @@ jobs:
         env:
           # runner.temp is wiped between jobs; the tool cache is not, so librdkafka is built once.
           CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
+      # What the generated code does without any infrastructure: the JSON forms of bytes and timestamps, the checks of the
+      # required fields, the response headers of the runtime.
+      - run: cargo test -p contracts -p orders && cargo test -p eda-runtime --lib http::
+        working-directory: ${{ runner.temp }}/generated
+        env:
+          CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
+      # The OpenAPI document of each service, against the OpenAPI 3.1 specification.
+      - name: Validate the OpenAPI documents
+        run: |
+          python3 -m venv "$RUNNER_TEMP/oas"
+          "$RUNNER_TEMP/oas/bin/pip" install --quiet openapi-spec-validator
+          for doc in "$RUNNER_TEMP"/generated/services/*/openapi.json; do
+            "$RUNNER_TEMP/oas/bin/python" -m openapi_spec_validator "$doc"
+          done
 
   generated-realtime:
     # The real-time service is tested for real: its own tests, then the whole of it against a DragonflyDB, over real sockets.

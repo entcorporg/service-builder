@@ -140,12 +140,31 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
 - **En-têtes et cookies** : un champ texte obligatoire (`string` ou `uuid`) d'un schéma `api` peut être lu d'un **en-tête**
   de la requête (`Authorization`, `X-Request-Id`…, quelle que soit la casse) ou d'un **cookie** (percent-décodé, comme le
   génère `Cookie`) plutôt que du corps (`source`, « Lu depuis » dans l'éditeur). La route **écrase toujours** le champ,
-  vide si la requête ne l'a pas : un client ne peut pas faire passer pour un en-tête ce qu'il met dans le corps ou la query
+  refusé (400) s'il manque, sauf s'il est `lenient` : vide alors : un client ne peut pas faire passer pour un en-tête ce qu'il met dans le corps ou la query
   string. Les règles du champ s'appliquent ensuite. Pour un cookie en double, le premier gagne. Validation : schéma `api`
   (`E_SOURCE_KIND`), texte unique et obligatoire (`E_SOURCE_TYPE`), nom valable (`E_SOURCE_NAME`), pas aussi un paramètre
   du chemin (`E_SOURCE_PARAM`), et `W_SOURCE_UNUSED` quand aucune route ne reçoit directement le schéma.
-- **JSON** : les noms de champs sont ceux du schéma, sans conversion (`order_id` reste `order_id`). Un champ absent de
-  la requête prend sa valeur par défaut. `bytes` et `timestamp` n'ont pas encore de forme JSON dans les schémas API.
+- **JSON** : les noms de champs sont ceux du schéma, sans conversion (`order_id` reste `order_id`). Un champ `bytes` est du
+  **base64** (RFC 4648, avec `=` à l'écriture ; sans `=` accepté à la lecture) et un champ `timestamp` une date
+  **RFC 3339** (`2026-11-14T09:30:00Z`, en UTC à l'écriture, n'importe quel décalage à la lecture), dans les requêtes comme
+  dans les réponses, listes comprises. Un texte qui n'en est pas est refusé (422 pour un corps, 400 pour une query string).
+  Le contrat (`contracts/src/json.rs`, avec ses tests) porte ces conversions ; il n'existe que si un schéma JSON a un tel
+  champ. Dans un `GET`, la query string les porte aussi (`?since=2026-11-14T00:00:00Z`).
+- **Champs obligatoires** : un champ d'un schéma API qui n'est ni `optional` ni `lenient` (« déf. » dans l'éditeur) doit être
+  envoyé : absent, la requête est refusée **avant toute étape** par `400 { "error": "champ : is required" }` qui le nomme
+  (`company.name`, `lines[2].sku` pour un schéma imbriqué, vérifié élément par élément). Ce qui compte comme « absent » :
+  *corps* : la clé n'y est pas, ou vaut `null` ; *query string* : la clé n'y est pas (`?a=` est présent, texte vide) ;
+  *en-tête* et *cookie* : le champ lu depuis un en-tête ou un cookie est refusé s'il manque (le message dit lequel) ;
+  *chemin* : toujours présent. **Un texte vide est présent** : c'est aux règles (`length` min 1) de le refuser. Une liste
+  obligatoire peut être vide, mais doit être envoyée. Un champ `lenient` garde l'ancien comportement : absent, il prend sa
+  valeur par défaut (et pour un en-tête ou un cookie, le texte vide). Les routes à corps lisent le JSON en `serde_json::Value`
+  pour voir l'absence (un type du contrat ne la distingue pas d'une valeur par défaut) puis le lisent comme le schéma : un
+  JSON bien formé mais du mauvais type répond 422, comme avant. Le serveur n'exige plus rien de plus que l'en-tête
+  `Content-Type: application/json`, comme avant. **Projets existants** : `SCHEMA_VERSION` passe à 4 et `migrate()` met
+  `lenient` sur tous les champs non optionnels des schémas API : un projet enregistré avant ne change pas de
+  comportement tant qu'on ne décoche pas « déf. » champ par champ. Les champs créés ensuite sont obligatoires. Les jetons
+  des exemples (`Authorization`, `X-Client-Id`…) sont `lenient` : c'est le flow qui répond 401, pas un 400. Chaque
+  route générée a un test (`cargo test -p <service>`) qui vérifie que chaque champ obligatoire est nommé quand il manque.
 - **Erreurs** : `{ "error": "..." }`. L'étape **Refuser** (`fail`) arrête la route avec un statut d'erreur (400 à 599) et
   un message fixe ; elle compte comme une réponse (pas d'avertissement `W_NO_RESPOND`), et ce que la route avait écrit en
   base ou publié est annulé avec la transaction. `retryAfter` (secondes, un champ ou un littéral) pose l'en-tête
@@ -155,12 +174,41 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
   `return Err(eda_runtime::http::HttpError::not_found("...").into())` ; toute autre erreur donne un 500 dont le détail
   reste dans les journaux.
 - **Réponse** : l'étape *Répondre* d'une route peut choisir son **statut** de succès (200, 201 ou 202, sinon celui de la
-  route, `E_RESPOND_STATUS`) et poser des **cookies**. Un cookie est sûr par défaut : `HttpOnly`, `Secure`, `SameSite=Lax`,
+  route, `E_RESPOND_STATUS`), poser des **en-têtes** libres et des **cookies**. Un cookie est sûr par défaut : `HttpOnly`, `Secure`, `SameSite=Lax`,
   `Path=/` ; chaque attribut se relâche à part, et `SameSite=None` exige `Secure` (`E_COOKIE_SAMESITE`). `maxAgeSecs` donne
   la durée (`0` supprime le cookie, absent : cookie de session). La valeur est du texte, encodée en pourcentage côté
   runtime : un `;` dans une valeur ne peut pas ajouter d'attribut. Le flow d'une route qui pose un statut ou des cookies
   renvoie un `eda_runtime::http::Reply` ; les autres gardent leur forme. Validation : `E_COOKIE_NAME`,
   `E_COOKIE_DUPLICATE`, `E_COOKIE_PATH` ; statut et cookies sont refusés hors d'une route (`E_RESPOND_ROUTE_ONLY`).
+- **En-têtes de réponse** (`headers` de *Répondre* : un nom et une valeur lue du flow, texte) : `Cache-Control`, `Location`,
+  `ETag`, `X-Total-Count`… Le nom est un *token* HTTP (`E_HEADER_NAME`) ; sont refusés (`E_HEADER_RESERVED`, sans
+  distinction de casse) ce que le runtime ou une autre étape pose déjà : `Set-Cookie` (ce sont les cookies),
+  `Content-Type`, `Content-Length`, `Content-Encoding`, `Retry-After` (l'étape *Refuser*), `Vary`, `Date`, `Host`, les
+  en-têtes de connexion (`Connection`, `Transfer-Encoding`, `Upgrade`, `Keep-Alive`, `TE`, `Trailer`) et tout
+  `Access-Control-*` (la couche CORS) ; un nom une fois (`E_HEADER_DUPLICATE`). Une valeur littérale ne peut contenir que de
+  l'ASCII visible et des espaces au milieu (`E_HEADER_VALUE`) : aucun saut de ligne ne peut finir l'en-tête. Une valeur
+  *calculée* (un champ de la requête, par exemple) est vérifiée à l'exécution par `eda_runtime::http::header_value_ok` : si
+  elle ne passe pas, c'est un défaut du flow, pas du client, donc un 500 (détail dans les journaux) et jamais un en-tête
+  coupé en deux. Seulement dans une route (`E_HEADER_OUTSIDE_ROUTE`) ; une route qui en pose renvoie un `Reply`.
+- **Spécification OpenAPI** : chaque service qui a des routes écrit `services/<nom>/openapi.json`, un document **OpenAPI 3.1**
+  dérivé du même modèle que les handlers (`sb-codegen/src/openapi.rs`), visible dans l'onglet « Code généré » comme les
+  autres fichiers. Une opération par route : `operationId` (le nom de la route), les **paramètres** (chemin ; query string
+  d'un `GET`/`DELETE` ; champs lus depuis un en-tête (`in: header`) ou un cookie (`in: cookie`), avec leur caractère obligatoire),
+  le **corps** (`application/json`, sans les champs du chemin ni ceux des en-têtes), les **schémas** (types JSON ci-dessus :
+  `bytes` = `contentEncoding: base64`, `timestamp` = `format: date-time`, `uuid` = `format: uuid`, liste, schéma imbriqué par
+  `$ref`, `optional` = `null` accepté) et les **règles** en contraintes (`length` = `minLength`/`maxLength`, `email` =
+  `format: email`, `siren` = `pattern`). Les **réponses** : le statut de succès (celui de la route et ceux que choisit un *Répondre*) avec les
+  en-têtes posés (`Set-Cookie` pour les cookies, les en-têtes libres) ; puis les erreurs : 400 (requête refusée), 422 (corps illisible
+  comme le schéma), 500, et ce que choisissent les étapes : le statut de *Refuser*, 429 avec `Retry-After` pour *Limiter le
+  débit*, 401 pour les signatures, jetons et codes, 404 (ou le statut `missing`) d'un SQL qui attend une ligne, 400/401 des
+  étapes de mot de passe et de passkey. Les erreurs sont `{ "error": "..." }` (`ErrorBody`). Ne sont **pas** décrits : les
+  statuts qu'un bloc *Code Rust* choisirait avec `HttpError`, l'authentification en tant que schéma de sécurité (un jeton
+  lu d'un en-tête est un paramètre), les erreurs d'une API appelée. Un message d'une réponse dont un champ objet n'est pas
+  rempli renvoie `null` à cet endroit, ce que le schéma n'exprime pas.
+  **Servi par le service** : dans l'inspecteur du projet (rien de sélectionné), « Spécification OpenAPI » : coché, chaque
+  service répond `GET <chemin>` (`/openapi.json` par défaut) avec son document, sans authentification, embarqué dans le
+  binaire (`include_str!`). Le chemin est validé (`E_OPENAPI_PATH` : forme, et pas celui d'une route `GET`). Le document est
+  écrit à l'export même quand il n'est pas servi.
 - **Limiter le débit** : l'étape `rateLimit` compte chaque essai sous une **clé** (un texte : l'e-mail, une adresse, ou un
   littéral pour tout le monde) et, au-delà de `max` essais dans les `windowSecs` dernières secondes (1 à 86 400), répond
   `429` avec `Retry-After` (secondes à attendre). Fenêtre glissante, une par étape et par clé ; un essai refusé n'est pas
@@ -206,8 +254,7 @@ tables, des listes), « Construire la réponse par la logique » ajoute une vari
 remplie en Rust avec `tx`, dont chaque champ alimente la réponse ; le bloc SQL le fait sans écrire de Rust. Une variable peut en effet porter un schéma entier,
 construit en Rust (`E_LET_VALUE` si on essaie autre chose). « ← Architecture » ramène au canvas.
 
-Pas encore : refus d'un champ obligatoire absent, pagination, spécification OpenAPI, en-têtes de réponse libres,
-appel d'une API HTTP externe, jointures entre tables dans le bloc SQL (une requête plus riche s'écrit en Rust avec `tx`).
+Pas encore : pagination, appel d'une API HTTP externe, jointures entre tables dans le bloc SQL (une requête plus riche s'écrit en Rust avec `tx`).
 
 ### Tables et bloc SQL
 
