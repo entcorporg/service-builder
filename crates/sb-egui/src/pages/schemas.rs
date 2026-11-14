@@ -328,6 +328,23 @@ fn nested(
     );
 }
 
+/// The widths of the checks of a field row: list, optional, default value.
+const LIST_W: f32 = 32.0;
+const OPT_W: f32 = 26.0;
+const DEF_W: f32 = 44.0;
+
+/// A control in a slot of a fixed width, so that the same control lines up from row to row.
+fn slot<R>(ui: &mut Ui, width: f32, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
+    ui.allocate_ui_with_layout(
+        Vec2::new(width, 24.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_width(width);
+            add(ui)
+        },
+    )
+}
+
 /// A change of one field of one schema.
 fn change(app: &mut App, message: &str, index: usize, f: impl FnOnce(&mut Field)) {
     app.edit(|p| {
@@ -347,153 +364,169 @@ fn field_row(
     top: bool,
 ) {
     let id = ("field", &m.name, index);
+    // The controls of fixed width are laid first, from the right, and the name and the type share the width that is
+    // really left: a row never overflows. (A row wider than the inspector widened it for the next row, which then
+    // overflowed a little more: the rows made a staircase.)
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        // tag 26, two checks 2 x 34, trash 26, six gaps.
-        let flexible = (ui.available_width() - 26.0 - 68.0 - 26.0 - 30.0).max(100.0);
-        let each = flexible / 2.0;
-        let (rect, r) = ui.allocate_exact_size(Vec2::new(26.0, 24.0), egui::Sense::hover());
-        ui.painter().text(
-            rect.left_center(),
-            egui::Align2::LEFT_CENTER,
-            format!("#{}", f.tag.unwrap_or(index as u32 + 1)),
-            mono(XS),
-            FAINT,
-        );
-        r.on_hover_text("Numéro de champ protobuf, stable");
-
-        if let Some(v) = ui
-            .allocate_ui(Vec2::new(each, 24.0), |ui| {
-                commit_entry(ui, (id, "name"), &f.name, true, "", false)
-            })
-            .inner
-        {
-            let taken = m.fields.iter().any(|x| x.name == v);
-            if !is_snake_ident(&v) {
-                app.say("Le nom doit être en snake_case, par exemple order_id.");
-            } else if taken {
-                app.say(&format!("Le champ {v} existe déjà."));
-            } else {
-                app.edit(|p| rename_field(p, &m.name, &f.name, &v));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if icon_btn(ui, "trash", &format!("Supprimer {}", f.name), true).clicked() {
+                app.edit(|p| {
+                    if let Some(x) = message_mut(p, &m.name)
+                        && index < x.fields.len()
+                    {
+                        x.fields.remove(index);
+                    }
+                });
             }
-        }
-
-        if let Some(v) = ui
-            .allocate_ui(Vec2::new(each, 24.0), |ui| {
-                choice(
-                    ui,
-                    (id, "type"),
-                    &type_options(project, m.kind, f.repeated),
-                    &type_name(&f.ty),
-                )
-            })
-            .inner
-        {
-            let (message, field_name) = (m.name.clone(), f.name.clone());
-            app.edit(|p| {
-                let ty = if v == NEW_OBJECT {
-                    let Some(f) = p.message(&message).and_then(|m| m.fields.get(index)) else {
-                        return;
-                    };
-                    let name = object_name(p, &message, f);
-                    p.messages.push(Message {
-                        name: name.clone(),
-                        kind: MessageKind::Api,
-                        fields: vec![Field::new("id", FieldType::String)],
-                    });
-                    FieldType::Message { name }
+            let is_message = matches!(f.ty, FieldType::Message { .. });
+            // Each check has a slot of its own width, kept empty when the check is not there: the columns line up.
+            if m.kind == MessageKind::Api && f.optional {
+                ui.add_space(DEF_W + ui.spacing().item_spacing.x);
+            }
+            if m.kind == MessageKind::Api && !f.optional {
+                // A requested field is required: left out, it is a 400 that names it. Lenient, it takes its default value.
+                let lenient = slot(ui, DEF_W, |ui| {
+                    widgets::check(
+                        ui,
+                        f.lenient,
+                        RichText::new("déf.").font(mono(11.0)).color(MUTED),
+                    )
+                });
+                lenient.response.on_hover_text(
+                    "Valeur par défaut si absent : décoché, un champ absent de la requête est refusé (400) ; coché, il prend \
+                     sa valeur par défaut (0, texte vide…). Un texte vide envoyé compte comme présent.",
+                );
+                if let Some(on) = lenient.inner {
+                    change(app, &m.name, index, |x| x.lenient = on);
+                }
+            }
+            let optional = slot(ui, OPT_W, |ui| {
+                ui.add_enabled_ui(!is_message && !f.repeated, |ui| {
+                    widgets::check(
+                        ui,
+                        f.optional,
+                        RichText::new("?").font(mono(11.0)).color(MUTED),
+                    )
+                })
+                .inner
+            });
+            optional
+                .response
+                .on_hover_text(if is_message || f.repeated {
+                    "Optionnel : sans objet pour une liste ou un objet."
                 } else {
-                    parse_type(&v)
-                };
-                let Some(x) = message_mut(p, &message)
-                    .and_then(|m| m.fields.get_mut(index))
-                    .filter(|x| x.name == field_name)
-                else {
-                    return;
-                };
-                x.ty = ty;
-                if matches!(x.ty, FieldType::Message { .. }) {
-                    x.optional = false;
-                }
-                if !is_text(&x.ty) {
-                    x.rules.clear();
-                    x.source = None;
-                }
-            });
-        }
-
-        let is_message = matches!(f.ty, FieldType::Message { .. });
-        let repeated = ui.scope(|ui| {
-            widgets::check(
-                ui,
-                f.repeated,
-                RichText::new("[]").font(mono(11.0)).color(MUTED),
-            )
-        });
-        repeated
-            .response
-            .on_hover_text("Liste : le champ porte plusieurs valeurs (un tableau JSON).");
-        if let Some(on) = repeated.inner {
-            let api = m.kind == MessageKind::Api;
-            change(app, &m.name, index, |x| {
-                x.repeated = on;
-                if on {
-                    x.optional = false;
-                    x.source = None;
-                } else if api && x.ty.is_message() {
-                    // No longer a list: no longer objects either (their schema stays in the project).
-                    x.ty = FieldType::String;
-                }
-            });
-        }
-        let optional = ui.add_enabled_ui(!is_message && !f.repeated, |ui| {
-            widgets::check(
-                ui,
-                f.optional,
-                RichText::new("?").font(mono(11.0)).color(MUTED),
-            )
-        });
-        optional
-            .response
-            .on_hover_text(if is_message || f.repeated {
-                "Optionnel : sans objet pour une liste ou un objet."
-            } else {
-                "Optionnel : le champ peut être absent."
-            });
-        if let Some(on) = optional.inner {
-            change(app, &m.name, index, |x| {
-                x.optional = on;
-                if on {
-                    x.source = None;
-                }
-            });
-        }
-        if m.kind == MessageKind::Api && !f.optional {
-            // A requested field is required: left out, it is a 400 that names it. Lenient, it takes its default value.
-            let lenient = ui.scope(|ui| {
+                    "Optionnel : le champ peut être absent."
+                });
+            if let Some(on) = optional.inner {
+                change(app, &m.name, index, |x| {
+                    x.optional = on;
+                    if on {
+                        x.source = None;
+                    }
+                });
+            }
+            let repeated = slot(ui, LIST_W, |ui| {
                 widgets::check(
                     ui,
-                    f.lenient,
-                    RichText::new("déf.").font(mono(11.0)).color(MUTED),
+                    f.repeated,
+                    RichText::new("[]").font(mono(11.0)).color(MUTED),
                 )
             });
-            lenient.response.on_hover_text(
-                "Valeur par défaut si absent : décoché, un champ absent de la requête est refusé (400) ; coché, il prend \
-                 sa valeur par défaut (0, texte vide…). Un texte vide envoyé compte comme présent.",
-            );
-            if let Some(on) = lenient.inner {
-                change(app, &m.name, index, |x| x.lenient = on);
+            repeated
+                .response
+                .on_hover_text("Liste : le champ porte plusieurs valeurs (un tableau JSON).");
+            if let Some(on) = repeated.inner {
+                let api = m.kind == MessageKind::Api;
+                change(app, &m.name, index, |x| {
+                    x.repeated = on;
+                    if on {
+                        x.optional = false;
+                        x.source = None;
+                    } else if api && x.ty.is_message() {
+                        // No longer a list: no longer objects either (their schema stays in the project).
+                        x.ty = FieldType::String;
+                    }
+                });
             }
-        }
-        if icon_btn(ui, "trash", &format!("Supprimer {}", f.name), true).clicked() {
-            app.edit(|p| {
-                if let Some(x) = message_mut(p, &m.name)
-                    && index < x.fields.len()
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                // The tag, then the name and the type sharing what is left (the name has the most of it).
+                let rest = (ui.available_width() - 26.0 - 2.0 * 6.0).max(80.0);
+                // The drop-down of the type is never narrower than 80 px (`choice`).
+                let type_w = (rest * 0.4).clamp(80.0, 120.0);
+                let name_w = rest - type_w;
+                let (rect, r) = ui.allocate_exact_size(Vec2::new(26.0, 24.0), egui::Sense::hover());
+                ui.painter().text(
+                    rect.left_center(),
+                    egui::Align2::LEFT_CENTER,
+                    format!("#{}", f.tag.unwrap_or(index as u32 + 1)),
+                    mono(XS),
+                    FAINT,
+                );
+                r.on_hover_text("Numéro de champ protobuf, stable");
+
+                if let Some(v) = ui
+                    .allocate_ui(Vec2::new(name_w, 24.0), |ui| {
+                        commit_entry(ui, (id, "name"), &f.name, true, "", false)
+                    })
+                    .inner
                 {
-                    x.fields.remove(index);
+                    let taken = m.fields.iter().any(|x| x.name == v);
+                    if !is_snake_ident(&v) {
+                        app.say("Le nom doit être en snake_case, par exemple order_id.");
+                    } else if taken {
+                        app.say(&format!("Le champ {v} existe déjà."));
+                    } else {
+                        app.edit(|p| rename_field(p, &m.name, &f.name, &v));
+                    }
                 }
+
+                if let Some(v) = ui
+                    .allocate_ui(Vec2::new(type_w, 24.0), |ui| {
+                        choice(
+                            ui,
+                            (id, "type"),
+                            &type_options(project, m.kind, f.repeated),
+                            &type_name(&f.ty),
+                        )
+                    })
+                    .inner
+                {
+                    let (message, field_name) = (m.name.clone(), f.name.clone());
+                    app.edit(|p| {
+                        let ty = if v == NEW_OBJECT {
+                            let Some(f) = p.message(&message).and_then(|m| m.fields.get(index)) else {
+                                return;
+                            };
+                            let name = object_name(p, &message, f);
+                            p.messages.push(Message {
+                                name: name.clone(),
+                                kind: MessageKind::Api,
+                                fields: vec![Field::new("id", FieldType::String)],
+                            });
+                            FieldType::Message { name }
+                        } else {
+                            parse_type(&v)
+                        };
+                        let Some(x) = message_mut(p, &message)
+                            .and_then(|m| m.fields.get_mut(index))
+                            .filter(|x| x.name == field_name)
+                        else {
+                            return;
+                        };
+                        x.ty = ty;
+                        if matches!(x.ty, FieldType::Message { .. }) {
+                            x.optional = false;
+                        }
+                        if !is_text(&x.ty) {
+                            x.rules.clear();
+                            x.source = None;
+                        }
+                    });
+                }
+
             });
-        }
+        });
     });
     if m.kind == MessageKind::Api && is_text(&f.ty) {
         // Sources and rules are about what a route receives: a schema that is only an answer has neither.
