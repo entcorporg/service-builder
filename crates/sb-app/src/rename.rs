@@ -291,26 +291,247 @@ pub fn column(p: &mut Project, service: &str, table: &str, from: &str, to: &str)
             }
         }
     }
+    let mut fields = vec![];
+    for steps in handlers(p, |n| n == service) {
+        let mut rows = vec![];
+        rewrite(steps, |o| {
+            if kind(o) == "sql" {
+                requalify_column(o, table, from, to, &mut rows, &mut fields);
+            }
+        });
+        follow_row_fields(steps, &rows);
+    }
+    // The schemas the rows are converted into hold the field names: `<table>_<column>` follows the column.
+    for m in &mut p.messages {
+        for (message, old, new) in &fields {
+            if m.name == *message && !m.fields.iter().any(|f| f.name == *new) {
+                m.fields
+                    .iter_mut()
+                    .filter(|f| f.name == *old)
+                    .for_each(|f| f.name = new.clone());
+            }
+        }
+    }
+}
+
+/// What a flow reads of a renamed row field: `(name it binds, is it a list of rows, old field, new field)`.
+type RowField = (String, bool, String, String);
+
+/// What an SQL step names of a renamed column: the column of its own table (`column` or `table.column`) and of a joined
+/// one (`table.column`), in the select, the conditions, the sort keys and the join pairs. The row field of a joined column
+/// is `<alias or table>_<column>`: the rows the step binds are noted for [`follow_row_fields`] and the schema it fills
+/// for the caller.
+fn requalify_column(
+    o: &mut serde_json::Map<String, Value>,
+    table: &str,
+    from: &str,
+    to: &str,
+    rows: &mut Vec<RowField>,
+    fields: &mut Vec<(String, String, String)>,
+) {
+    let own = o.get("table").and_then(Value::as_str) == Some(table);
+    let join = o
+        .get("joins")
+        .and_then(Value::as_array)
+        .and_then(|js| js.iter().find(|j| j["table"] == table));
+    if !own && join.is_none() {
+        return;
+    }
+    let fix = |v: &mut Value| {
+        let Some(name) = v.as_str() else { return };
+        let new = match name.split_once('.') {
+            Some((t, c)) if t == table && c == from => Some(format!("{table}.{to}")),
+            None if own && name == from => Some(to.to_string()),
+            _ => None,
+        };
+        if let Some(new) = new {
+            *v = new.into();
+        }
+    };
+    let fix_key = |v: &mut Value, key: &str| {
+        if let Some(c) = v.get_mut(key) {
+            fix(c);
+        }
+    };
+    if let Some(j) = join.filter(|_| !own) {
+        let prefix = j.get("alias").and_then(Value::as_str).unwrap_or(table);
+        let (old, new) = (format!("{prefix}_{from}"), format!("{prefix}_{to}"));
+        let text = |k: &str| o.get(k).and_then(Value::as_str).map(str::to_string);
+        if let Some(bind) = text("bind") {
+            rows.push((
+                bind,
+                o.get("many") == Some(&Value::Bool(true)),
+                old.clone(),
+                new.clone(),
+            ));
+        }
+        if let Some(last) = text("lastBind") {
+            rows.push((last, false, old.clone(), new.clone()));
+        }
+        if let Some(message) = text("into") {
+            fields.push((message, old, new));
+        }
+    }
+    if let Some(joins) = o.get_mut("joins").and_then(Value::as_array_mut) {
+        for j in joins {
+            let joined = j["table"] == table;
+            for on in j["on"].as_array_mut().into_iter().flatten() {
+                if joined && let Some(pair) = on.as_object_mut() {
+                    set_if(pair, "refColumn", from, to);
+                }
+                fix_key(on, "column");
+            }
+        }
+    }
+    if let Some(c) = o.get_mut("columns").and_then(Value::as_array_mut) {
+        c.iter_mut().for_each(fix);
+    }
+    if let Some(c) = o.get_mut("orderBy") {
+        fix(c);
+    }
+    for key in ["thenBy", "where"] {
+        for k in o
+            .get_mut(key)
+            .and_then(Value::as_array_mut)
+            .into_iter()
+            .flatten()
+        {
+            fix_key(k, "column");
+        }
+    }
+    if own {
+        for item in o
+            .get_mut("values")
+            .and_then(Value::as_array_mut)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_object_mut)
+        {
+            set_if(item, "field", from, to);
+        }
+    }
+}
+
+/// The flow reads the fields of the rows an SQL step binds (`row.authors_name`): the paths and the texts follow the
+/// rename of the field. A row is the bind of a step that gives one, its last row, or the item of a loop over its list.
+fn follow_row_fields(steps: &mut Vec<Step>, rows: &[RowField]) {
+    if rows.is_empty() {
+        return;
+    }
+    let mut names: Vec<(String, String, String)> = rows
+        .iter()
+        .filter(|(_, list, ..)| !list)
+        .map(|(n, _, old, new)| (n.clone(), old.clone(), new.clone()))
+        .collect();
+    rewrite(steps, |o| {
+        if kind(o) != "forEach" {
+            return;
+        }
+        let list = o
+            .get("list")
+            .and_then(|l| l.get("path"))
+            .and_then(Value::as_str);
+        let item = o.get("item").and_then(Value::as_str);
+        if let (Some(list), Some(item)) = (list, item) {
+            for (n, is_list, old, new) in rows {
+                if *is_list && n == list {
+                    names.push((item.into(), old.clone(), new.clone()));
+                }
+            }
+        }
+    });
+    // One path or one text, with the old field name of a row replaced.
+    let swap = |text: &str, in_text: bool| -> Option<String> {
+        names.iter().find_map(|(row, old, new)| {
+            let (a, b) = (format!("{row}.{old}"), format!("{row}.{new}"));
+            if in_text {
+                let (a, b) = (format!("{{{a}}}"), format!("{{{b}}}"));
+                text.contains(&a).then(|| text.replace(&a, &b))
+            } else if text == a {
+                Some(b)
+            } else {
+                text.strip_prefix(&format!("{a}."))
+                    .map(|rest| format!("{b}.{rest}"))
+            }
+        })
+    };
+    rewrite(steps, |o| {
+        let key = match (o.get("kind").and_then(Value::as_str), kind(o)) {
+            (Some("path"), _) => ("path", false),
+            (Some("template"), _) => ("template", true),
+            (_, "log") => ("message", true),
+            _ => return,
+        };
+        // A text may hold several fields: swap until nothing changes.
+        while let Some(new) = o
+            .get(key.0)
+            .and_then(Value::as_str)
+            .and_then(|t| swap(t, key.1))
+        {
+            o.insert(key.0.into(), new.into());
+        }
+    });
+}
+
+/// The joins of an SQL step that cannot work any more, because the table or the column they stand on is gone, are removed
+/// with the select columns and the sort keys that read them (and the joins that stood on those). A condition on the
+/// dropped column stays: removing it would silently widen a query, the validation points at it instead. With no
+/// `column`, the whole table is gone.
+fn drop_from_joins(o: &mut serde_json::Map<String, Value>, table: &str, column: Option<&str>) {
+    let own = o
+        .get("table")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    // `table.column` of the dropped thing, or `column` of the own table when that is the dropped table.
+    let is_gone = |name: &str, dead: &[String]| match name.split_once('.') {
+        Some((t, c)) => {
+            dead.iter().any(|d| d == t) || (t == table && column.is_none_or(|k| k == c))
+        }
+        None => own == table && column == Some(name),
+    };
+    let mut dead: Vec<String> = vec![];
+    loop {
+        let Some(joins) = o.get_mut("joins").and_then(Value::as_array_mut) else {
+            return;
+        };
+        let Some(at) = joins.iter().position(|j| {
+            let name = j["table"].as_str().unwrap_or_default();
+            let on = || j["on"].as_array().into_iter().flatten();
+            (name == table && (column.is_none() || on().any(|p| p["refColumn"].as_str() == column)))
+                || on().any(|p| is_gone(p["column"].as_str().unwrap_or_default(), &dead))
+        }) else {
+            break;
+        };
+        let gone = joins.remove(at);
+        dead.push(gone["table"].as_str().unwrap_or_default().to_string());
+    }
+    let qualified_gone = |v: &Value| {
+        v.as_str().is_some_and(|name| {
+            name.split_once('.').is_some_and(|(t, c)| {
+                t != own
+                    && (dead.iter().any(|d| d == t)
+                        || (t == table && column.is_none_or(|k| k == c)))
+            })
+        })
+    };
+    if let Some(c) = o.get_mut("columns").and_then(Value::as_array_mut) {
+        c.retain(|v| !qualified_gone(v));
+    }
+    if o.get("orderBy").is_some_and(qualified_gone) {
+        o.insert("orderBy".into(), Value::Null);
+    }
+    if let Some(c) = o.get_mut("thenBy").and_then(Value::as_array_mut) {
+        c.retain(|k| !qualified_gone(&k["column"]));
+    }
+}
+
+/// Runs [`drop_from_joins`] on the SQL steps of the service.
+fn clean_joins(p: &mut Project, service: &str, table: &str, column: Option<&str>) {
     for steps in handlers(p, |n| n == service) {
         rewrite(steps, |o| {
-            if kind(o) != "sql" || o.get("table").and_then(Value::as_str) != Some(table) {
-                return;
-            }
-            set_if(o, "orderBy", from, to);
-            if let Some(Value::Array(columns)) = o.get_mut("columns") {
-                for c in columns {
-                    if c.as_str() == Some(from) {
-                        *c = to.into();
-                    }
-                }
-            }
-            for list in ["where", "values"] {
-                if let Some(Value::Array(items)) = o.get_mut(list) {
-                    for item in items.iter_mut().filter_map(Value::as_object_mut) {
-                        set_if(item, "column", from, to);
-                        set_if(item, "field", from, to);
-                    }
-                }
+            if kind(o) == "sql" {
+                drop_from_joins(o, table, column);
             }
         });
     }
@@ -348,6 +569,7 @@ pub fn drop_column(p: &mut Project, service: &str, table: &str, name: &str) {
         t.foreign_keys
             .retain(|f| !(f.ref_table == table && f.ref_columns.iter().any(|c| c == name)));
     }
+    clean_joins(p, service, table, Some(name));
 }
 
 /// Removes a table from the design and records the drop (its old names too), with the foreign keys that point at it.
@@ -367,6 +589,7 @@ pub fn drop_table(p: &mut Project, service: &str, table: &str) {
     for t in &mut s.tables {
         t.foreign_keys.retain(|f| f.ref_table != table);
     }
+    clean_joins(p, service, table, None);
 }
 
 #[cfg(test)]
@@ -495,5 +718,100 @@ mod tests {
         drop_table(&mut p, "Orders", "orders");
         assert_eq!(p.services[0].dropped_tables, ["orders"]);
         assert!(p.services[0].tables.is_empty());
+    }
+
+    /// The `list_posts` route of the showcase reads posts with their author's name through a join.
+    fn posts_step(p: &Project) -> serde_json::Value {
+        let route = p.services[0]
+            .routes
+            .iter()
+            .find(|r| r.name == "list_posts")
+            .expect("add_sql_reads");
+        serde_json::to_value(
+            route
+                .steps
+                .iter()
+                .find(|s| matches!(s, Step::Sql { .. }))
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn has(list: &serde_json::Value, name: &str) -> bool {
+        list.as_array().unwrap().iter().any(|v| v == name)
+    }
+
+    #[test]
+    fn renaming_a_joined_column_follows_the_joins_the_row_fields_and_the_flow() {
+        let mut p = sample::showcase();
+        // A flow that reads the row fields of the join in a text.
+        let route = p.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == "list_posts")
+            .unwrap();
+        route.steps.insert(
+            5,
+            Step::Log {
+                id: "z9".into(),
+                level: sb_model::LogLevel::Info,
+                message: "last by {last.authors_name}".into(),
+            },
+        );
+        assert_eq!(errors(&p), 0, "{:?}", sb_codegen::diagnose(&p));
+        column(&mut p, "Orders", "authors", "name", "full_name");
+        assert!(has(&posts_step(&p)["columns"], "authors.full_name"));
+        let item = p.messages.iter().find(|m| m.name == "PostItem").unwrap();
+        assert!(item.fields.iter().any(|f| f.name == "authors_full_name"));
+        assert!(
+            serde_json::to_string(&p)
+                .unwrap()
+                .contains("{last.authors_full_name}")
+        );
+        assert_eq!(mentions(&p, "authors.name"), 0);
+        assert_eq!(errors(&p), 0, "{:?}", sb_codegen::diagnose(&p));
+
+        // The column the join stands on, on both sides.
+        column(&mut p, "Orders", "authors", "author_id", "id");
+        column(&mut p, "Orders", "posts", "author_id", "writer_id");
+        let on = &posts_step(&p)["joins"][0]["on"][0];
+        assert_eq!(
+            (on["refColumn"].as_str(), on["column"].as_str()),
+            (Some("id"), Some("writer_id"))
+        );
+        assert_eq!(errors(&p), 0, "{:?}", sb_codegen::diagnose(&p));
+    }
+
+    #[test]
+    fn a_renamed_table_keeps_the_row_fields_of_its_join_and_a_column_rename_then_follows_the_alias()
+    {
+        let mut p = sample::showcase();
+        table(&mut p, "Orders", "authors", "writers");
+        assert_eq!(posts_step(&p)["joins"][0]["alias"], "authors");
+        column(&mut p, "Orders", "writers", "name", "full_name");
+        let item = p.messages.iter().find(|m| m.name == "PostItem").unwrap();
+        assert!(item.fields.iter().any(|f| f.name == "authors_full_name"));
+        assert_eq!(errors(&p), 0, "{:?}", sb_codegen::diagnose(&p));
+    }
+
+    #[test]
+    fn dropping_a_joined_column_or_table_cleans_the_joins() {
+        let mut p = sample::showcase();
+        drop_column(&mut p, "Orders", "authors", "name");
+        let step = posts_step(&p);
+        assert!(!has(&step["columns"], "authors.name"));
+        assert_eq!(step["joins"].as_array().unwrap().len(), 1);
+
+        // The column the join stands on: the join goes, with what read it.
+        let mut p = sample::showcase();
+        drop_column(&mut p, "Orders", "authors", "author_id");
+        let step = posts_step(&p);
+        assert!(step.get("joins").is_none());
+        assert!(!has(&step["columns"], "authors.name"));
+
+        let mut p = sample::showcase();
+        drop_table(&mut p, "Orders", "authors");
+        assert!(posts_step(&p).get("joins").is_none());
+        assert_eq!(mentions(&p, "authors.name"), 0);
     }
 }
