@@ -7,7 +7,6 @@ pub mod common;
 pub mod conditions;
 pub mod editors;
 pub mod endpoint;
-pub mod flows;
 pub mod graph;
 pub mod inspector;
 pub mod mail;

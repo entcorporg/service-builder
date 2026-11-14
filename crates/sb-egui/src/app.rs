@@ -35,13 +35,14 @@ use crate::updater::Update;
 pub const TITLE: &str = "Service Builder";
 const HISTORY: usize = 100;
 
-/// The views of the window. `Endpoint` is the API page, reached from the canvas (its tab is Architecture).
+/// The views of the window. `Endpoint` (the API page of a route) and `Mail` (the editor of the mails of a mail service)
+/// are reached from the inspector of the canvas: their tab is Architecture.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Page {
     #[default]
     Architecture,
     Endpoint,
-    Flows,
+    Mail,
     Tables,
     Mcp,
     Pods,
@@ -112,10 +113,11 @@ pub struct App {
     pub tables: pages::tablesview::TablesState,
     pub code: pages::codeview::CodeState,
     pub mcp: pages::mcp::McpState,
-    pub flows: pages::flows::FlowsState,
     pub pods: pages::pods::PodsState,
-    /// The visual editor of a mail, when one is open.
+    /// The mail open on the Mail page, and the working copy of its design.
     pub mail_editor: Option<pages::mailcanvas::MailEditor>,
+    /// The group of the last edit and when it was made (`edit_grouped`).
+    group: Option<(String, Instant)>,
 }
 
 pub fn stamp_of(path: &Path) -> u64 {
@@ -172,9 +174,9 @@ impl App {
             tables: Default::default(),
             code: Default::default(),
             mcp: Default::default(),
-            flows: Default::default(),
             pods: Default::default(),
             mail_editor: None,
+            group: None,
         };
         if let Some(path) = open {
             match sb_app::load_project(&path) {
@@ -204,21 +206,42 @@ impl App {
 
     /// Applies `change` to the project. A change that changes nothing leaves no trace.
     pub fn edit(&mut self, change: impl FnOnce(&mut Project)) {
+        self.group = None;
+        self.apply(change, true);
+    }
+
+    /// Like `edit`, but the changes of one `group` made less than two seconds apart are one entry of the history: a word
+    /// typed or a colour dragged in the mail editor is undone at once, not letter by letter.
+    pub fn edit_grouped(&mut self, group: &str, change: impl FnOnce(&mut Project)) {
+        let joins = self
+            .group
+            .as_ref()
+            .is_some_and(|(g, at)| g == group && at.elapsed() < Duration::from_secs(2));
+        if self.apply(change, !joins) {
+            self.group = Some((group.to_string(), Instant::now()));
+        }
+    }
+
+    /// Applies `change`; `record`: a new entry in the history. Whether the project changed.
+    fn apply(&mut self, change: impl FnOnce(&mut Project), record: bool) -> bool {
         let s = &mut self.state;
         let before = s.project.clone();
         change(&mut s.project);
         // Field numbers are frozen as they are given, so that a later deletion never renumbers the others.
         s.project.freeze_field_numbers();
         if s.project == before {
-            return;
+            return false;
         }
-        s.undo.push(before);
-        if s.undo.len() > HISTORY {
-            s.undo.remove(0);
+        if record {
+            s.undo.push(before);
+            if s.undo.len() > HISTORY {
+                s.undo.remove(0);
+            }
         }
         s.redo.clear();
         s.dirty = true;
         self.changed();
+        true
     }
 
     pub fn undo(&mut self) {
@@ -230,6 +253,7 @@ impl App {
     }
 
     fn step(&mut self, back: bool) {
+        self.group = None;
         let s = &mut self.state;
         let (from, to) = if back {
             (&mut s.undo, &mut s.redo)
@@ -245,6 +269,7 @@ impl App {
     }
 
     pub fn set_project(&mut self, project: Project, path: Option<PathBuf>) {
+        self.group = None;
         let s = &mut self.state;
         s.stamp = path.as_deref().map_or(0, stamp_of);
         s.project = project;
@@ -489,7 +514,7 @@ impl App {
             .show(ui, |ui| match self.page {
                 Page::Architecture => pages::canvas::page(self, ui),
                 Page::Endpoint => pages::endpoint::page(self, ui),
-                Page::Flows => pages::flows::page(self, ui),
+                Page::Mail => pages::mailcanvas::page(self, ui),
                 Page::Tables => pages::tablesview::page(self, ui),
                 Page::Mcp => pages::mcp::page(self, ui),
                 Page::Pods => pages::pods::page(self, ui),
@@ -497,11 +522,14 @@ impl App {
             });
 
         crate::widgets::toast(self, ctx);
-        pages::mailcanvas::show(self, ctx);
         crate::form::show_modals(self, ctx);
 
         for f in std::mem::take(&mut self.pending) {
             f(self);
+        }
+        // Left the Mail page (a tab, a link): what was changed last in the editor is written, then the editor closes.
+        if self.page != Page::Mail && self.mail_editor.is_some() {
+            pages::mailcanvas::close(self);
         }
     }
 }

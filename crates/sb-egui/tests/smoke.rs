@@ -8,7 +8,7 @@ use sb_egui::pages::canvas::{Sel, select};
 const PAGES: [Page; 7] = [
     Page::Architecture,
     Page::Endpoint,
-    Page::Flows,
+    Page::Mail,
     Page::Tables,
     Page::Mcp,
     Page::Pods,
@@ -138,10 +138,11 @@ fn drag_a_node_then_undo_with_the_keyboard() {
     assert_eq!(position(&h), moved, "Ctrl+Shift+Z redoes it");
 }
 
-/// The visual editor of a mail opens on the composed mail of the showcase and draws (the preview paints every kind of
-/// block, including the columns), and an edit of the design reaches the HTML and the text derived from it.
+/// A mail of the mail service opens the Mail page on it, which draws (the preview paints every kind of block, including
+/// the columns); an edit of the design reaches the HTML and the text derived from it, and the editor follows an undo.
+/// Leaving the page closes the editor.
 #[test]
-fn the_mail_editor_opens_draws_and_derives() {
+fn the_mail_page_opens_draws_derives_and_closes() {
     let mut h = harness("showcase");
     let si = h
         .state()
@@ -150,8 +151,12 @@ fn the_mail_editor_opens_draws_and_derives() {
         .iter()
         .position(|s| s.name == "Mailer")
         .unwrap();
+    // The inspector of the mail service lists its mails (no form, no link to another page).
+    select(h.state_mut(), Some(Sel::Service("Mailer".into())));
+    h.run_steps(2);
     sb_egui::pages::mailcanvas::open(h.state_mut(), si, "accounts.registered");
     h.run_steps(3);
+    assert_eq!(h.state().page, Page::Mail);
     assert!(h.state().mail_editor.is_some());
     h.state_mut().edit(|p| {
         let t = &mut p.services[si].templates[0];
@@ -171,4 +176,28 @@ fn the_mail_editor_opens_draws_and_derives() {
             .iter()
             .all(|d| d.severity != sb_model::Severity::Error)
     );
+    // Undone, the editor shows the mail as it was; nothing it held is written back over the undo.
+    h.state_mut().undo();
+    h.run_steps(3);
+    let (html, _) = h.state().project().services[si].templates[0].bodies();
+    assert!(!html.contains("Bonjour {{ name }}</h1>"));
+    h.state_mut().page = Page::Architecture;
+    h.run_steps(2);
+    assert!(h.state().mail_editor.is_none());
+    let (html, _) = h.state().project().services[si].templates[0].bodies();
+    assert!(!html.contains("Bonjour {{ name }}</h1>"));
+}
+
+/// Edits made in the editor in quick succession are one entry of the history.
+#[test]
+fn grouped_edits_are_one_undo() {
+    let mut h = harness("orders");
+    let before = h.state().project().name.clone();
+    for name in ["a", "ab", "abc"] {
+        h.state_mut().edit_grouped("name", |p| p.name = name.into());
+    }
+    assert_eq!(h.state().project().name, "abc");
+    h.state_mut().undo();
+    h.run_steps(1);
+    assert_eq!(h.state().project().name, before);
 }

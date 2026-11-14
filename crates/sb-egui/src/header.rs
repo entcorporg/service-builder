@@ -196,9 +196,9 @@ fn project_name(ui: &mut egui::Ui, current: &str) -> Option<String> {
 
 /// The views, in a dark track with the current one raised.
 fn tabs(app: &mut App, ui: &mut egui::Ui) {
-    // The API page is the architecture, zoomed on a route; the flows list belongs to it too.
+    // The API page is the architecture, zoomed on a route; the mail editor belongs to it too.
     let current = match app.page {
-        Page::Endpoint | Page::Flows => Page::Architecture,
+        Page::Endpoint | Page::Mail => Page::Architecture,
         p => p,
     };
     Frame::new()

@@ -5,11 +5,12 @@
 //! ```
 //!
 //! * `SB_SHOTS`: the folder of the PNGs (default `target/shots`).
-//! * `SB_PAGES`: the pages to render, comma separated, among `architecture,endpoint,flows,tables,mcp,pods,code`
+//! * `SB_PAGES`: the pages to render, comma separated, among `architecture,endpoint,mail,tables,mcp,pods,code`
 //!   (default: all).
 //! * `SB_SAMPLE=showcase`: the complete sample instead of the orders one. `SB_PROJECT=<file>`: a project file.
 //! * `SB_SELECT=<service>`, `<topic.name>` or `msg:<Message>`: selected on the canvas (inspector shown).
 //! * `SB_ROUTE=<Service>/<route>`: the route open on the API page.
+//! * `SB_MAIL=<Service>/<topic>`: the mail open on the Mail page (default: the first mail of the first mail service).
 //! * `SB_PODS_VIEW=journal` or `fichiers`: what the Pods page shows instead of the containers.
 //! * `SB_OPEN_ALL=1`: every card open. `SB_SIZE=1480x920`: the window size.
 
@@ -37,13 +38,13 @@ fn screens() {
         })
         .unwrap_or((1480.0, 920.0));
     let pages = std::env::var("SB_PAGES")
-        .unwrap_or("architecture,endpoint,flows,tables,mcp,pods,code".into());
+        .unwrap_or("architecture,endpoint,mail,tables,mcp,pods,code".into());
 
     for name in pages.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let page = match name {
             "architecture" => Page::Architecture,
             "endpoint" => Page::Endpoint,
-            "flows" => Page::Flows,
+            "mail" => Page::Mail,
             "tables" => Page::Tables,
             "mcp" => Page::Mcp,
             "pods" => Page::Pods,
@@ -80,6 +81,24 @@ fn screens() {
                 }
                 if let Ok(view) = std::env::var("SB_PODS_VIEW") {
                     sb_egui::pages::pods::open_view(&mut app, &view);
+                }
+                if page == Page::Mail {
+                    let p = app.project();
+                    let wanted = std::env::var("SB_MAIL").ok();
+                    let found = p.services.iter().enumerate().find_map(|(si, s)| {
+                        s.consumers
+                            .iter()
+                            .filter(|_| s.kind == sb_model::ServiceKind::Mta)
+                            .find(|c| {
+                                wanted
+                                    .as_deref()
+                                    .is_none_or(|w| w == format!("{}/{}", s.name, c.topic))
+                            })
+                            .map(|c| (si, c.topic.clone()))
+                    });
+                    if let Some((si, topic)) = found {
+                        sb_egui::pages::mailcanvas::open(&mut app, si, &topic);
+                    }
                 }
                 app.page = page;
                 app

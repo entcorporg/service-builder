@@ -1,15 +1,15 @@
-//! The two ready-made services: the mail service (events it mails, and the mails) and the real-time one (five names).
+//! The two ready-made services, in the inspector: the mail service (the list of its mails, each opening the mail editor,
+//! and the sending settings of a mail, shown in the editor) and the real-time one (five names). Everything is edited in
+//! place: no form opens over the window.
 
-use eframe::egui::Ui;
+use eframe::egui::{self, Frame, Margin, RichText, Sense, Stroke, Ui};
 use sb_model::{
     Consumer, DedupFallback, FieldType, MailBlock, MailRule, MailTemplate, Project, RealtimeConfig,
 };
 
-use super::common::{empty, list_card};
+use super::common::{choice, commit_entry, empty, field, icon_btn, section, separator};
 use crate::app::App;
-use crate::fonts::Weight;
-use crate::form::{Input, Kind, Value, ask};
-use crate::widgets::add_row;
+use crate::theme::*;
 
 const FALLBACKS: [(DedupFallback, &str); 3] = [
     (
@@ -96,49 +96,6 @@ pub fn consumer_name(topic: &str, taken: &[String]) -> String {
     name
 }
 
-/// The page of a mail service, inside the inspector: the events it mails and their mails.
-pub fn draw_mail(app: &mut App, ui: &mut Ui, p: &Project, si: usize) {
-    let svc = &p.services[si];
-    if add_row(ui, "Ajouter un mail").clicked() {
-        add_mail(app, si);
-    }
-    for (ci, c) in svc.consumers.iter().enumerate() {
-        let template = svc.templates.iter().find(|t| t.event_type == c.topic);
-        let subject = template.map_or("sans sujet", |t| t.subject.as_str());
-        let how = if template.is_some_and(|t| t.design.is_some()) {
-            "composé en blocs"
-        } else {
-            "écrit à la main"
-        };
-        let subject = format!("{subject} · {how}");
-        match list_card(
-            ui,
-            &format!("Mail de {}", c.topic),
-            &subject,
-            0.0,
-            &["Modifier", "Éditeur visuel", "Supprimer"],
-        ) {
-            Some(0) => mail_form(app, si, ci),
-            Some(1) => super::mailcanvas::open(app, si, &c.topic),
-            Some(2) => {
-                let topic = c.topic.clone();
-                app.edit(move |p| {
-                    let svc = &mut p.services[si];
-                    if ci < svc.consumers.len() {
-                        svc.consumers.remove(ci);
-                    }
-                    svc.templates.retain(|t| t.event_type != topic);
-                });
-            }
-            _ => {}
-        }
-    }
-    if svc.consumers.is_empty() {
-        ui.label(eframe::egui::RichText::new("Aucun mail").bold());
-        empty(ui, "Chaque mail répond à un événement : ajoutez-en un.");
-    }
-}
-
 /// A mail for an event: the consumer that reads it, with a first rule and a first template.
 pub fn add_mail_event(p: &mut Project, si: usize, topic: &str) {
     let rule = default_rule(p, topic);
@@ -160,243 +117,327 @@ pub fn add_mail_event(p: &mut Project, si: usize, topic: &str) {
     svc.templates.push(template);
 }
 
-fn add_mail(app: &mut App, si: usize) {
-    let free: Vec<String> = {
-        let p = app.project();
-        let taken: Vec<&str> = p.services[si]
-            .consumers
-            .iter()
-            .map(|c| c.topic.as_str())
-            .collect();
-        p.topics
-            .iter()
-            .filter(|t| !taken.contains(&t.name.as_str()))
-            .map(|t| t.name.clone())
-            .collect()
-    };
-    if free.is_empty() {
-        return app.say("Aucun topic sans mail : créez d'abord un topic.");
-    }
-    let inputs = vec![Input::new(
-        "Événement à envoyer par mail",
-        Kind::Choice {
-            selected: free.first().cloned(),
-            options: free,
-        },
-    )];
-    ask(app, "Nouveau mail", inputs, move |app, values| {
-        let topic = values
-            .into_iter()
-            .next()
-            .map(Value::text)
-            .unwrap_or_default();
-        let ci = app.project().services[si].consumers.len();
-        app.edit(|p| {
-            let rule = default_rule(p, &topic);
-            let template = starter_template(p, &topic, &rule);
-            let taken: Vec<String> = p.services[si]
-                .consumers
-                .iter()
-                .map(|c| c.name.clone())
-                .collect();
-            let svc = &mut p.services[si];
-            svc.consumers.push(Consumer {
-                name: consumer_name(&topic, &taken),
-                topic,
-                group_id: None,
-                idempotent_on: None,
-                mail: Some(rule),
-                steps: vec![],
-            });
-            svc.templates.push(template);
-        });
-        mail_form(app, si, ci);
-        Ok(())
+/// Adds the mail of `topic` to the mail service `si` and opens it in the editor.
+pub fn add_mail(app: &mut App, si: usize, topic: &str) {
+    app.edit(|p| add_mail_event(p, si, topic));
+    super::mailcanvas::open(app, si, topic);
+}
+
+/// Removes the mail of `topic`: the consumer that reads the event and its template.
+pub fn delete_mail(app: &mut App, si: usize, topic: &str) {
+    let topic = topic.to_string();
+    app.edit(move |p| {
+        if let Some(svc) = p.services.get_mut(si) {
+            svc.consumers.retain(|c| c.topic != topic);
+            svc.templates.retain(|t| t.event_type != topic);
+        }
     });
 }
 
-fn mail_form(app: &mut App, si: usize, ci: usize) {
-    let (consumer, template, fields) = {
-        let p = app.project();
-        let Some(c) = p.services[si].consumers.get(ci).cloned() else {
-            return;
-        };
-        let t = p.services[si]
-            .templates
-            .iter()
-            .find(|t| t.event_type == c.topic)
-            .cloned();
-        let f = mail_fields(&p, &c.topic);
-        (c, t, f)
+/// The topics that have no mail yet in service `si`.
+pub fn free_topics(p: &Project, si: usize) -> Vec<String> {
+    let taken: Vec<&str> = p.services[si]
+        .consumers
+        .iter()
+        .map(|c| c.topic.as_str())
+        .collect();
+    p.topics
+        .iter()
+        .filter(|t| !taken.contains(&t.name.as_str()))
+        .map(|t| t.name.clone())
+        .collect()
+}
+
+/// What the list says of a mail: its subject, and how it is written.
+pub fn mail_summary(p: &Project, si: usize, topic: &str) -> String {
+    let template = p.services[si]
+        .templates
+        .iter()
+        .find(|t| t.event_type == topic);
+    let subject = template.map_or("sans sujet", |t| t.subject.as_str());
+    let how = if template.is_some_and(|t| t.design.is_some()) {
+        "blocs"
+    } else {
+        "HTML"
     };
-    let rule = consumer
-        .mail
-        .clone()
-        .unwrap_or_else(|| default_rule(&app.project(), &consumer.topic));
-    let template =
-        template.unwrap_or_else(|| starter_template(&app.project(), &consumer.topic, &rule));
+    format!("{subject} · {how}")
+}
+
+/// The drop-down that adds a mail for a topic that has none (nothing when every topic has its mail).
+pub fn add_mail_choice(app: &mut App, ui: &mut Ui, p: &Project, si: usize) {
+    let free = free_topics(p, si);
+    if free.is_empty() {
+        if p.topics.is_empty() {
+            empty(
+                ui,
+                "Créez d’abord un topic : chaque mail répond à un événement.",
+            );
+        }
+        return;
+    }
+    let prompt = "+ Ajouter un mail…".to_string();
+    let mut options = vec![prompt.clone()];
+    options.extend(free);
+    if let Some(topic) = choice(ui, ("mail-add", si), &options, &prompt)
+        && topic != prompt
+    {
+        add_mail(app, si, &topic);
+    }
+}
+
+/// The section of a mail service in the inspector: one row per mail, which opens the editor on it.
+pub fn mails_section(app: &mut App, ui: &mut Ui, p: &Project, si: usize) {
+    let svc = &p.services[si];
+    section(
+        ui,
+        "Mails",
+        "publish",
+        |_| {},
+        |ui| {
+            if svc.consumers.is_empty() {
+                empty(
+                    ui,
+                    "Aucun mail : chaque mail répond à un événement, ajoutez-en un.",
+                );
+            }
+            for c in &svc.consumers {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    let w = ui.available_width() - 30.0;
+                    let frame = Frame::new()
+                        .fill(PANEL2)
+                        .stroke(Stroke::new(1.0, BORDER))
+                        .corner_radius(8)
+                        .inner_margin(Margin::symmetric(10, 7))
+                        .show(ui, |ui| {
+                            ui.set_width(w - 22.0);
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                ui.add(
+                                    egui::Label::new(RichText::new(&c.topic).font(mono(SM)))
+                                        .truncate(),
+                                );
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(mail_summary(p, si, &c.topic))
+                                            .size(SM)
+                                            .color(MUTED),
+                                    )
+                                    .truncate(),
+                                );
+                            });
+                        });
+                    let hit = ui
+                        .interact(
+                            frame.response.rect,
+                            ui.make_persistent_id(("mail-open", si, &c.topic)),
+                            Sense::click(),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text("Ouvrir l’éditeur du mail");
+                    if hit.hovered() {
+                        ui.painter().rect_stroke(
+                            frame.response.rect,
+                            8,
+                            Stroke::new(1.0, ACCENT),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                    if hit.clicked() {
+                        super::mailcanvas::open(app, si, &c.topic);
+                    }
+                    if icon_btn(
+                        ui,
+                        "trash",
+                        &format!("Supprimer le mail de {}", c.topic),
+                        true,
+                    )
+                    .clicked()
+                    {
+                        delete_mail(app, si, &c.topic);
+                    }
+                });
+            }
+            add_mail_choice(app, ui, p, si);
+        },
+    );
+}
+
+/// The sending settings of the mail of consumer `ci` (address, identity, sender, subject), applied when left.
+pub fn rule_settings(app: &mut App, ui: &mut Ui, p: &Project, si: usize, ci: usize) {
+    let Some(c) = p.services[si].consumers.get(ci) else {
+        return;
+    };
+    let topic = c.topic.clone();
+    let fields = mail_fields(p, &topic);
+    let rule = c.mail.clone().unwrap_or_else(|| default_rule(p, &topic));
+    let subject = p.services[si]
+        .templates
+        .iter()
+        .find(|t| t.event_type == topic)
+        .map(|t| t.subject.clone())
+        .unwrap_or_default();
+    // Every change rewrites the rule as a whole, so that a mail without one gets the default first.
+    let set_rule = |app: &mut App, change: &dyn Fn(&mut MailRule)| {
+        let mut new = rule.clone();
+        change(&mut new);
+        app.edit(|p| {
+            if let Some(c) = p.services[si].consumers.get_mut(ci) {
+                c.mail = Some(new);
+            }
+        });
+    };
+    if fields.is_empty() {
+        empty(
+            ui,
+            "L’événement n’a aucun champ texte : ajoutez-en un au message pour y lire l’adresse.",
+        );
+    }
+    if let Some(v) = field(
+        ui,
+        "Sujet",
+        "Les variables s’écrivent {{ champ }}.",
+        |ui| commit_entry(ui, ("mail-subject", si, &topic), &subject, false, "", false),
+    ) {
+        app.edit(|p| {
+            if let Some(t) = p.services[si]
+                .templates
+                .iter_mut()
+                .find(|t| t.event_type == topic)
+            {
+                t.subject = v;
+            }
+        });
+    }
+    if let Some(v) = field(
+        ui,
+        "Adresse",
+        "Le champ de l’événement qui porte l’adresse du destinataire.",
+        |ui| choice(ui, ("mail-to", si, &topic), &fields, &rule.recipient),
+    ) {
+        set_rule(app, &|r| r.recipient = v.clone());
+    }
+    if let Some(v) = field(
+        ui,
+        "Facultative",
+        "Sans adresse, l’événement est ignoré au lieu d’être une erreur.",
+        |ui| crate::widgets::check(ui, rule.optional_recipient, "L’adresse peut manquer"),
+    ) {
+        set_rule(app, &|r| r.optional_recipient = v);
+    }
+    if let Some(v) = field(
+        ui,
+        "Identité",
+        "Le même événement redélivré par Kafka ne part qu’une fois.",
+        |ui| choice(ui, ("mail-id", si, &topic), &fields, &rule.dedup_field),
+    ) {
+        set_rule(app, &|r| r.dedup_field = v.clone());
+    }
+    let labels: Vec<String> = FALLBACKS.iter().map(|(_, l)| (*l).to_string()).collect();
+    let current = FALLBACKS
+        .iter()
+        .find(|(f, _)| *f == rule.dedup_fallback)
+        .map_or("", |(_, l)| *l);
+    if let Some(v) = field(ui, "Sans identité", "", |ui| {
+        choice(ui, ("mail-fallback", si, &topic), &labels, current)
+    }) && let Some((f, _)) = FALLBACKS.iter().find(|(_, l)| *l == v)
+    {
+        set_rule(app, &|r| r.dedup_fallback = *f);
+    }
     let with_none = |none: &str| {
         let mut v = vec![none.to_string()];
         v.extend(fields.iter().cloned());
         v
     };
-    let labels: Vec<String> = FALLBACKS.iter().map(|(_, l)| (*l).to_string()).collect();
-    let current_label = FALLBACKS
-        .iter()
-        .find(|(f, _)| *f == rule.dedup_fallback)
-        .map(|(_, l)| (*l).to_string());
-    let mut inputs = vec![
-        Input::new("Événement", Kind::Fixed(consumer.topic.clone())),
-        Input::new(
-            "Adresse",
-            Kind::Choice {
-                options: fields.clone(),
-                selected: Some(rule.recipient.clone()),
-            },
-        )
-        .help("Le champ de l'événement qui porte l'adresse du destinataire."),
-        Input::new("Adresse facultative", Kind::Check(rule.optional_recipient))
-            .help("Sans adresse, l'événement est ignoré au lieu d'être une erreur."),
-        Input::new(
-            "Identité",
-            Kind::Choice {
-                options: fields.clone(),
-                selected: Some(rule.dedup_field.clone()),
-            },
-        )
-        .help("Le même événement redélivré par Kafka ne part qu'une fois."),
-        Input::new(
-            "Sans identité",
-            Kind::Choice {
-                options: labels,
-                selected: current_label,
-            },
-        ),
-        Input::new(
+    for (label, hint, none, current, company) in [
+        (
             "Entreprise",
-            Kind::Choice {
-                options: with_none("(aucune)"),
-                selected: rule.sender_company_via.clone().or(Some("(aucune)".into())),
-            },
-        )
-        .help("Un champ avec un nom d'entreprise : l'expéditeur s'affiche « entreprise via <service> »."),
-        Input::new(
-            "Répondre à",
-            Kind::Choice {
-                options: with_none("(expéditeur)"),
-                selected: rule.reply_to.clone().or(Some("(expéditeur)".into())),
-            },
+            "Un champ avec un nom d’entreprise : l’expéditeur s’affiche « entreprise via <service> ».",
+            "(aucune)",
+            &rule.sender_company_via,
+            true,
         ),
-        Input::new("Sujet", Kind::Text(template.subject.clone())),
-    ];
-    // A mail composed as blocks has no HTML to type: its body is edited in the visual editor.
-    if template.design.is_none() {
-        inputs.push(Input::new("HTML", Kind::Multiline(template.html.clone())));
-        inputs.push(Input::new("Texte", Kind::Multiline(template.text.clone())));
-    }
-    let design = template.design.clone();
-    let topic = consumer.topic.clone();
-    ask(app, "Mail", inputs, move |app, values| {
-        let mut v = values.into_iter();
-        let mut next = || v.next();
-        let _event = next();
-        let recipient = next().map(Value::text).unwrap_or_default();
-        let optional_recipient = next().is_some_and(Value::check);
-        let dedup_field = next().map(Value::text).unwrap_or_default();
-        let fallback_label = next().map(Value::text).unwrap_or_default();
-        let company = next().map(Value::text).unwrap_or_default();
-        let reply = next().map(Value::text).unwrap_or_default();
-        let subject = next().map(Value::text).unwrap_or_default();
-        let html = next().map(Value::text).unwrap_or_default();
-        let text = next().map(Value::text).unwrap_or_default();
-        let design = design.clone();
-        if recipient.is_empty() || dedup_field.is_empty() {
-            return Err("L'événement n'a aucun champ texte : ajoutez-en un au message.".into());
+        ("Répondre à", "", "(expéditeur)", &rule.reply_to, false),
+    ] {
+        let selected = current.clone().unwrap_or_else(|| none.to_string());
+        if let Some(v) = field(ui, label, hint, |ui| {
+            choice(
+                ui,
+                ("mail-opt", si, &topic, company),
+                &with_none(none),
+                &selected,
+            )
+        }) {
+            let v = Some(v).filter(|v| v != none);
+            set_rule(app, &|r| {
+                if company {
+                    r.sender_company_via = v.clone();
+                } else {
+                    r.reply_to = v.clone();
+                }
+            });
         }
-        let dedup_fallback = FALLBACKS
-            .iter()
-            .find(|(_, l)| *l == fallback_label)
-            .map_or(DedupFallback::default(), |(f, _)| *f);
-        let topic = topic.clone();
-        app.edit(|p| {
-            let svc = &mut p.services[si];
-            if let Some(c) = svc.consumers.get_mut(ci) {
-                c.mail = Some(MailRule {
-                    recipient,
-                    optional_recipient,
-                    dedup_field,
-                    dedup_fallback,
-                    sender_company_via: Some(company).filter(|c| !c.starts_with('(')),
-                    reply_to: Some(reply).filter(|c| !c.starts_with('(')),
-                });
-            }
-            let new = MailTemplate {
-                event_type: topic.clone(),
-                subject,
-                html,
-                text,
-                design,
-            };
-            match svc.templates.iter_mut().find(|t| t.event_type == topic) {
-                Some(t) => *t = new,
-                None => svc.templates.push(new),
-            }
-        });
-        Ok(())
-    });
+    }
 }
 
-/// The page of a real-time service, inside the inspector.
-pub fn draw_realtime(app: &mut App, ui: &mut Ui, p: &Project, si: usize) {
+/// The section of a real-time service in the inspector: the five names it uses, applied when left.
+pub fn realtime_section(app: &mut App, ui: &mut Ui, p: &Project, si: usize) {
     let cfg = p.services[si].realtime.clone().unwrap_or_default();
-    let summary = format!(
-        "canal {} · chemin {} · cookie {} · émetteur {} · préfixe de session {}",
-        cfg.channel, cfg.path, cfg.access_cookie, cfg.issuer, cfg.session_key_prefix
+    separator(ui);
+    let changed = section(
+        ui,
+        "Flux d’événements (SSE)",
+        "publish",
+        |_| {},
+        |ui| {
+            let rows: [(&str, &str, &str); 5] = [
+                (
+                    "Canal",
+                    "Le canal DragonflyDB (ou Valkey, ou Redis) où l’API publie.",
+                    &cfg.channel,
+                ),
+                (
+                    "Chemin",
+                    "Le chemin du flux SSE sur le port HTTP.",
+                    &cfg.path,
+                ),
+                (
+                    "Cookie",
+                    "Le cookie qui porte le jeton d’accès.",
+                    &cfg.access_cookie,
+                ),
+                (
+                    "Émetteur",
+                    "L’émetteur (iss) attendu du jeton.",
+                    &cfg.issuer,
+                ),
+                (
+                    "Sessions",
+                    "Le préfixe des clés de session.",
+                    &cfg.session_key_prefix,
+                ),
+            ];
+            let mut changed = None;
+            for (i, (label, hint, value)) in rows.into_iter().enumerate() {
+                if let Some(v) = field(ui, label, hint, |ui| {
+                    commit_entry(ui, ("rt", si, i), value, true, "", false)
+                }) {
+                    changed = Some((i, v));
+                }
+            }
+            changed
+        },
     );
-    if list_card(ui, "Flux d'événements (SSE)", &summary, 0.0, &["Modifier"]) == Some(0) {
-        realtime_form(app, si);
-    }
-}
-
-fn realtime_form(app: &mut App, si: usize) {
-    let cfg = app.project().services[si]
-        .realtime
-        .clone()
-        .unwrap_or_default();
-    let inputs = vec![
-        Input::new("Canal", Kind::Text(cfg.channel))
-            .help("Le canal DragonflyDB (ou Valkey, ou Redis) où l'API publie."),
-        Input::new("Chemin du flux", Kind::Text(cfg.path)),
-        Input::new("Cookie du jeton", Kind::Text(cfg.access_cookie)),
-        Input::new("Émetteur du jeton", Kind::Text(cfg.issuer)),
-        Input::new(
-            "Préfixe des clés de session",
-            Kind::Text(cfg.session_key_prefix),
-        ),
-    ];
-    ask(app, "Service temps réel", inputs, move |app, values| {
-        let mut v = values.into_iter().map(Value::text);
-        let mut next = || v.next().unwrap_or_default();
-        let new = RealtimeConfig {
-            channel: next(),
-            path: next(),
-            access_cookie: next(),
-            issuer: next(),
-            session_key_prefix: next(),
+    if let Some((i, v)) = changed {
+        let mut new: RealtimeConfig = cfg;
+        let slot = match i {
+            0 => &mut new.channel,
+            1 => &mut new.path,
+            2 => &mut new.access_cookie,
+            3 => &mut new.issuer,
+            _ => &mut new.session_key_prefix,
         };
-        if [
-            &new.channel,
-            &new.path,
-            &new.access_cookie,
-            &new.issuer,
-            &new.session_key_prefix,
-        ]
-        .iter()
-        .any(|s| s.is_empty())
-        {
-            return Err("Aucun de ces champs ne peut être vide.".into());
-        }
+        *slot = v;
         app.edit(|p| p.services[si].realtime = Some(new));
-        Ok(())
-    });
+    }
 }

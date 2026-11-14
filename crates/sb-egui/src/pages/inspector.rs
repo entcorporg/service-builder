@@ -1,7 +1,7 @@
 //! The right column of the Architecture page: the project, a service or a topic, edited in place.
 //!
-//! Every field applies when it is left (Enter or focus out), as in the web version. The logic of the handlers
-//! (the steps) is edited on the Flows page, which the "Logique" buttons open.
+//! Every field applies when it is left (Enter or focus out), as in the web version. The logic of the handlers (the steps)
+//! is edited in place, in their cards; a route opens the API page, a mail the mail editor.
 
 use std::collections::HashSet;
 
@@ -17,9 +17,9 @@ use super::common::{
     add_message, card, choice, commit_entry, danger_button, empty, field, icon_btn, link, number,
     section, separator, unique,
 };
-use super::editors::{delete_service, delete_topic, service_form};
+use super::editors::{delete_service, delete_topic};
 use super::steps::{Flow, Loc};
-use crate::app::{App, Page};
+use crate::app::App;
 use crate::fonts::Weight;
 use crate::theme::*;
 
@@ -59,12 +59,6 @@ fn every_label(secs: u32) -> String {
         format!("{} min", secs / 60)
     } else {
         format!("{secs} s")
-    }
-}
-
-fn open_logic(app: &mut App, ui: &mut Ui) {
-    if link(ui, "Modifier la logique…").clicked() {
-        app.page = Page::Flows;
     }
 }
 
@@ -213,7 +207,11 @@ fn service(app: &mut App, ui: &mut Ui, name: &str) {
                 && let Some(v) = field(
                     ui,
                     "Port HTTP",
-                    "Port de l’API HTTP (les routes ci-dessous)",
+                    if svc.kind == ServiceKind::Standard {
+                        "Port de l’API HTTP (les routes ci-dessous)"
+                    } else {
+                        "Santé, métriques et, pour le temps réel, le flux"
+                    },
                     |ui| {
                         number(
                             ui,
@@ -234,34 +232,17 @@ fn service(app: &mut App, ui: &mut Ui, name: &str) {
         },
     );
 
-    // A ready-made service has no handlers to draw: its settings are in the form and on the Flows page.
+    // A ready-made service has no handlers to draw: the mail service lists its mails (each opens the mail editor), the
+    // real-time one shows its five names.
+    match svc.kind {
+        ServiceKind::Mta => {
+            separator(ui);
+            super::mail::mails_section(app, ui, &project, si);
+        }
+        ServiceKind::Realtime => super::mail::realtime_section(app, ui, &project, si),
+        ServiceKind::Standard => {}
+    }
     if svc.kind != ServiceKind::Standard {
-        separator(ui);
-        let mta = svc.kind == ServiceKind::Mta;
-        section(
-            ui,
-            if mta {
-                "Service mail"
-            } else {
-                "Service temps réel"
-            },
-            "publish",
-            |_| {},
-            |ui| {
-                empty(
-                    ui,
-                    if mta {
-                        "Service prêt à l’emploi : file d’attente, envoi SMTP, DKIM. Les événements à mailer et leurs modèles se règlent sur la page Flows."
-                    } else {
-                        "Service prêt à l’emploi : diffuse les événements aux navigateurs en SSE. Son réglage se fait sur la page Flows."
-                    },
-                );
-                if link(ui, "Modifier le service…").clicked() {
-                    service_form(app, Some(si));
-                }
-                open_logic(app, ui);
-            },
-        );
         delete_service_button(app, ui, si);
         return;
     }

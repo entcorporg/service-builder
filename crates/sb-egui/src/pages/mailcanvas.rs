@@ -1,8 +1,12 @@
-//! The visual editor of a mail ("canvas"): the blocks on the left, a preview in the middle, the properties of the selected
-//! block and the settings of the mail on the right. Nothing is typed as HTML: the HTML and the text are derived from the
-//! blocks (`sb_model::maildesign`) and only shown.
+//! The Mail page, opened from a mail of a mail service in the inspector: the mails of the service on the left, the
+//! blocks and a preview of the mail open in the middle, the properties of the selected block, the settings of the mail
+//! and its sending rule (address, identity, sender) on the right. Nothing is typed as HTML: the HTML and the text are
+//! derived from the blocks (`sb_model::maildesign`) and only shown. A mail written by hand shows its HTML and its text
+//! instead, until it is composed with blocks.
 //!
-//! The editor works on a copy of the design; "Enregistrer" writes it to the project in one undoable change.
+//! The editor works on a copy of the design, written to the project as it changes (once the mouse is released, so that
+//! a colour being dragged is not analysed at every frame), and when the page is left. The changes made within two
+//! seconds of each other are one entry of the history.
 //!
 //! The preview is drawn with egui, not by a mail client: it follows the structure, the colours, the alignment, the
 //! relative sizes and the width of the mail, with the variables shown as `‹name›`. It does not load images (a grey box
@@ -10,13 +14,17 @@
 //! "Ouvrir dans le navigateur" button writes the derived HTML to a file and opens it, which is the nearest to a mail client
 //! the desktop has.
 
-use eframe::egui::{self, Align, Color32, CornerRadius, Layout, RichText, Ui};
-use sb_model::Project;
+use eframe::egui::{
+    self, Align, Color32, CornerRadius, Frame, Layout, Margin, RichText, Sense, Stroke, Ui,
+};
 use sb_model::maildesign::{
     self, MailAlign, MailBlock, MailColumn, MailDesign, MailFont, MailIssue, parse_color,
 };
+use sb_model::{Project, ServiceKind};
 
-use crate::app::App;
+use super::canvas::{Sel, select};
+use super::common::{empty, icon_btn, link, section, separator};
+use crate::app::{App, Page};
 use crate::theme::*;
 use crate::widgets::{faint, muted};
 
@@ -27,57 +35,38 @@ enum Tab {
     Text,
 }
 
-/// The editor open on one mail. `path` addresses the selected block: `[i]`, or `[i, column, k]` inside columns.
+/// The mail open on the Mail page. `path` addresses the selected block: `[i]`, or `[i, column, k]` inside columns.
 pub struct MailEditor {
     si: usize,
     topic: String,
-    design: MailDesign,
-    saved: MailDesign,
-    fields: Vec<String>,
+    /// The working copy of the design; `None` for a mail written by hand.
+    design: Option<MailDesign>,
+    /// The design as the project has it, when it was last read or written.
+    synced: Option<MailDesign>,
     path: Option<Vec<usize>>,
     tab: Tab,
 }
 
-/// Opens the editor on the mail of `topic` in service `si`. A mail written by hand becomes a design first: the author is
-/// asked, since its HTML and text are replaced by what the blocks derive.
+/// Opens the Mail page on the mail of `topic` in service `si` (the mail open before is written first).
 pub fn open(app: &mut App, si: usize, topic: &str) {
-    let p = app.project();
-    let Some(t) = p.services[si]
-        .templates
-        .iter()
-        .find(|t| t.event_type == topic)
-    else {
-        return;
-    };
-    let topic = topic.to_string();
-    if t.design.is_some() {
-        return start(app, si, &topic);
+    close(app);
+    let design = template_design(&app.project(), si, topic);
+    app.mail_editor = Some(MailEditor {
+        si,
+        topic: topic.into(),
+        synced: design.clone(),
+        design,
+        path: None,
+        tab: Tab::Preview,
+    });
+    app.page = Page::Mail;
+}
+
+/// Writes what the editor changed last, and closes it.
+pub fn close(app: &mut App) {
+    if let Some(mut ed) = app.mail_editor.take() {
+        flush(app, &mut ed);
     }
-    app.confirm(
-        "Composer ce mail avec des blocs ?",
-        "Le HTML et le texte écrits à la main seront remplacés par ceux que dérivent les blocs. Annuler (Ctrl+Z) les rend.",
-        vec![
-            ("Annuler".into(), false, None),
-            (
-                "Composer avec des blocs".into(),
-                true,
-                Some(Box::new(move |app: &mut App| {
-                    app.edit(|p| {
-                        if let Some(t) = p.services[si]
-                            .templates
-                            .iter_mut()
-                            .find(|t| t.event_type == topic)
-                        {
-                            t.design = Some(starter_design(&t.subject));
-                            t.html.clear();
-                            t.text.clear();
-                        }
-                    });
-                    start(app, si, &topic);
-                })),
-            ),
-        ],
-    );
 }
 
 /// A first design: a heading from the subject and an empty paragraph.
@@ -91,25 +80,14 @@ pub fn starter_design(subject: &str) -> MailDesign {
     }
 }
 
-fn start(app: &mut App, si: usize, topic: &str) {
-    let p = app.project();
-    let Some(design) = p.services[si]
+fn template_design(p: &Project, si: usize, topic: &str) -> Option<MailDesign> {
+    p.services
+        .get(si)?
         .templates
         .iter()
-        .find(|t| t.event_type == topic)
-        .and_then(|t| t.design.clone())
-    else {
-        return;
-    };
-    app.mail_editor = Some(MailEditor {
-        si,
-        topic: topic.into(),
-        saved: design.clone(),
-        design,
-        fields: event_fields(&p, topic),
-        path: None,
-        tab: Tab::Preview,
-    });
+        .find(|t| t.event_type == topic)?
+        .design
+        .clone()
 }
 
 /// The variables a mail can use: the fields of its event that have a text form.
@@ -126,174 +104,416 @@ pub fn event_fields(p: &Project, topic: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Draws the editor when one is open (called once per frame).
-pub fn show(app: &mut App, ctx: &egui::Context) {
-    let Some(mut ed) = app.mail_editor.take() else {
+/// The project changed under the editor (undo, a reload, a conversion): the copy follows it.
+fn sync(app: &App, ed: &mut MailEditor) {
+    let now = template_design(&app.project(), ed.si, &ed.topic);
+    if now != ed.synced {
+        ed.design = now.clone();
+        ed.synced = now;
+        ed.path = None;
+    }
+}
+
+/// Writes the copy to the project when it differs.
+fn flush(app: &mut App, ed: &mut MailEditor) {
+    if ed.design == ed.synced || ed.design.is_none() {
         return;
-    };
-    let mut open = true;
-    let mut action = None;
-    egui::Window::new(format!("Éditeur visuel du mail — {}", ed.topic))
-        .open(&mut open)
-        .collapsible(false)
-        .default_size([1180.0, 720.0])
-        .show(ctx, |ui| action = body(ui, &mut ed));
-    match action {
-        Some(Action::Save) => {
-            save(app, &mut ed);
-        }
-        Some(Action::SaveAndClose) => {
-            save(app, &mut ed);
-            open = false;
-        }
-        Some(Action::Handwritten) => {
-            to_handwritten(app, &ed);
-            return;
-        }
-        None => {}
     }
-    if !open && ed.design != ed.saved {
-        // Closing with the cross keeps nothing: say so rather than lose the work silently.
-        app.say("Modifications du mail abandonnées");
-    }
-    if open {
-        app.mail_editor = Some(ed);
-    }
-}
-
-enum Action {
-    Save,
-    SaveAndClose,
-    Handwritten,
-}
-
-fn save(app: &mut App, ed: &mut MailEditor) {
     let (si, topic, design) = (ed.si, ed.topic.clone(), ed.design.clone());
-    app.edit(|p| {
-        if let Some(t) = p.services[si]
-            .templates
-            .iter_mut()
-            .find(|t| t.event_type == topic)
+    app.edit_grouped(&format!("mail/{si}/{topic}"), |p| {
+        if let Some(t) = p
+            .services
+            .get_mut(si)
+            .and_then(|s| s.templates.iter_mut().find(|t| t.event_type == topic))
         {
-            t.design = Some(design);
+            t.design = design;
         }
     });
-    ed.saved = ed.design.clone();
-    app.say("Mail enregistré");
+    ed.synced = ed.design.clone();
+}
+
+/// What the page asks once drawn (it needs the editor back in the app).
+enum Action {
+    Open(String),
+    Add(String),
+    Delete,
+    Handwritten,
+    Compose,
+    Back,
+}
+
+/// The Mail page.
+pub fn page(app: &mut App, ui: &mut Ui) {
+    let Some(mut ed) = app.mail_editor.take() else {
+        return missing(app, ui, "Aucun mail ouvert.");
+    };
+    sync(app, &mut ed);
+    let p = app.project();
+    let si = ed.si;
+    let found = p
+        .services
+        .get(si)
+        .filter(|s| s.kind == ServiceKind::Mta)
+        .and_then(|s| s.consumers.iter().position(|c| c.topic == ed.topic))
+        .filter(|_| {
+            p.services[si]
+                .templates
+                .iter()
+                .any(|t| t.event_type == ed.topic)
+        });
+    let Some(ci) = found else {
+        // Deleted (or undone): back to the service, or to the canvas.
+        app.mail_editor = None;
+        return missing(app, ui, "Ce mail n’existe plus.");
+    };
+    let mut action = None;
+
+    egui::Panel::left("mail-list")
+        .exact_size(250.0)
+        .resizable(false)
+        .frame(
+            Frame::new()
+                .fill(PANEL)
+                .inner_margin(Margin::symmetric(12, 14)),
+        )
+        .show(ui, |ui| mails_list(ui, &p, &ed, &mut action));
+
+    let fields = event_fields(&p, &ed.topic);
+    let issues = ed.design.as_ref().map_or_else(Vec::new, |d| {
+        maildesign::check(
+            d,
+            &fields.iter().map(String::as_str).collect::<Vec<_>>(),
+            "",
+        )
+    });
+    egui::Panel::top("mail-head")
+        .frame(
+            Frame::new()
+                .fill(PANEL)
+                .inner_margin(Margin::symmetric(14, 10)),
+        )
+        .show_separator_line(true)
+        .show(ui, |ui| header(ui, &p, &ed, &issues, &mut action));
+
+    egui::Panel::right("mail-props")
+        .exact_size(360.0)
+        .resizable(false)
+        .frame(
+            Frame::new()
+                .fill(PANEL)
+                .inner_margin(Margin::symmetric(16, 8)),
+        )
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("mail-props")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.set_max_width(ui.available_width() - 12.0);
+                    if let Some(design) = ed.design.as_mut() {
+                        properties(ui, design, &mut ed.path, &fields);
+                        problems(ui, &issues);
+                        separator(ui);
+                    }
+                    section(
+                        ui,
+                        "Envoi",
+                        "publish",
+                        |_| {},
+                        |ui| super::mail::rule_settings(app, ui, &p, si, ci),
+                    );
+                });
+        });
+
+    egui::CentralPanel::no_frame()
+        .frame(Frame::new().inner_margin(Margin::same(12)))
+        .show(ui, |ui| match ed.design.as_mut() {
+            Some(design) => composed(ui, design, &mut ed.path, &mut ed.tab),
+            None => handwritten(app, ui, &p, si, &ed.topic),
+        });
+
+    if !ui.input(|i| i.pointer.any_down()) {
+        flush(app, &mut ed);
+    }
+    let (topic, si) = (ed.topic.clone(), ed.si);
+    app.mail_editor = Some(ed);
+    match action {
+        Some(Action::Open(t)) => open(app, si, &t),
+        Some(Action::Add(t)) => super::mail::add_mail(app, si, &t),
+        Some(Action::Delete) => {
+            close(app);
+            super::mail::delete_mail(app, si, &topic);
+            let next = app.project().services[si]
+                .consumers
+                .first()
+                .map(|c| c.topic.clone());
+            match next {
+                Some(t) => open(app, si, &t),
+                None => back_to_service(app, si),
+            }
+        }
+        Some(Action::Handwritten) => {
+            close(app);
+            to_handwritten(app, si, &topic);
+            open(app, si, &topic);
+        }
+        Some(Action::Compose) => {
+            close(app);
+            compose(app, si, &topic);
+            open(app, si, &topic);
+        }
+        Some(Action::Back) => back_to_service(app, si),
+        None => {}
+    }
+}
+
+/// Back on the canvas, the mail service selected (its inspector lists the mails).
+fn back_to_service(app: &mut App, si: usize) {
+    close(app);
+    let name = app.project().services.get(si).map(|s| s.name.clone());
+    select(app, name.map(Sel::Service));
+    app.page = Page::Architecture;
+}
+
+fn missing(app: &mut App, ui: &mut Ui, text: &str) {
+    ui.add_space(24.0);
+    ui.horizontal(|ui| {
+        ui.add_space(24.0);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 10.0;
+            empty(ui, text);
+            if link(ui, "← Retour à l’architecture").clicked() {
+                app.page = Page::Architecture;
+            }
+        });
+    });
+}
+
+/// The left column: the way back to the service, and its mails (the open one raised).
+fn mails_list(ui: &mut Ui, p: &Project, ed: &MailEditor, action: &mut Option<Action>) {
+    let svc = &p.services[ed.si];
+    ui.spacing_mut().item_spacing.y = 8.0;
+    if link(ui, &format!("← {}", svc.name)).clicked() {
+        *action = Some(Action::Back);
+    }
+    ui.add_space(4.0);
+    crate::widgets::section_title(ui, "Mails");
+    ui.add_space(4.0);
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for c in &svc.consumers {
+                let on = c.topic == ed.topic;
+                let r = Frame::new()
+                    .fill(if on { RAISED } else { PANEL2 })
+                    .stroke(Stroke::new(1.0, if on { ACCENT } else { BORDER }))
+                    .corner_radius(8)
+                    .inner_margin(Margin::symmetric(10, 7))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.add(egui::Label::new(RichText::new(&c.topic).font(mono(SM))).truncate());
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(super::mail::mail_summary(p, ed.si, &c.topic))
+                                    .size(SM)
+                                    .color(MUTED),
+                            )
+                            .truncate(),
+                        );
+                    });
+                let hit = ui
+                    .interact(
+                        r.response.rect,
+                        ui.make_persistent_id(("mail-list", &c.topic)),
+                        Sense::click(),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                if hit.hovered() && !on {
+                    ui.painter().rect_stroke(
+                        r.response.rect,
+                        8,
+                        Stroke::new(1.0, alpha(ACCENT, 140)),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                if hit.clicked() && !on {
+                    *action = Some(Action::Open(c.topic.clone()));
+                }
+            }
+            let free = super::mail::free_topics(p, ed.si);
+            if !free.is_empty() {
+                let prompt = "+ Ajouter un mail…".to_string();
+                let mut options = vec![prompt.clone()];
+                options.extend(free);
+                if let Some(t) =
+                    super::common::choice(ui, ("mail-page-add", ed.si), &options, &prompt)
+                    && t != prompt
+                {
+                    *action = Some(Action::Add(t));
+                }
+            }
+        });
+}
+
+/// The bar over the mail: its event and service, its state, and what can be done with it.
+fn header(
+    ui: &mut Ui,
+    p: &Project,
+    ed: &MailEditor,
+    issues: &[MailIssue],
+    action: &mut Option<Action>,
+) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        ui.label(RichText::new(&ed.topic).font(mono(BASE)).strong());
+        ui.label(muted(format!("mail de {}", p.services[ed.si].name)));
+        let errors = issues.iter().filter(|i| i.error).count();
+        if errors > 0 {
+            ui.label(RichText::new(format!("{errors} erreur(s)")).color(ERR));
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if icon_btn(ui, "trash", &format!("Supprimer le mail de {}", ed.topic), true).clicked() {
+                *action = Some(Action::Delete);
+            }
+            if ed.design.is_some() {
+                if ui
+                    .button("Passer à l’écriture à la main")
+                    .on_hover_text("Reprend le HTML et le texte dérivés des blocs comme gabarit écrit à la main.")
+                    .clicked()
+                {
+                    *action = Some(Action::Handwritten);
+                }
+            } else if ui
+                .button("Composer avec des blocs")
+                .on_hover_text("Le HTML et le texte écrits à la main sont remplacés par ceux que dérivent les blocs. Ctrl+Z les rend.")
+                .clicked()
+            {
+                *action = Some(Action::Compose);
+            }
+        });
+    });
 }
 
 /// Gives the mail back to the hand: the derived HTML and text become the ones of the template, which has no design any more.
-fn to_handwritten(app: &mut App, ed: &MailEditor) {
-    let (si, topic) = (ed.si, ed.topic.clone());
-    let design = ed.design.clone();
+fn to_handwritten(app: &mut App, si: usize, topic: &str) {
     app.edit(|p| {
         if let Some(t) = p.services[si]
             .templates
             .iter_mut()
             .find(|t| t.event_type == topic)
+            && let Some(design) = t.design.take()
         {
             t.html = maildesign::render_html(&design);
             t.text = maildesign::render_text(&design);
-            t.design = None;
         }
     });
     app.say("Le mail est maintenant écrit à la main (HTML et texte repris des blocs)");
 }
 
-fn body(ui: &mut Ui, ed: &mut MailEditor) -> Option<Action> {
-    let mut action = None;
-    let issues = maildesign::check(
-        &ed.design,
-        &ed.fields.iter().map(String::as_str).collect::<Vec<_>>(),
-        "",
-    );
-    ui.horizontal(|ui| {
-        let dirty = ed.design != ed.saved;
-        if ui
-            .add_enabled(dirty, egui::Button::new("Enregistrer"))
-            .clicked()
+/// Composes a mail written by hand with blocks: its HTML and its text are replaced (Ctrl+Z gives them back).
+fn compose(app: &mut App, si: usize, topic: &str) {
+    app.edit(|p| {
+        if let Some(t) = p.services[si]
+            .templates
+            .iter_mut()
+            .find(|t| t.event_type == topic)
         {
-            action = Some(Action::Save);
-        }
-        if ui.button("Enregistrer et fermer").clicked() {
-            action = Some(Action::SaveAndClose);
-        }
-        if ui
-            .button("Passer à l'écriture à la main")
-            .on_hover_text(
-                "Reprend le HTML et le texte dérivés des blocs comme gabarit écrit à la main.",
-            )
-            .clicked()
-        {
-            action = Some(Action::Handwritten);
-        }
-        if dirty {
-            ui.label(RichText::new("modifié").color(WARN));
-        }
-        let errors = issues.iter().filter(|i| i.error).count();
-        if errors > 0 {
-            ui.label(RichText::new(format!("{errors} erreur(s)")).color(ERR));
+            t.design = Some(starter_design(&t.subject));
+            t.html.clear();
+            t.text.clear();
         }
     });
-    ui.separator();
+    app.say("Le mail est composé avec des blocs : Ctrl+Z rend le HTML écrit à la main");
+}
+
+/// The middle of a mail composed with blocks: the blocks, and the preview or what they derive.
+fn composed(ui: &mut Ui, design: &mut MailDesign, path: &mut Option<Vec<usize>>, tab: &mut Tab) {
     egui_extras::StripBuilder::new(ui)
-        .size(egui_extras::Size::exact(270.0))
+        .size(egui_extras::Size::exact(260.0))
         .size(egui_extras::Size::remainder().at_least(320.0))
-        .size(egui_extras::Size::exact(320.0))
         .horizontal(|mut strip| {
             strip.cell(|ui| {
                 ui.label(RichText::new("Blocs").strong());
                 egui::ScrollArea::vertical()
                     .id_salt("mail-blocks")
-                    .show(ui, |ui| {
-                        let mut path = ed.path.clone();
-                        blocks_list(ui, &mut ed.design.blocks, &[], &mut path, false);
-                        ed.path = path;
-                    });
+                    .show(ui, |ui| blocks_list(ui, &mut design.blocks, &[], path, false));
             });
             strip.cell(|ui| {
                 ui.horizontal(|ui| {
-                    for (tab, label) in [
+                    for (t, label) in [
                         (Tab::Preview, "Aperçu"),
                         (Tab::Html, "HTML dérivé"),
                         (Tab::Text, "Texte dérivé"),
                     ] {
-                        ui.selectable_value(&mut ed.tab, tab, label);
+                        ui.selectable_value(tab, t, label);
                     }
                     if ui
                         .button("Ouvrir dans le navigateur")
                         .on_hover_text("Écrit le HTML dérivé dans un fichier (variables remplacées par [nom]) et l'ouvre.")
                         .clicked()
                     {
-                        open_in_browser(ui, &ed.design);
+                        open_in_browser(ui, design);
                     }
                 });
-                egui::ScrollArea::both().id_salt("mail-center").show(ui, |ui| match ed.tab {
-                    Tab::Preview => preview(ui, &ed.design),
+                egui::ScrollArea::both().id_salt("mail-center").show(ui, |ui| match tab {
+                    Tab::Preview => preview(ui, design),
                     Tab::Html => {
                         ui.add(
-                            egui::TextEdit::multiline(&mut maildesign::render_html(&ed.design).as_str())
+                            egui::TextEdit::multiline(&mut maildesign::render_html(design).as_str())
                                 .font(mono(SM))
                                 .desired_width(f32::INFINITY),
                         );
                     }
                     Tab::Text => {
                         ui.add(
-                            egui::TextEdit::multiline(&mut maildesign::render_text(&ed.design).as_str())
+                            egui::TextEdit::multiline(&mut maildesign::render_text(design).as_str())
                                 .font(mono(SM))
                                 .desired_width(f32::INFINITY),
                         );
                     }
                 });
             });
-            strip.cell(|ui| {
-                egui::ScrollArea::vertical().id_salt("mail-props").show(ui, |ui| {
-                    properties(ui, ed);
-                    problems(ui, &issues);
-                });
-            });
         });
-    action
+}
+
+/// The middle of a mail written by hand: its HTML and its text, applied when left.
+fn handwritten(app: &mut App, ui: &mut Ui, p: &Project, si: usize, topic: &str) {
+    let Some(t) = p.services[si]
+        .templates
+        .iter()
+        .find(|t| t.event_type == topic)
+    else {
+        return;
+    };
+    egui::ScrollArea::vertical()
+        .id_salt("mail-hand")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 8.0;
+            empty(
+                ui,
+                "Ce mail est écrit à la main. « Composer avec des blocs » le remplace par un mail en blocs, sans HTML à écrire.",
+            );
+            for (label, value, html) in [("HTML", &t.html, true), ("Texte", &t.text, false)] {
+                ui.label(RichText::new(label).strong());
+                if let Some(v) = crate::widgets::text_area(ui, ("mail-hand", si, topic, html), value, 0.0) {
+                    let topic = topic.to_string();
+                    app.edit(move |p| {
+                        if let Some(t) = p.services[si]
+                            .templates
+                            .iter_mut()
+                            .find(|t| t.event_type == topic)
+                        {
+                            if html {
+                                t.html = v;
+                            } else {
+                                t.text = v;
+                            }
+                        }
+                    });
+                }
+            }
+        });
 }
 
 fn mono(size: f32) -> egui::FontId {
@@ -386,11 +606,7 @@ fn blocks_list(
         let mut here = prefix.to_vec();
         here.push(i);
         ui.horizontal(|ui| {
-            let text = format!("{} {}", kind_name(b), summary(b));
-            let is = selected.as_ref() == Some(&here);
-            if ui.selectable_label(is, text).clicked() {
-                *selected = Some(here.clone());
-            }
+            // The buttons first, on the right: a long summary is cut before them.
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.small_button("✕").on_hover_text("Supprimer").clicked() {
                     remove = Some(i);
@@ -409,6 +625,16 @@ fn blocks_list(
                 {
                     mv = Some((i, -1));
                 }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    let text = format!("{} {}", kind_name(b), summary(b));
+                    let is = selected.as_ref() == Some(&here);
+                    if ui
+                        .add(egui::Button::selectable(is, text).truncate())
+                        .clicked()
+                    {
+                        *selected = Some(here.clone());
+                    }
+                });
             });
         });
         if let MailBlock::Columns { columns } = b {
@@ -431,7 +657,7 @@ fn blocks_list(
         blocks.remove(i);
         *selected = None;
     }
-    ui.menu_button("＋ Ajouter un bloc", |ui| {
+    ui.menu_button("+ Ajouter un bloc", |ui| {
         for (k, name) in KINDS.iter().enumerate() {
             // Columns do not nest: the model refuses it, so the editor does not offer it.
             if nested && k == 6 {
@@ -465,23 +691,24 @@ fn block_at<'a>(blocks: &'a mut [MailBlock], path: &[usize]) -> Option<&'a mut M
 
 // ---- the properties -----------------------------------------------------------------------
 
-fn properties(ui: &mut Ui, ed: &mut MailEditor) {
+fn properties(
+    ui: &mut Ui,
+    design: &mut MailDesign,
+    path: &mut Option<Vec<usize>>,
+    fields: &[String],
+) {
+    ui.add_space(6.0);
     ui.label(RichText::new("Bloc sélectionné").strong());
-    let fields = ed.fields.clone();
-    match ed
-        .path
-        .clone()
-        .and_then(|p| block_at(&mut ed.design.blocks, &p))
-    {
+    match path.clone().and_then(|p| block_at(&mut design.blocks, &p)) {
         None => {
             ui.label(muted("Choisissez un bloc dans la liste."));
         }
-        Some(b) => block_props(ui, b, &fields),
+        Some(b) => block_props(ui, b, fields),
     }
     ui.add_space(12.0);
     egui::CollapsingHeader::new(RichText::new("Réglages du mail").strong())
         .default_open(true)
-        .show(ui, |ui| settings(ui, &mut ed.design, &fields));
+        .show(ui, |ui| settings(ui, design, fields));
 }
 
 fn block_props(ui: &mut Ui, b: &mut MailBlock, fields: &[String]) {
