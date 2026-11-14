@@ -307,6 +307,7 @@ pub fn orders() -> Project {
                         descending: false,
                         limit: None,
                         missing: None,
+                        joins: vec![], then_by: vec![], limit_from: None, offset: None, cursor: vec![], total_bind: None, more_bind: None, last_bind: None,
                     },
                     Step::Publish {
                         id: "h2".into(),
@@ -353,12 +354,14 @@ pub fn orders() -> Project {
                             column: "order_id".into(),
                             op: CmpOp::Eq,
                             value: path("input.order_id"),
+                            test: Default::default(),
                         }],
                         values: vec![],
                         order_by: None,
                         descending: false,
                         limit: None,
                         missing: None,
+                        joins: vec![], then_by: vec![], limit_from: None, offset: None, cursor: vec![], total_bind: None, more_bind: None, last_bind: None,
                     },
                     Step::Respond {
                         id: "h4".into(),
@@ -552,21 +555,25 @@ pub fn add_single_use_token(p: &mut Project) {
                         column: "token_hash".into(),
                         op: CmpOp::Eq,
                         value: path("token_hash"),
+                        test: Default::default(),
                     },
                     SqlCondition {
                         column: "kind".into(),
                         op: CmpOp::Eq,
                         value: lit("email"),
+                        test: Default::default(),
                     },
                     SqlCondition {
                         column: "used".into(),
                         op: CmpOp::Eq,
                         value: lit(false),
+                        test: Default::default(),
                     },
                     SqlCondition {
                         column: "expires_at".into(),
                         op: CmpOp::Gt,
                         value: Expr::Now,
+                        test: Default::default(),
                     },
                 ],
                 values: vec![set("used", lit(true))],
@@ -577,6 +584,7 @@ pub fn add_single_use_token(p: &mut Project) {
                     status: 400,
                     message: "invalid or expired token".into(),
                 }),
+joins: vec![], then_by: vec![], limit_from: None, offset: None, cursor: vec![], total_bind: None, more_bind: None, last_bind: None,
             },
             Step::Respond {
                 id: "t3".into(),
@@ -612,12 +620,14 @@ pub fn add_cleaner_job(p: &mut Project) {
                     column: "expires_at".into(),
                     op: CmpOp::Le,
                     value: Expr::Now,
+                    test: Default::default(),
                 }],
                 values: vec![],
                 order_by: None,
                 descending: false,
                 limit: None,
                 missing: None,
+                joins: vec![], then_by: vec![], limit_from: None, offset: None, cursor: vec![], total_bind: None, more_bind: None, last_bind: None,
             },
         ],
     });
@@ -1137,6 +1147,7 @@ pub fn add_totp(p: &mut Project) {
                 column: "account".into(),
                 op: CmpOp::Eq,
                 value: path("input.account"),
+                test: Default::default(),
             }]
         } else {
             vec![]
@@ -1146,6 +1157,7 @@ pub fn add_totp(p: &mut Project) {
         descending: false,
         limit: None,
         missing,
+joins: vec![], then_by: vec![], limit_from: None, offset: None, cursor: vec![], total_bind: None, more_bind: None, last_bind: None,
     };
     let ack = |id: &str| Step::Respond {
         id: id.into(),
@@ -1733,12 +1745,14 @@ pub fn add_notes(p: &mut Project) {
             status: 404,
             message: "no such note".into(),
         }),
+joins: vec![], then_by: vec![], limit_from: None, offset: None, cursor: vec![], total_bind: None, more_bind: None, last_bind: None,
     };
     let by_id = || {
         vec![SqlCondition {
             column: "note_id".into(),
             op: CmpOp::Eq,
             value: path("input.note_id"),
+            test: Default::default(),
         }]
     };
     let route = |name: &str, method, route: &str, request: &str, response: &str, steps| Route {

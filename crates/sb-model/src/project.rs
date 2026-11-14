@@ -911,6 +911,36 @@ pub enum Step {
         /// One row expected and none found: the answer, instead of the 404 of the table.
         #[serde(default)]
         missing: Option<SqlMissing>,
+        /// Select: other tables of the service joined to `table`. Their columns are then written `table.column` (in
+        /// `columns`, `where`, `orderBy`, `thenBy`), and the rule of each table (tenant, soft delete) applies to it too.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        joins: Vec<SqlJoin>,
+        /// Select: more sort keys, after `orderBy`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        then_by: Vec<SqlSort>,
+        /// Select, a list: the page size asked by the flow (a request field). It is held between 1 and `limit`, which is
+        /// then the largest page and the size when the flow gives none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit_from: Option<Expr>,
+        /// Select, a list: how many rows to skip (a request field), at most 1 000 000. Prefer `cursor` on big tables: an
+        /// offset makes the database read and drop every skipped row.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<Expr>,
+        /// Select, a list: keyset pagination. One value per sort key (`orderBy` then `thenBy`), those of the last row of
+        /// the previous page; only the rows after it are read. An absent (optional) value reads the first page. The sort
+        /// columns must not be nullable, and the last one should make the order total (a unique column).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        cursor: Vec<Expr>,
+        /// Select, a list: a variable (int64) receiving the number of rows that match, whatever the page.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total_bind: Option<String>,
+        /// Select, a list: a variable (bool) that says whether a row follows this page.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        more_bind: Option<String>,
+        /// Select, a list converted `into` a schema: a variable receiving the last row of the page (empty if none), to
+        /// read the values of the next cursor.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_bind: Option<String>,
     },
     /// Hashes a password with argon2id, off the async runtime (it is slow on purpose). The PHC string
     /// (`$argon2id$...`) is what gets stored.
@@ -1295,12 +1325,173 @@ pub enum SqlOp {
 /// `column <op> value`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SqlCondition {
+    /// A column of the table, or `table.column` for a joined one.
     pub column: String,
+    #[serde(default = "default_cmp")]
     pub op: CmpOp,
+    #[serde(default = "default_null")]
     pub value: Expr,
+    /// What is tested: a comparison with `op` (the default), membership in a list, a text that contains or starts with the
+    /// value, or null. The last two ignore `value`.
+    #[serde(default, skip_serializing_if = "SqlTest::is_compare")]
+    pub test: SqlTest,
+}
+
+fn default_cmp() -> CmpOp {
+    CmpOp::Eq
+}
+
+fn default_null() -> Expr {
+    Expr::Literal {
+        value: Value::Null,
+    }
+}
+
+/// What a `where` condition tests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum SqlTest {
+    /// `column <op> value`.
+    #[default]
+    Compare,
+    /// The column is one of a list of values (`= ANY(list)`).
+    In,
+    /// A text column contains the value, ignoring case. `%` and `_` in the value are plain characters.
+    Contains,
+    /// A text column starts with the value, ignoring case. `%` and `_` in the value are plain characters.
+    StartsWith,
+    /// The column is null.
+    IsNull,
+    /// The column is not null.
+    IsNotNull,
+}
+
+impl SqlTest {
+    pub fn is_compare(&self) -> bool {
+        *self == SqlTest::Compare
+    }
+
+    /// Whether the condition reads a value.
+    pub fn has_value(self) -> bool {
+        !matches!(self, SqlTest::IsNull | SqlTest::IsNotNull)
+    }
+}
+
+/// How a joined table is matched.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum SqlJoinKind {
+    /// Only the rows that have a match.
+    #[default]
+    Inner,
+    /// Every row of what comes before, with null columns when nothing matches.
+    Left,
+}
+
+/// A table joined to the one of the step.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlJoin {
+    #[serde(default)]
+    pub kind: SqlJoinKind,
+    /// A table of the service, not already in the query.
+    pub table: String,
+    /// The pairs of columns that match, all together (`ON a = b AND c = d`). A foreign key declared on one of the two
+    /// tables gives them.
+    pub on: Vec<SqlJoinOn>,
+}
+
+/// `column = joined.refColumn`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlJoinOn {
+    /// A column of a table that comes before: `column` for the table of the step, `table.column` for another.
+    pub column: String,
+    /// A column of the joined table.
+    pub ref_column: String,
+}
+
+/// A sort key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SqlSort {
+    /// A column of the table, or `table.column` for a joined one.
+    pub column: String,
+    #[serde(default)]
+    pub descending: bool,
+}
+
+/// One column a select reads, resolved against the tables of the step.
+#[derive(Debug, Clone)]
+pub struct SqlOutColumn<'a> {
+    /// The name of the field of the row: the column name, or `table_column` for a joined table.
+    pub field: String,
+    pub table: &'a Table,
+    pub column: &'a Column,
+    /// Null is possible: the column says so, or its table is joined with a left join.
+    pub optional: bool,
+}
+
+impl Service {
+    /// The table and column a name of an SQL step stands for: `column` is the table of the step, `table.column` one of
+    /// the tables joined to it. The bool says whether the table is the right side of a left join.
+    pub fn sql_column<'a>(
+        &'a self,
+        base: &str,
+        joins: &[SqlJoin],
+        name: &str,
+    ) -> Option<(&'a Table, &'a Column, bool)> {
+        let (table, column) = match name.split_once('.') {
+            Some((t, c)) => (t, c),
+            None => (base, name),
+        };
+        if table != base && !joins.iter().any(|j| j.table == table) {
+            return None;
+        }
+        let left = table != base
+            && joins
+                .iter()
+                .any(|j| j.table == table && j.kind == SqlJoinKind::Left);
+        let t = self.table(table)?;
+        Some((t, t.column(column)?, left))
+    }
+
+    /// The columns a select reads, in order, with the name of their field. The ones that do not exist are left out (the
+    /// validator reports them).
+    pub fn sql_out_columns<'a>(
+        &'a self,
+        base: &str,
+        joins: &[SqlJoin],
+        columns: &[String],
+    ) -> Vec<SqlOutColumn<'a>> {
+        columns
+            .iter()
+            .filter_map(|n| {
+                let (table, column, left) = self.sql_column(base, joins, n)?;
+                Some(SqlOutColumn {
+                    field: if table.name == base {
+                        column.name.clone()
+                    } else {
+                        format!("{}_{}", table.name, column.name)
+                    },
+                    table,
+                    column,
+                    optional: column.nullable || left,
+                })
+            })
+            .collect()
+    }
 }
 
 impl SqlCondition {
+    pub fn new(column: impl Into<String>, op: CmpOp, value: Expr) -> Self {
+        Self {
+            column: column.into(),
+            op,
+            value,
+            test: SqlTest::Compare,
+        }
+    }
+
     pub fn sql_op(&self) -> &'static str {
         match self.op {
             CmpOp::Eq => "=",
@@ -1484,6 +1675,7 @@ impl Project {
                         id,
                         table,
                         columns,
+                        joins,
                         into: None,
                         ..
                     } = s
@@ -1493,16 +1685,15 @@ impl Project {
                     if columns.is_empty() {
                         return;
                     }
-                    let Some(t) = svc.table(table) else { return };
                     out.messages.push(Message {
                         name: sql_row_name(table, id),
                         kind: MessageKind::Row,
-                        fields: columns
+                        fields: svc
+                            .sql_out_columns(table, joins, columns)
                             .iter()
-                            .filter_map(|c| t.column(c))
-                            .map(|c| {
-                                let mut f = Field::new(&c.name, c.ty.field_type());
-                                f.optional = c.nullable;
+                            .map(|o| {
+                                let mut f = Field::new(&o.field, o.column.ty.field_type());
+                                f.optional = o.optional;
                                 f
                             })
                             .collect(),
