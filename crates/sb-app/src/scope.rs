@@ -70,6 +70,16 @@ fn bind(project: &Project, scope: &mut BTreeMap<String, Ty>, step: &Step) {
         }
         return;
     }
+    // An outbound call binds its answer and, apart, its status.
+    if kind == "httpCall" {
+        if let (Some(var), Some(schema)) = (text("bind"), text("response")) {
+            scope.insert(var.into(), message(schema));
+        }
+        if let Some(var) = text("statusBind") {
+            scope.insert(var.into(), scalar("int32"));
+        }
+        return;
+    }
     let Some(var) = text("bind") else { return };
     let ty = match kind {
         "verifyPassword" => scalar("bool"),

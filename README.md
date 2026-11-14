@@ -194,8 +194,9 @@ La CI le fait.
   conditions ; le total d'une page est le seul `COUNT`.
 - La spécification OpenAPI ne décrit pas les statuts qu'un bloc *Code Rust* choisirait lui-même, ni l'authentification
   comme schéma de sécurité (un jeton lu d'un en-tête y est un paramètre).
-- Pas d'appel à une API HTTP externe (Stripe, Twilio…) : seuls les webhooks entrants signés sont modélisés
-  (`verifyHmac`). Un appel sortant s'écrit dans l'étape *Code Rust*.
+- Les appels HTTP sortants (*Appeler une API HTTP*) tournent dans la transaction du flux : un délai (30 s au plus, 60 s avec
+  les réessais) y garde une connexion et les verrous déjà pris ; pas de file d'appels après le commit. Le corps JSON est plat
+  (pas d'objet imbriqué) et la réponse est lue en JSON seulement.
 - Le HTML et le texte des mails se saisissent à la main : pas d'éditeur visuel de gabarits.
 - Les tables se conçoivent dans la vue **Tables** et se lisent avec le bloc SQL. Les migrations renomment et suppriment
   (colonnes, tables), convertissent le type et changent le caractère nul d'une colonne, d'après un historique gardé dans

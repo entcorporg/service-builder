@@ -194,6 +194,20 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                 expr(stored, &format!("{path}/stored"), out);
             }
             Step::RandomToken { .. } => {}
+            Step::HttpCall {
+                query,
+                headers,
+                body,
+                idempotency_key,
+                ..
+            } => {
+                assignments(query, &format!("{path}/query"), out);
+                assignments(headers, &format!("{path}/headers"), out);
+                assignments(body, &format!("{path}/body"), out);
+                if let Some(key) = idempotency_key {
+                    expr(key, &format!("{path}/idempotencyKey"), out);
+                }
+            }
             Step::Fail { retry_after, .. } => {
                 if let Some(wait) = retry_after {
                     expr(wait, &format!("{path}/retryAfter"), out);

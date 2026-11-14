@@ -78,6 +78,7 @@ pub fn structured(
         | ("verifyJwt", "source")
         | ("verifyJwt", "schema")
         | ("sql", "into") => true,
+        ("httpCall", "auth" | "response" | "onError" | "bodyFormat") => true,
         ("sql", "values") => table.is_some(),
         ("sql", "table") => true,
         ("sql", "columns" | "orderBy" | "joins" | "thenBy" | "cursor") => table.is_some(),
@@ -103,10 +104,17 @@ pub fn structured(
         ("verifyJwt", "source") => jwks_source(ui, id, text),
         ("verifyJwt", "schema") => schema_pick(app, ui, id, text, false),
         ("sql", "into") => schema_pick(app, ui, id, text, true),
+        ("httpCall", "auth") => labelled(ui, id, text, &HTTP_AUTH),
+        ("httpCall", "onError") => labelled(ui, id, text, &HTTP_ON_ERROR),
+        ("httpCall", "bodyFormat") => labelled(ui, id, text, &HTTP_BODY_FORMAT),
+        ("httpCall", "response") => http_response(app, ui, id, text),
         _ => {
             let noun = match spec.key.as_str() {
                 "claims" => "un claim",
                 "data" => "une donnée",
+                "headers" => "un en-tête",
+                "query" => "un paramètre",
+                "body" => "un champ du corps",
                 _ => "un champ",
             };
             pairs(app, ui, id, noun, text, vars)
@@ -214,6 +222,70 @@ fn schema_pick(
         text.to_string()
     };
     super::assignments::pick(ui, id.with("schema"), &current, &options, f32::MAX)
+        .map(|v| if v == none { String::new() } else { v })
+}
+
+// ---- outbound HTTP calls ----
+
+/// How the secret of a call is sent (the word of the model, then what the person reads).
+const HTTP_AUTH: [(&str, &str); 4] = [
+    ("", "aucune"),
+    ("bearer", "jeton Bearer"),
+    ("basic", "Basic : utilisateur et mot de passe"),
+    ("apiKey", "clé d’API dans un en-tête"),
+];
+
+const HTTP_ON_ERROR: [(&str, &str); 2] = [
+    (
+        "fail",
+        "arrêter le flux : la transaction est annulée, la route répond une erreur",
+    ),
+    (
+        "continue",
+        "continuer : le flux lit le statut et décide (0 : personne n’a répondu)",
+    ),
+];
+
+const HTTP_BODY_FORMAT: [(&str, &str); 2] = [
+    (
+        "form",
+        "formulaire (x-www-form-urlencoded) : Stripe, Twilio",
+    ),
+    ("json", "JSON"),
+];
+
+/// A choice between words of the model, shown with a sentence each.
+fn labelled(ui: &mut Ui, id: egui::Id, text: &str, options: &[(&str, &str)]) -> Option<String> {
+    let labels: Vec<String> = options.iter().map(|(_, l)| (*l).to_string()).collect();
+    let current = options
+        .iter()
+        .find(|(w, _)| *w == text.trim())
+        .map_or(text, |(_, l)| *l);
+    super::assignments::pick(ui, id.with("labelled"), current, &labels, f32::MAX).and_then(|l| {
+        options
+            .iter()
+            .find(|(_, label)| *label == l)
+            .map(|(w, _)| (*w).to_string())
+    })
+}
+
+/// The API schema the JSON answer of a call is read into, or none (the status is all that is used).
+fn http_response(app: &mut App, ui: &mut Ui, id: egui::Id, text: &str) -> Option<String> {
+    let none = "aucun : seul le statut est lu".to_string();
+    let mut options = vec![none.clone()];
+    options.extend(
+        app.project()
+            .messages
+            .iter()
+            .filter(|m| m.kind == sb_model::MessageKind::Api)
+            .map(|m| m.name.clone()),
+    );
+    let current = if text.trim().is_empty() {
+        none.clone()
+    } else {
+        text.to_string()
+    };
+    super::assignments::pick(ui, id.with("response"), &current, &options, f32::MAX)
         .map(|v| if v == none { String::new() } else { v })
 }
 

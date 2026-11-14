@@ -51,7 +51,7 @@ vérité : le canvas, l'inspecteur et le code généré en sont des vues.
   Un producteur sans étape *Publier* donne un avertissement. Les projets enregistrés avant (`schemaVersion` 1) sont
   migrés à l'ouverture : tout service qui publiait sur un topic en devient producteur.
 - **Services** : des RPC (gRPC), des routes HTTP, des consumers (Kafka) et des tâches planifiées. Chacun contient une **liste d'étapes**.
-- **Étapes** : `log`, `let`, `publish`, `publishLive`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `rateLimit` et `verifyHmac` (routes HTTP), `sql`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
+- **Étapes** : `log`, `let`, `publish`, `publishLive`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `rateLimit` et `verifyHmac` (routes HTTP), `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
   Une liste d'étapes est un arbre (pas un graphe arbitraire) : cela se génère en Rust structuré et s'édite comme
   une pile de blocs, comme dans un page builder.
 
@@ -642,6 +642,64 @@ workspace généré (avec ses propres tests : `cargo test -p eda-runtime`), et v
   vérifie ; ni Garage ni AWS ne sont testés. Sur le code généré avec PostgreSQL : dépôt d'un PNG (octets identiques, type
   `image/png`), relecture, suppression ; SVG, GIF, texte, vide, 2 Mio + 1 octet : 400 ; 2 Mio exactement : 200 ; stockage arrêté : 503
   sans détail.
+
+- **Appels HTTP sortants** (`httpCall`) : un flux appelle une API externe (Stripe, Twilio, tout service REST) sans une ligne de
+  Rust. Tout se règle dans le formulaire de l'étape ; le runtime (`http_client.rs`) fait le reste.
+  - **Adresse** : `baseUrlEnv` nomme la variable d'environnement qui contient l'adresse de base (`https://api.stripe.com`,
+    éventuellement avec un préfixe : `https://api.twilio.com/2010-04-01/Accounts/AC…`). **Jamais une valeur du flux** : une
+    requête ne part pas là où un client l'a choisi (SSRF). Le service refuse de démarrer si la variable manque ou n'est pas une URL
+    `http(s)` sans identifiants, requête ni fragment (`check_config`). Les **redirections ne sont pas suivies** (elles enverraient la
+    requête, et le secret, vers un autre hôte).
+  - **Chemin et paramètres** : `path` commence par `/` ; chaque `{variable}` est une valeur du flux **encodée comme un seul
+    segment** (`/` `?` `#` espace sont encodés ; vide, `.` et `..` sont un `400`), donc elle ne peut ni ajouter un segment, ni
+    une requête, ni changer d'hôte (le runtime revérifie l'hôte de l'URL construite). Le texte fixe ne contient ni `?`, `#`,
+    espace ni segment `..` (`E_HTTP_CALL_PATH`). `query`, `headers` et `body` sont des listes `nom = valeur` (valeur : un champ
+    texte, nombre ou booléen du flux, un littéral ; une valeur optionnelle absente n'est pas envoyée). Les en-têtes que l'étape
+    possède (`Host`, `Content-Length`, `Content-Type`, `Authorization`, `Idempotency-Key`, `Transfer-Encoding`, `Connection`…) sont
+    refusés (`E_HTTP_CALL_NAME`) ; une valeur d'en-tête invalide (CR/LF) est un `400`.
+  - **Corps** : `bodyFormat` = `form` (`application/x-www-form-urlencoded`, défaut : ce que Stripe et Twilio attendent ; les
+    noms comme `metadata[order_id]` sont acceptés) ou `json` (un objet plat, les nombres et booléens restent ce qu'ils sont). Pas
+    de corps sur un `GET`. Limite connue : pas de JSON imbriqué.
+  - **Authentification** : `auth` = `bearer` (`Authorization: Bearer <jeton>`), `basic` (utilisateur et mot de passe) ou `apiKey`
+    (la clé dans l'en-tête `authHeader`). Les secrets sont lus **dans l'environnement** (`authEnv`, `authPasswordEnv`), à chaque
+    appel, vérifiés au démarrage, **jamais journalisés** (ni URL, ni en-tête, ni corps : seulement le statut). Un secret ne part
+    jamais en clair en `http://` vers une autre machine que la sienne (`localhost`, `127.*`) : le service ne démarre pas.
+  - **Réponse** : `response` est un schéma `api` du projet (`E_HTTP_CALL_RESPONSE` sinon) dans lequel le JSON est lu (les champs
+    qu'il ne nomme pas sont ignorés, ceux qui manquent prennent leur défaut), `bind` la variable qui le reçoit, `statusBind` une
+    variable `int32` qui reçoit le statut HTTP (`0` : personne n'a répondu). Une réponse 2xx vide donne le schéma par défaut ; une
+    réponse 2xx qui n'est pas du JSON attendu est un `502`. La réponse lue est limitée à 5 Mio.
+  - **Échec** (hors 2xx, délai dépassé, hôte injoignable, réponse trop grosse) : `onError` = `fail` (défaut) arrête le flux avec
+    `errorStatus` (400..=599, 502 par défaut) et `errorMessage` (texte fixe : un 5xx répond un texte générique et garde celui-ci
+    dans les journaux), et **la transaction est annulée** ; `continue` laisse le flux lire `statusBind` et décider avec une
+    condition (sans `statusBind`, `W_HTTP_CALL_BLIND`). Dans un consumer, un RPC ou une tâche, `fail` fait échouer le traitement
+    (reprise du consumer, DLQ).
+  - **Réessais** : `retries` (0 à 5) après un délai dépassé, un hôte injoignable, un 429, 502, 503 ou 504, avec une attente qui double
+    (200 ms, 400 ms… 5 s au plus) ; jamais après un autre statut (un 402 est une décision, pas un incident). `POST` et `PATCH` ne
+    sont réessayés qu'avec une **clé d'idempotence** (`E_HTTP_CALL_RETRY_UNSAFE`) : `idempotencyKey` est envoyée dans
+    `Idempotency-Key`, la même à chaque tentative, si bien que le fournisseur ne fait le travail qu'une fois (Stripe). Utiliser une
+    valeur stable du flux (la commande), pas un jeton tiré à chaque passage. Twilio n'a pas d'équivalent : pas de clé, donc pas de
+    réessai (un SMS envoyé deux fois est deux SMS).
+  - **Et la transaction ?** Un flux tourne dans une transaction ouverte dès son début (`tx`). Un appel externe y attend donc avec
+    **une connexion du pool** prise, et les **verrous de lignes** de tout ce que le flux a déjà écrit. Choix : l'appel reste dans le
+    flux (le résultat doit pouvoir décider de ce qui est écrit, et un échec annule tout), mais il est **borné** : `timeoutSecs` de 1 à
+    30 s par tentative, et `timeoutSecs × (retries + 1)` au plus 60 s (`E_HTTP_CALL_TIMEOUT`, `E_HTTP_CALL_RETRIES`,
+    `E_HTTP_CALL_BUDGET`). Placer l'appel **avant** les écritures : après un `sql` qui écrit, `W_HTTP_CALL_AFTER_WRITE` rappelle que
+    ces lignes restent verrouillées pendant l'attente. L'inverse existe aussi : si le `commit` échoue après l'appel, l'effet externe
+    a eu lieu et ne se défait pas, d'où la clé d'idempotence (le rejeu d'un événement ou d'une requête ne facture pas deux fois).
+    Une file d'appels asynchrone (appeler après le commit, avec reprise) n'est pas fournie.
+  - La fonctionnalité Cargo `http-client` du runtime (le client `reqwest`) n'est activée que dans le `Cargo.toml` des services qui
+    ont cette étape ; `http-client-tests` ajoute le faux serveur des tests.
+  - Exemples sans code dans le projet `showcase` (`sample::add_http_calls`) : *Stripe, créer un PaymentIntent* (POST formulaire,
+    clé secrète en Bearer, la commande en clé d'idempotence, 2 réessais, arrêt en 502 sinon) et *Twilio, envoyer un SMS* (Basic
+    `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN`, formulaire, le statut lu puis une condition : 201 répond, sinon 502 ; le compte est
+    dans `TWILIO_API_URL`).
+  Vérifié avec un **faux serveur HTTP sur un port local** (12 tests du runtime) : formulaire encodé (un `&` dans une valeur
+  n'ajoute pas de paramètre), Bearer, Basic (valeur base64 attendue), clé d'API, JSON typé, `Idempotency-Key` identique à chaque
+  tentative, réessais après 503 puis arrêt sur 402, délai dépassé et hôte injoignable (statut 0), redirection non suivie, réponse
+  trop grosse, valeur de chemin hostile (`x/../../../admin`) encodée en un segment, en-tête avec CR/LF refusé, vérifications au
+  démarrage. Le code généré du projet `showcase` (Stripe et Twilio compris) compile sans avertissement dans l'image de build
+  (`cargo check`). **Non vérifié** : un appel réel à Stripe ou Twilio (HTTPS, vraies erreurs), et l'exécution de bout en bout d'un
+  service généré (routes qui appellent le faux serveur, avec PostgreSQL et Kafka).
 
 Choix : l'empreinte est du **texte hexadécimal** (colonne `string`), pas un `bytea`, car les flux n'ont pas de type
 binaire ; la recherche d'un jeton se fait par `WHERE token_hash = …` dans un bloc SQL, sans étape de comparaison à part.

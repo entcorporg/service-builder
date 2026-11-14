@@ -19,6 +19,7 @@ const RUNTIME_CRYPTO: &str = include_str!("../templates/runtime/crypto.rs");
 const RUNTIME_VALIDATION: &str = include_str!("../templates/runtime/validation.rs");
 const RUNTIME_TOTP: &str = include_str!("../templates/runtime/totp.rs");
 const RUNTIME_LIVE: &str = include_str!("../templates/runtime/live.rs");
+const RUNTIME_HTTP_CLIENT: &str = include_str!("../templates/runtime/http_client.rs");
 const RUNTIME_S3: &str = include_str!("../templates/runtime/s3.rs");
 const RUNTIME_WEBAUTHN: &str = include_str!("../templates/runtime/webauthn.rs");
 const RUNTIME_WEBHOOK: &str = include_str!("../templates/runtime/webhook.rs");
@@ -52,6 +53,7 @@ pub fn files(project: &Project) -> Vec<GeneratedFile> {
         GeneratedFile::new("runtime/src/rate_limit.rs", RUNTIME_RATE_LIMIT),
         GeneratedFile::new("runtime/src/live.rs", RUNTIME_LIVE),
         GeneratedFile::new("runtime/src/s3.rs", RUNTIME_S3),
+        GeneratedFile::new("runtime/src/http_client.rs", RUNTIME_HTTP_CLIENT),
         GeneratedFile::new("runtime/src/totp.rs", RUNTIME_TOTP),
         GeneratedFile::new("runtime/src/validation.rs", RUNTIME_VALIDATION),
         GeneratedFile::new("runtime/src/webauthn.rs", RUNTIME_WEBAUTHN),

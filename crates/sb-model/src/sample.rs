@@ -896,6 +896,7 @@ pub fn showcase() -> Project {
     add_basket_lines(&mut p);
     add_schema_changes(&mut p);
     add_receipts(&mut p);
+    add_http_calls(&mut p);
     p
 }
 
@@ -2622,5 +2623,153 @@ pub fn add_receipts(p: &mut Project) {
                 },
             ],
         }],
+    });
+}
+
+/// Adds to the first service two calls to external APIs, with no code: Stripe "create a PaymentIntent" (a form body,
+/// the secret key as a bearer token, the order as the idempotency key so that a replay charges once) and Twilio "send an
+/// SMS" (basic authentication with the account SID and the auth token, a form body, the status read to decide).
+/// `STRIPE_API_URL` is `https://api.stripe.com`; `TWILIO_API_URL` carries the account in its path
+/// (`https://api.twilio.com/2010-04-01/Accounts/AC…`).
+pub fn add_http_calls(p: &mut Project) {
+    let string = || FieldType::String;
+    p.messages.push(api(
+        "PaymentIntentRequest",
+        vec![
+            field("order_id", string()),
+            field("amount", FieldType::Int64),
+            field("currency", string()),
+        ],
+    ));
+    p.messages.push(api(
+        "StripePaymentIntent",
+        vec![
+            field("id", string()),
+            field("status", string()),
+            field("client_secret", string()),
+        ],
+    ));
+    p.messages.push(api(
+        "PaymentIntentView",
+        vec![
+            field("payment_id", string()),
+            field("client_secret", string()),
+        ],
+    ));
+    p.messages.push(api(
+        "SmsRequest",
+        vec![field("to", string()), field("text", string())],
+    ));
+    p.messages.push(api(
+        "TwilioMessage",
+        vec![field("sid", string()), field("status", string())],
+    ));
+    p.messages.push(api("SmsAck", vec![field("sid", string())]));
+    let routes = &mut p.services[0].routes;
+    routes.push(Route {
+        name: "create_payment_intent".into(),
+        method: HttpMethod::Post,
+        path: "/payments/intents".into(),
+        request: "PaymentIntentRequest".into(),
+        response: "PaymentIntentView".into(),
+        status: 201,
+        steps: vec![
+            Step::HttpCall {
+                id: "i1".into(),
+                method: HttpMethod::Post,
+                base_url_env: "STRIPE_API_URL".into(),
+                path: "/v1/payment_intents".into(),
+                query: vec![],
+                headers: vec![],
+                auth: Some(HttpAuthKind::Bearer),
+                auth_env: Some("STRIPE_SECRET_KEY".into()),
+                auth_password_env: None,
+                auth_header: None,
+                body: vec![
+                    set("amount", path("input.amount")),
+                    set("currency", path("input.currency")),
+                    set("metadata[order_id]", path("input.order_id")),
+                ],
+                body_format: HttpBodyFormat::Form,
+                timeout_secs: 10,
+                retries: 2,
+                idempotency_key: Some(path("input.order_id")),
+                response: Some("StripePaymentIntent".into()),
+                bind: Some("intent".into()),
+                status_bind: None,
+                on_error: HttpOnError::Fail,
+                error_status: 502,
+                error_message: "the payment provider did not accept the payment".into(),
+            },
+            Step::Respond {
+                id: "i2".into(),
+                fields: vec![
+                    set("payment_id", path("intent.id")),
+                    set("client_secret", path("intent.client_secret")),
+                ],
+                status: None,
+                cookies: vec![],
+                headers: vec![],
+            },
+        ],
+    });
+    routes.push(Route {
+        name: "send_sms".into(),
+        method: HttpMethod::Post,
+        path: "/sms".into(),
+        request: "SmsRequest".into(),
+        response: "SmsAck".into(),
+        status: 201,
+        steps: vec![
+            Step::HttpCall {
+                id: "s1".into(),
+                method: HttpMethod::Post,
+                base_url_env: "TWILIO_API_URL".into(),
+                path: "/Messages.json".into(),
+                query: vec![],
+                headers: vec![],
+                auth: Some(HttpAuthKind::Basic),
+                auth_env: Some("TWILIO_ACCOUNT_SID".into()),
+                auth_password_env: Some("TWILIO_AUTH_TOKEN".into()),
+                auth_header: None,
+                body: vec![
+                    set("To", path("input.to")),
+                    set("From", lit("+15005550006")),
+                    set("Body", path("input.text")),
+                ],
+                body_format: HttpBodyFormat::Form,
+                timeout_secs: 10,
+                // A message sent twice is two messages: no idempotency key here, so no retry.
+                retries: 0,
+                idempotency_key: None,
+                response: Some("TwilioMessage".into()),
+                bind: Some("message".into()),
+                status_bind: Some("sms_status".into()),
+                on_error: HttpOnError::Continue,
+                error_status: 502,
+                error_message: "the SMS provider did not answer correctly".into(),
+            },
+            Step::Branch {
+                id: "s2".into(),
+                condition: Condition::Compare {
+                    left: path("sms_status"),
+                    op: CmpOp::Eq,
+                    right: lit(201),
+                },
+                then: vec![Step::Respond {
+                    id: "s3".into(),
+                    fields: vec![set("sid", path("message.sid"))],
+                    status: None,
+                    cookies: vec![],
+                    headers: vec![],
+                }],
+                otherwise: vec![Step::Fail {
+                    id: "s4".into(),
+                    status: 502,
+                    message: "the SMS provider refused the message".into(),
+                    retry_after: None,
+                }],
+            },
+        ],
     });
 }

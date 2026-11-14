@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use crate::names::{
     is_pascal_ident, is_snake_ident, is_topic_name, route_params, route_shape, snake, topic_const,
 };
+mod http_call;
+
 use crate::project::*;
 use crate::typing::{
     Scope, TemplatePart, TypeRef, coerce_literal, infer_literal, parse_template, resolve_path,
@@ -2771,6 +2773,7 @@ impl<'a> Checker<'a> {
                     "this step is never executed because a previous step already responds",
                 );
             }
+            self.http_call_after_write(&path, &steps[..i], step);
             if self.step(env, &path, step, scope) {
                 returns = true;
             }
@@ -3660,6 +3663,10 @@ impl<'a> Checker<'a> {
                 }
                 // Nothing runs after it, like a Respond.
                 true
+            }
+            Step::HttpCall { .. } => {
+                self.http_call(scope, path, step);
+                false
             }
             Step::Code { code, .. } => {
                 if code.trim().is_empty() {

@@ -97,6 +97,7 @@ pub fn message(p: &mut Project, from: &str, to: &str) {
             match kind(o) {
                 "sql" => set_if(o, "into", from, to),
                 "verifyJwt" => set_if(o, "schema", from, to),
+                "httpCall" => set_if(o, "response", from, to),
                 _ => {}
             }
             // A type written as `{ "kind": "message", "name": ... }`, in a `let` for instance.

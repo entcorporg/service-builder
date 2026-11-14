@@ -46,6 +46,13 @@ fn run(args: &[&str]) -> Result<ExitCode, String> {
             println!("{json}");
             Ok(ExitCode::SUCCESS)
         }
+        // Every feature at once: the project to try the generator on.
+        ["sample", "showcase"] => {
+            let json = serde_json::to_string_pretty(&sb_model::sample::showcase())
+                .map_err(|e| e.to_string())?;
+            println!("{json}");
+            Ok(ExitCode::SUCCESS)
+        }
         ["validate", file] => {
             let project = sb_app::load_project(Path::new(file))?;
             let analysis = sb_app::analyze(&project);
