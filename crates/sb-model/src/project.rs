@@ -1198,6 +1198,73 @@ pub enum Step {
         #[serde(default = "default_tolerance_secs")]
         tolerance_secs: u32,
     },
+    /// Calls an external HTTP API (Stripe, Twilio, any REST service) and binds its answer. The base address is read from
+    /// the environment variable `base_url_env` (never from a value of the flow: a request cannot be sent where a client
+    /// chose); `path` is the path after it, where each `{variable}` is a value of the flow, percent-encoded as one path
+    /// segment. `query`, `headers` and `body` are lists of `name = value`; the `body` is sent as `body_format` (JSON, or
+    /// `application/x-www-form-urlencoded` as Stripe and Twilio take it). The secrets of `auth` are read from the
+    /// environment. Redirects are not followed. The call runs inside the transaction of the flow: keep `timeout_secs` low,
+    /// and call before writing when you can. A request that is not idempotent is only retried with an `idempotency_key`.
+    #[serde(rename_all = "camelCase")]
+    HttpCall {
+        id: String,
+        method: HttpMethod,
+        /// Environment variable that holds the base URL (`https://api.stripe.com`).
+        base_url_env: String,
+        /// Starts with `/`; `{variable}` placeholders are values of the flow, encoded as a single segment.
+        path: String,
+        /// Query string parameters, one `name = value` each (a value that is absent is left out).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        query: Vec<Assignment>,
+        /// Extra request headers, one `name = value` each.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        headers: Vec<Assignment>,
+        /// How the secret is sent: a bearer token, basic authentication or a key in a header. Absent: none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth: Option<HttpAuthKind>,
+        /// The environment variable that holds the token (bearer), the user name (basic) or the key (API key).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth_env: Option<String>,
+        /// Basic authentication: the environment variable that holds the password.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth_password_env: Option<String>,
+        /// API key: the name of the header that carries it (`X-Api-Key`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth_header: Option<String>,
+        /// The fields of the request body, one `name = value` each; none: no body.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        body: Vec<Assignment>,
+        #[serde(default)]
+        body_format: HttpBodyFormat,
+        /// Seconds before the call is given up (1 to 30), for each attempt.
+        #[serde(default = "default_http_timeout_secs")]
+        timeout_secs: u32,
+        /// Extra attempts after a timeout, an unreachable host, a 429 or a 502, 503 or 504 (0 to 5), with a growing wait.
+        /// `POST` and `PATCH` are retried only with an `idempotency_key`.
+        #[serde(default)]
+        retries: u8,
+        /// Sent as the `Idempotency-Key` header, the same on every attempt: the provider then does the work once.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        idempotency_key: Option<Expr>,
+        /// The API schema the JSON answer is read into (fields it does not name are ignored).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        response: Option<String>,
+        /// The variable that receives the answer, as a `response`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bind: Option<String>,
+        /// The variable that receives the HTTP status (an `int32`; `0` when nobody answered).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status_bind: Option<String>,
+        /// What a non-2xx answer, a timeout or an unreachable host does.
+        #[serde(default)]
+        on_error: HttpOnError,
+        /// With `on_error` = `fail`: the status the flow ends with (400..=599).
+        #[serde(default = "default_http_error_status")]
+        error_status: u16,
+        /// With `on_error` = `fail`: the fixed text the client is told (a 5xx answers a generic one and logs this).
+        #[serde(default = "default_http_error_message")]
+        error_message: String,
+    },
     /// Ends an HTTP route early with an error status (400..=599) and `{ "error": message }`.
     /// The message is a fixed text: a 5xx answers a generic one and keeps this in the logs.
     #[serde(rename_all = "camelCase")]
@@ -1313,6 +1380,59 @@ impl SqlCondition {
     }
 }
 
+impl HttpMethod {
+    /// A method that can be sent twice with the same effect (RFC 9110): an outbound call may be retried safely.
+    pub fn is_idempotent(self) -> bool {
+        !matches!(self, HttpMethod::Post | HttpMethod::Patch)
+    }
+}
+
+/// How an outbound call authenticates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum HttpAuthKind {
+    /// `Authorization: Bearer <token>`.
+    Bearer,
+    /// `Authorization: Basic` with a user name and a password.
+    Basic,
+    /// A key in a header of your choice.
+    ApiKey,
+}
+
+/// How the body of an outbound call is encoded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum HttpBodyFormat {
+    /// A JSON object (numbers and booleans stay what they are).
+    Json,
+    /// `application/x-www-form-urlencoded`, as Stripe and Twilio take it.
+    #[default]
+    Form,
+}
+
+/// What an outbound call that did not succeed (not a 2xx, no answer in time, host unreachable) does to the flow.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum HttpOnError {
+    /// The flow stops and the transaction is rolled back: the route answers `error_status`.
+    #[default]
+    Fail,
+    /// The flow goes on and reads the status (`status_bind`, `0` when nobody answered) to decide, with a branch.
+    Continue,
+}
+
+fn default_http_timeout_secs() -> u32 {
+    10
+}
+
+fn default_http_error_status() -> u16 {
+    502
+}
+
+fn default_http_error_message() -> String {
+    "the external service did not answer correctly".into()
+}
+
 impl Step {
     pub fn id(&self) -> &str {
         match self {
@@ -1327,6 +1447,7 @@ impl Step {
             | Step::Fail { id, .. }
             | Step::RateLimit { id, .. }
             | Step::VerifyHmac { id, .. }
+            | Step::HttpCall { id, .. }
             | Step::Encrypt { id, .. }
             | Step::SignJwt { id, .. }
             | Step::VerifyJwt { id, .. }
