@@ -7,6 +7,8 @@
 pub mod crypto;
 pub mod db;
 pub mod dedup;
+#[cfg(feature = "http-client")]
+pub mod http_client;
 pub mod jobs;
 pub mod jwt;
 #[cfg(feature = "live")]

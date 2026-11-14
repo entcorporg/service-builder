@@ -30,6 +30,7 @@ redis = { workspace = true, optional = true }
 aws-config = { workspace = true, optional = true }
 aws-sdk-s3 = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
 
 [features]
 # Events for the browsers (`publishLive`) bring the Redis client in: only the services that have such a step turn this on.
@@ -42,6 +43,10 @@ webauthn-tests = ["webauthn", "dep:webauthn-authenticator-rs"]
 s3 = ["dep:aws-config", "dep:aws-sdk-s3"]
 # The tests of the object storage, against a fake S3 on a local port.
 s3-tests = ["s3", "dep:axum"]
+# Outbound HTTP calls (`httpCall`) bring the HTTP client in: only the services that have such a step turn this on.
+http-client = ["dep:reqwest"]
+# The tests of the outbound calls, against a fake API on a local port.
+http-client-tests = ["http-client", "dep:axum"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

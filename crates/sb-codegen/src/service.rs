@@ -178,6 +178,9 @@ fn cargo_toml(service: &Service) -> String {
     if !bucket_envs(service).is_empty() {
         features.push("\"s3\"");
     }
+    if crate::http_call::uses_http_client(service) {
+        features.push("\"http-client\"");
+    }
     if uses_live(service) {
         features.push("\"live\"");
     }
@@ -388,6 +391,21 @@ fn config_rs(project: &Project, service: &Service, publishes: bool) -> String {
         let list: Vec<String> = buckets.iter().map(|b| format!("{b:?}")).collect();
         c.line(format!(
             "eda_runtime::s3::check_config(&[{}])?;",
+            list.join(", ")
+        ));
+    }
+    let targets = crate::http_call::http_targets(service);
+    if !targets.is_empty() {
+        c.line("// The external services this one calls: their addresses and secrets are in the environment, and nothing is requested here.");
+        let list: Vec<String> = targets
+            .iter()
+            .map(|(base, secrets)| {
+                let secrets: Vec<String> = secrets.iter().map(|s| format!("{s:?}")).collect();
+                format!("({base:?}, &[{}][..])", secrets.join(", "))
+            })
+            .collect();
+        c.line(format!(
+            "eda_runtime::http_client::check_config(&[{}])?;",
             list.join(", ")
         ));
     }
@@ -1838,6 +1856,7 @@ fn steps(
                 ));
             }
             Step::Sql { .. } => sql_step(c, project, service, scope, step)?,
+            Step::HttpCall { .. } => crate::http_call::http_call_step(c, project, scope, step)?,
             Step::HashPassword { input, bind, .. } => {
                 let text = TypeRef::scalar(FieldType::String);
                 let input = lower(project, scope, input, &text)?;
@@ -2617,6 +2636,17 @@ fn describe(step: &Step) -> String {
                 SqlOp::Delete => "delete from",
             }
         ),
+        Step::HttpCall {
+            method,
+            bind,
+            status_bind,
+            ..
+        } => match (bind, status_bind) {
+            (Some(var), _) | (None, Some(var)) => {
+                format!("{} an external API into {var}", method.as_str())
+            }
+            _ => format!("{} an external API", method.as_str()),
+        },
         Step::Code { .. } => "custom code".into(),
     }
 }

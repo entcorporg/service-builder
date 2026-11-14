@@ -3,6 +3,7 @@
 //! docker-compose for Kafka.
 
 mod expr;
+mod http_call;
 mod mta;
 pub mod pods;
 mod proto;
@@ -164,6 +165,7 @@ mod tests {
                 "runtime/src/crypto.rs",
                 "runtime/src/db.rs",
                 "runtime/src/dedup.rs",
+                "runtime/src/http_client.rs",
                 "runtime/src/jobs.rs",
                 "runtime/src/jwt.rs",
                 "runtime/src/lib.rs",
@@ -1250,6 +1252,94 @@ mod tests {
         assert!(!file(&plain, "services/orders/src/app/config.rs").contains("s3::"));
         assert!(
             file(&files, "runtime/src/lib.rs").contains("#[cfg(feature = \"s3\")]\npub mod s3;")
+        );
+    }
+
+    #[test]
+    fn an_outbound_call_is_built_from_the_flow_and_its_client_is_only_built_where_it_is_used() {
+        let mut p = sample::orders();
+        sample::add_http_calls(&mut p);
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&p)),
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        let flat = api.split_whitespace().collect::<Vec<_>>().join(" ");
+        // Stripe: form body, bearer key, the order as idempotency key, a stop on failure, the answer in a schema.
+        for expected in [
+            "__path.push_str(\"/v1/payment_intents\");",
+            "__body.set(\"metadata[order_id]\", input.order_id.clone());",
+            "auth: eda_runtime::http_client::Auth::Bearer(\"STRIPE_SECRET_KEY\"),",
+            "format: eda_runtime::http_client::BodyFormat::Form,",
+            "retries: 2,",
+            "idempotency_key: Some(input.order_id.clone()),",
+            "base_url_env: \"STRIPE_API_URL\",",
+            "__answer.require_success(502, \"the payment provider did not accept the payment\")?;",
+            "let intent: pb::StripePaymentIntent = __answer.parse()?;",
+            // Twilio: basic authentication, the flow reads the status.
+            "auth: eda_runtime::http_client::Auth::Basic(\"TWILIO_ACCOUNT_SID\", \"TWILIO_AUTH_TOKEN\"),",
+            "__body.set(\"From\", \"+15005550006\");",
+            "let sms_status: i32 = i32::from(__answer.status);",
+            "let message: pb::TwilioMessage = __answer.parse()?;",
+        ] {
+            assert!(flat.contains(expected), "{expected}\n{flat}");
+        }
+        // The Twilio call goes on whatever the answer: no early return after it.
+        assert!(
+            !flat.contains("__answer.require_success(502, \"the SMS"),
+            "{flat}"
+        );
+        // The runtime client and the check of the addresses and secrets at start-up.
+        assert!(
+            file(&files, "services/orders/Cargo.toml").contains("features = [\"http-client\"]")
+        );
+        let config = file(&files, "services/orders/src/app/config.rs");
+        assert!(
+            config.contains("eda_runtime::http_client::check_config(&[(\"STRIPE_API_URL\", &[\"STRIPE_SECRET_KEY\"][..]), (\"TWILIO_API_URL\", &[\"TWILIO_ACCOUNT_SID\", \"TWILIO_AUTH_TOKEN\"][..])])?;")
+                || config.split_whitespace().collect::<Vec<_>>().join(" ").contains("http_client::check_config"),
+            "{config}"
+        );
+        assert!(
+            file(&files, "runtime/src/lib.rs")
+                .contains("#[cfg(feature = \"http-client\")]\npub mod http_client;")
+        );
+        assert!(file(&files, "runtime/Cargo.toml").contains("http-client = [\"dep:reqwest\"]"));
+        // Nothing of it in a service that makes no call.
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/Cargo.toml").contains("http-client"));
+        assert!(!file(&plain, "services/orders/src/app/config.rs").contains("http_client"));
+    }
+
+    #[test]
+    fn the_values_of_a_path_go_through_the_segment_encoder_and_optional_values_are_left_out_when_absent()
+     {
+        let mut p = sample::orders();
+        sample::add_http_calls(&mut p);
+        let step = p.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == "create_payment_intent")
+            .map(|r| &mut r.steps[0])
+            .unwrap();
+        let sb_model::Step::HttpCall { path, headers, .. } = step else {
+            panic!("an httpCall")
+        };
+        *path = "/v1/customers/{input.order_id}/charges".into();
+        headers.push(sb_model::Assignment {
+            field: "X-Region".into(),
+            value: sb_model::Expr::Literal { value: "eu".into() },
+        });
+        let files = generate(&p).unwrap();
+        let flat = file(&files, "services/orders/src/flows/api.rs")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(flat.contains("__path.push_str(\"/v1/customers/\"); __path.push_str(&eda_runtime::http_client::segment(&input.order_id.clone().to_string())?); __path.push_str(\"/charges\");"), "{flat}");
+        assert!(
+            flat.contains("__headers.set(\"X-Region\", \"eu\");"),
+            "{flat}"
         );
     }
 

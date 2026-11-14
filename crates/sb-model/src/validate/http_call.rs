@@ -289,8 +289,8 @@ impl Checker<'_> {
                 ),
             );
         }
-        match idempotency_key {
-            Some(key) => {
+        if let Some(key) = idempotency_key {
+            {
                 let text = TypeRef::scalar(FieldType::String);
                 self.check_expr(scope, key, Some(&text), &format!("{path}/idempotencyKey"));
                 if method.is_idempotent() {
@@ -304,7 +304,6 @@ impl Checker<'_> {
                     );
                 }
             }
-            None => {}
         }
         // The answer.
         let schema_ok = match response {

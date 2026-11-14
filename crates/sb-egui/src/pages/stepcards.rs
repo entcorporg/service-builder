@@ -54,6 +54,7 @@ pub fn title(kind: &str) -> &'static str {
         "randomToken" => "Jeton aléatoire",
         "sha256" => "Empreinte SHA-256",
         "fail" => "Refuser",
+        "httpCall" => "Appeler une API HTTP",
         "sql" => "SQL",
         "code" => "Code Rust",
         _ => "Étape",
@@ -66,7 +67,7 @@ fn tone(kind: &str) -> (Color32, u8, Color32) {
         "log" => (0x8f97bd, 46, 0xb6bdea),
         "let" => (0xb482ff, 46, 0xc7a0ff),
         "publish" | "publishLive" => (0xffb04a, 46, 0xffb04a),
-        "callRpc" | "sql" => (0x7886ff, 51, 0x7886ff),
+        "callRpc" | "sql" | "httpCall" => (0x7886ff, 51, 0x7886ff),
         "branch" => (0xff66a0, 43, 0xff8fb8),
         "respond" => (0x3ecf8e, 43, 0x3ecf8e),
         "fail" => (0xff6678, 38, 0xff6678),
@@ -103,6 +104,12 @@ fn summary(step: &Step, kind: &str) -> String {
         "fail" => format!("{} {}", get("status"), get("message"))
             .trim()
             .to_string(),
+        "httpCall" => format!(
+            "{} {}{}",
+            get("method").to_uppercase(),
+            get("baseUrlEnv"),
+            get("path")
+        ),
         "let" => format!("{} : {}", get("name"), get("valueType")),
         "log" => get("message"),
         _ => {
@@ -133,6 +140,26 @@ fn field_name(key: &str) -> String {
         "table" => "Table",
         "op" => "Opération",
         "fields" => "Champs",
+        "method" => "Méthode",
+        "baseUrlEnv" => "Adresse du service (variable d’environnement)",
+        "path" => "Chemin",
+        "query" => "Paramètres d’URL",
+        "headers" => "En-têtes",
+        "auth" => "Authentification",
+        "authEnv" => "Variable du secret",
+        "authPasswordEnv" => "Variable du mot de passe",
+        "authHeader" => "En-tête de la clé",
+        "body" => "Corps de la requête",
+        "bodyFormat" => "Format du corps",
+        "timeoutSecs" => "Délai par tentative (s)",
+        "retries" => "Nouvelles tentatives",
+        "idempotencyKey" => "Clé d’idempotence",
+        "response" => "Schéma de la réponse",
+        "bind" => "Réponse dans",
+        "statusBind" => "Statut HTTP dans",
+        "onError" => "Si l’appel échoue",
+        "errorStatus" => "Statut de l’erreur",
+        "errorMessage" => "Message de l’erreur",
         "level" => "Niveau",
         "service" => "Service",
         "rpc" => "RPC",
@@ -347,6 +374,26 @@ fn let_target(step: &Step) -> Option<Field> {
     Some(f)
 }
 
+/// The fields of an outbound call that mean nothing for the way it is set: the password without basic authentication, the
+/// status and the message of an error when the flow goes on.
+fn http_hidden(step: &Step, key: &str, all: &[(stepform::Spec, String)]) -> bool {
+    if !matches!(step, Step::HttpCall { .. }) {
+        return false;
+    }
+    let value = |k: &str| {
+        all.iter()
+            .find(|(s, _)| s.key == k)
+            .map_or("", |(_, t)| t.as_str())
+    };
+    match key {
+        "authEnv" => value("auth").is_empty(),
+        "authPasswordEnv" => value("auth") != "basic",
+        "authHeader" => value("auth") != "apiKey",
+        "errorStatus" | "errorMessage" => value("onError") != "fail",
+        _ => false,
+    }
+}
+
 /// The fields of a step, as inputs. Any change gives the new step back, or says what is wrong.
 fn form(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, index: usize) {
     let all = stepform::to_texts(step);
@@ -363,6 +410,9 @@ fn form(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, index: usize) {
     let mut pending: Option<(usize, String)> = None;
     ui.spacing_mut().item_spacing.y = 8.0;
     for (i, (spec, text)) in all.iter().enumerate() {
+        if http_hidden(step, &spec.key, &all) {
+            continue;
+        }
         // The `Retry-After` header only means something for 429 and 503.
         if is_fail && spec.key == "retryAfter" && !matches!(fail_status.as_str(), "429" | "503") {
             continue;
@@ -503,10 +553,11 @@ fn form(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, index: usize) {
 }
 
 /// The blocks that can be added, in the order of the web version.
-const ORDER: [&str; 35] = [
+const ORDER: [&str; 36] = [
     "publish",
     "publishLive",
     "sql",
+    "httpCall",
     "callRpc",
     "branch",
     "let",
@@ -551,6 +602,9 @@ fn hint(kind: &str) -> &'static str {
             "Événement temps réel (SSE), envoyé après le commit, à un compte ou à une permission"
         }
         "callRpc" => "Appeler un autre service en gRPC",
+        "httpCall" => {
+            "Stripe, Twilio, toute API REST : adresse et secrets dans l’environnement, corps JSON ou formulaire, réessais et clé d’idempotence. Tourne dans la transaction : délai court"
+        }
         "branch" => "Si … alors … sinon …",
         "respond" => "Renvoyer la réponse du RPC",
         "signJwt" => {

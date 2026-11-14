@@ -7,6 +7,7 @@ edition.workspace = true
 [dependencies]
 sb-model = { path = "../sb-model" }
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 syn = { version = "3", features = ["full"] }
 # Only to check the syntax of the mails; the generated service renders them with all the built-ins.
