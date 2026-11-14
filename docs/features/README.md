@@ -32,6 +32,9 @@ Les projets sous AGPL, SSPL ou BSL ne sont cités que comme projets écartés. L
 | Règles métier et tables de décision | `feature/regles-metier` | [GoRules Zen](https://github.com/gorules/zen) | MIT | Rust | Déjà en Rust |
 | Génération de PDF | `feature/generation-pdf` | [Typst](https://github.com/typst/typst) | Apache-2.0 | Rust | Déjà en Rust |
 | Transformation d'images | `feature/transformation-images` | [imgproxy](https://github.com/imgproxy/imgproxy) | Apache-2.0 | Go | Crate Rust disponible |
+| Nettoyage de HTML | `feature/nettoyage-html` | [Ammonia](https://github.com/rust-ammonia/ammonia) | MIT ou Apache-2.0 | Rust | Déjà en Rust |
+| Analyse antivirus des fichiers | `feature/analyse-antivirus` | [ClamAV](https://github.com/Cisco-Talos/clamav) | GPL-2.0 | C | Réécriture à prévoir |
+| Appel de modèle de langage | `feature/appel-de-modele-de-langage` | [Rig](https://github.com/0xPlaygrounds/rig) | MIT | Rust | Déjà en Rust |
 
 ### Service
 
@@ -40,6 +43,7 @@ Les projets sous AGPL, SSPL ou BSL ne sont cités que comme projets écartés. L
 | Webhooks sortants | `feature/webhooks-sortants` | [Svix](https://github.com/svix/svix-webhooks) | MIT | Rust | Déjà en Rust |
 | Notifications multicanal et préférences | `feature/notifications-et-preferences` | [Novu](https://github.com/novuhq/novu) | MIT | TypeScript | Réécriture à prévoir |
 | Traductions des mails et des messages | `feature/traductions` | [Fluent](https://github.com/projectfluent/fluent-rs) | MIT ou Apache-2.0 | Rust | Déjà en Rust |
+| Paiements | `feature/paiements` | [Hyperswitch](https://github.com/juspay/hyperswitch) | Apache-2.0 | Rust | Déjà en Rust |
 
 ### Moteur
 
@@ -72,6 +76,10 @@ Les projets sous AGPL, SSPL ou BSL ne sont cités que comme projets écartés. L
 | Connexion OAuth 2 / OpenID Connect | `feature/connexion-oidc` | [Ory Kratos](https://github.com/ory/kratos) | Apache-2.0 | Go | Crate Rust disponible |
 | Lien magique et invitations | `feature/lien-magique-et-invitations` | [Supabase Auth](https://github.com/supabase/auth) | MIT | Go | Réécriture à prévoir |
 | Politiques d'autorisation | `feature/politiques-autorisation` | [Cedar](https://github.com/cedar-policy/cedar) | Apache-2.0 | Rust | Déjà en Rust |
+| Clés d'API émises aux clients | `feature/cles-api` | [prefixed-api-key](https://github.com/seamapi/prefixed-api-key) | MIT | TypeScript | Réécriture à prévoir |
+| SSO SAML et provisionnement SCIM | `feature/sso-saml-et-scim` | [Ory Polis (ex-BoxyHQ SAML Jackson)](https://github.com/ory/polis) | Apache-2.0 | TypeScript | Crate Rust disponible |
+| Protection contre les robots | `feature/protection-anti-robots` | [ALTCHA](https://github.com/altcha-org/altcha) | MIT | TypeScript | Crate Rust disponible |
+| Robustesse des mots de passe | `feature/robustesse-des-mots-de-passe` | [zxcvbn (portage Rust `zxcvbn-rs`)](https://github.com/shssoichiro/zxcvbn-rs) | MIT | Rust | Déjà en Rust |
 
 ### Événements
 
@@ -88,6 +96,14 @@ Les projets sous AGPL, SSPL ou BSL ne sont cités que comme projets écartés. L
 | Autres brokers : NATS JetStream, RabbitMQ | `feature/autres-brokers` | [Watermill](https://github.com/ThreeDotsLabs/watermill) | MIT | Go | Crate Rust disponible |
 | File de tâches en arrière-plan | `feature/file-de-taches` | [River](https://github.com/riverqueue/river) | MPL-2.0 | Go | Crate Rust disponible |
 | Tâches planifiées par expression cron | `feature/taches-cron` | [Oban (plugin Cron)](https://github.com/oban-bg/oban) | Apache-2.0 | Elixir | Crate Rust disponible |
+| Requête-réponse sur Kafka | `feature/requete-reponse-kafka` | [Spring Kafka (`ReplyingKafkaTemplate`)](https://github.com/spring-projects/spring-kafka) | Apache-2.0 | Java | Réécriture à prévoir |
+| Enveloppe CloudEvents | `feature/cloudevents` | [CloudEvents SDK pour Rust](https://github.com/cloudevents/sdk-rust) | Apache-2.0 | Rust | Déjà en Rust |
+| Charges utiles volumineuses (claim check) | `feature/claim-check` | [Apache Camel (EIP Claim Check)](https://github.com/apache/camel) | Apache-2.0 | Java | Réécriture à prévoir |
+| Routage, découpage et regroupement de messages | `feature/routage-de-messages` | [Apache Camel](https://github.com/apache/camel) | Apache-2.0 | Java | Réécriture à prévoir |
+| Connecteurs sources et destinations | `feature/connecteurs` | [Bento](https://github.com/warpstreamlabs/bento) | MIT | Go | Réécriture à prévoir |
+| Chiffrement des événements par sujet | `feature/chiffrement-par-sujet` | [Kroxylicious (chiffrement d'enregistrements)](https://github.com/kroxylicious/kroxylicious) | Apache-2.0 | Java | Réécriture à prévoir |
+| Consommation parallèle et par lots | `feature/consommation-parallele` | [Confluent Parallel Consumer](https://github.com/confluentinc/parallel-consumer) | Apache-2.0 | Java | Réécriture à prévoir |
+| Montée de version des événements | `feature/versions-d-evenements` | [Axon Framework (upcasters)](https://github.com/AxonFramework/AxonFramework) | Apache-2.0 | Java | Réécriture à prévoir |
 
 ### Surface d'API
 
@@ -101,6 +117,9 @@ Les projets sous AGPL, SSPL ou BSL ne sont cités que comme projets écartés. L
 | Compression des réponses HTTP | `feature/compression-http` | [tower-http](https://github.com/tower-rs/tower-http) | MIT | Rust | Déjà en Rust |
 | Serveur simulé depuis OpenAPI | `feature/serveur-simule` | [Prism](https://github.com/stoplightio/prism) | Apache-2.0 | TypeScript | Réécriture à prévoir |
 | Envois de fichiers reprenables | `feature/envois-reprenables` | [tusd](https://github.com/tus/tusd) | MIT | Go | Réécriture à prévoir |
+| Versionnement d'API | `feature/versionnement-d-api` | [Cadwyn](https://github.com/zmievsa/cadwyn) | MIT | Python | Réécriture à prévoir |
+| Serveur MCP du backend généré | `feature/serveur-mcp-genere` | [SDK Rust du Model Context Protocol](https://github.com/modelcontextprotocol/rust-sdk) | En transition de MIT vers Apache-2.0 | Rust | Déjà en Rust |
+| Collection de requêtes exportée | `feature/collection-de-requetes` | [Bruno](https://github.com/usebruno/bruno) | MIT | JavaScript | Réécriture à prévoir |
 
 ### Données
 
@@ -111,6 +130,9 @@ Les projets sous AGPL, SSPL ou BSL ne sont cités que comme projets écartés. L
 | Fuseaux horaires et types calendaires | `feature/fuseaux-horaires` | [Jiff](https://github.com/BurntSushi/jiff) | MIT ou Unlicense | Rust | Déjà en Rust |
 | Import et export CSV | `feature/import-export-csv` | [PostgREST (`Accept: text/csv`, insertion en masse)](https://github.com/PostgREST/postgrest) | MIT | Haskell | Crate Rust disponible |
 | Effacement et export RGPD | `feature/effacement-rgpd` | [Fides](https://github.com/ethyca/fides) | Apache-2.0 | Python | Réécriture à prévoir |
+| Cache de lecture | `feature/cache-de-lecture` | [Moka](https://github.com/moka-rs/moka) | MIT ou Apache-2.0 | Rust | Déjà en Rust |
+| Partitionnement et rétention des tables | `feature/partitionnement-et-retention` | [pg_partman](https://github.com/pgpartman/pg_partman) | Licence PostgreSQL | PL/pgSQL et C | Réécriture à prévoir |
+| Identifiants : UUIDv7, identifiants courts, numéros sans trou | `feature/identifiants` | [Sqids](https://github.com/sqids/sqids-rust) | MIT | Rust | Déjà en Rust |
 
 ### Exploitation
 
@@ -120,6 +142,9 @@ Les projets sous AGPL, SSPL ou BSL ne sont cités que comme projets écartés. L
 | Tests d'intégration générés | `feature/tests-integration` | [Testcontainers pour Rust](https://github.com/testcontainers/testcontainers-rs) | MIT ou Apache-2.0 | Rust | Déjà en Rust |
 | Tests de contrat entre services | `feature/tests-de-contrat` | [Pact (implémentation de référence)](https://github.com/pact-foundation/pact-reference) | MIT | Rust | Déjà en Rust |
 | Manifestes Kubernetes et chart Helm | `feature/manifestes-kubernetes` | [Kompose](https://github.com/kubernetes/kompose) | Apache-2.0 | Go | Réécriture à prévoir |
+| Tableaux de bord et alertes générés | `feature/tableaux-de-bord-et-alertes` | [Sloth](https://github.com/slok/sloth) | Apache-2.0 | Go | Réécriture à prévoir |
+| Tests de charge générés | `feature/tests-de-charge` | [Goose](https://github.com/tag1consulting/goose) | Apache-2.0 | Rust | Déjà en Rust |
+| Injection de pannes | `feature/injection-de-pannes` | [Toxiproxy](https://github.com/Shopify/toxiproxy) | MIT | Go | Réécriture à prévoir |
 
 ## Écarté pour l'instant
 
