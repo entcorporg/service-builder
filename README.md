@@ -197,7 +197,8 @@ La CI le fait.
 - Les appels HTTP sortants (*Appeler une API HTTP*) tournent dans la transaction du flux : un délai (30 s au plus, 60 s avec
   les réessais) y garde une connexion et les verrous déjà pris ; pas de file d'appels après le commit. Le corps JSON est plat
   (pas d'objet imbriqué) et la réponse est lue en JSON seulement.
-- Le HTML et le texte des mails se saisissent à la main : pas d'éditeur visuel de gabarits.
+- L'aperçu de l'éditeur de mails est dessiné par l'interface, pas par un client de messagerie : il ne charge pas les
+  images et ne dit pas ce que Gmail ou Outlook feront du HTML (le bouton « Ouvrir dans le navigateur » s'en approche).
 - Les tables se conçoivent dans la vue **Tables** et se lisent avec le bloc SQL. Les migrations renomment et suppriment
   (colonnes, tables), convertissent le type et changent le caractère nul d'une colonne, d'après un historique gardé dans
   le projet ; ce qui est retiré de l'historique avant que toutes les bases l'aient reçu n'est plus rejoué.

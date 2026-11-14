@@ -782,6 +782,47 @@ Validation : un service mail n'a ni RPC, ni route, ni table, ni tâche (`E_MTA_C
 événement (`E_MTA_TEMPLATE_MISSING`, `E_MTA_TEMPLATE_UNKNOWN`, `E_MTA_TEMPLATE_DUPLICATE`), avec un sujet et un corps. Une règle ou un
 mail hors d'un service mail est refusé (`E_MAIL_OUTSIDE_MTA`, `E_TEMPLATE_OUTSIDE_MTA`).
 
+**L'éditeur visuel des mails** (`crates/sb-model/src/maildesign.rs`, `crates/sb-egui/src/pages/mailcanvas.rs`). Un mail peut se
+**composer** au lieu de s'écrire : `MailTemplate.design` (optionnel, `design` en JSON) est une liste de **blocs** et des
+**réglages** du mail. Blocs : `heading` (niveau 1 à 3), `paragraph` (taille 10 à 32), `button` (libellé, lien, fonds, arrondi),
+`image` (adresse, texte alternatif, largeur, lien), `divider`, `spacer`, `columns` (2 ou 3 colonnes, chacune avec ses blocs, sans
+colonnes imbriquées) ; chacun a son alignement et ses couleurs (`#rrggbb`, celles des réglages sinon). Réglages : largeur
+(320 à 800 px), fond de page, fond du contenu, couleur du texte, police (sans-serif, serif, chasse fixe : ce que tout client a),
+pré-en-tête (la ligne vue à côté du sujet) et pied de mail. Les textes portent des **variables** de l'événement, `{{ nom }}`,
+insérées depuis une liste des champs de l'événement ; aucune autre syntaxe Tera n'est acceptée (`{%`, `{#`, un `{{` mal formé
+sont refusés : `E_MAIL_TEXT_SYNTAX`), donc rien n'est du code.
+
+Le HTML et le texte sont **dérivés** (`render_html`, `render_text`, `MailTemplate::bodies()`), jamais saisis : HTML de tableaux avec
+styles en ligne, sans script ni feuille externe (un seul `@media` empile les colonnes sur écran étroit), boutons faits d'un
+tableau et d'un lien. Ce qui est tapé est échappé à la dérivation ; les variables restent des `{{ nom }}` que Tera échappe dans
+le gabarit `.html` (pas dans le texte ni le sujet, qui reste un champ à part). Le texte brut lit les blocs de haut en bas (titre
+de niveau 1 souligné, bouton = « libellé : adresse », séparateur = `----`, pied après `-- `). La génération sème dans
+`mail_templates` ce qui est dérivé : le service généré ne sait pas qu'un mail a été composé. Un mail **sans** `design` est écrit à
+la main, comme avant : même JSON, même génération, mêmes mails ; avec un `design`, le `html` et le `text` saisis sont ignorés
+(`W_MAIL_HTML_IGNORED`). Le passage de l'un à l'autre se fait dans l'interface (« Éditeur visuel » sur un mail écrit à la main
+demande confirmation et se défait avec Ctrl+Z ; « Passer à l'écriture à la main » reprend le HTML et le texte dérivés).
+
+Validation (sous `/services/N/templates/M/design/…`) : `E_MAIL_DESIGN_EMPTY` (aucun bloc), `E_MAIL_WIDTH`, `E_MAIL_COLOR`,
+`E_MAIL_SIZE` (tailles, épaisseurs, arrondis), `E_MAIL_TEXT_SYNTAX`, `E_MAIL_VARIABLE_UNKNOWN` (variable qui n'est pas un champ
+de l'événement), `E_MAIL_LINK` (un lien commence par `https://`, `http://`, `mailto:` ou une variable, sans espace),
+`E_MAIL_COLUMNS` ; avertissements `W_MAIL_IMAGE_ALT`, `W_MAIL_BLOCK_EMPTY`, `W_MAIL_CONTRAST` (moins de 3:1), `W_MAIL_HTML_IGNORED`.
+Les contrôles `E_MTA_TEMPLATE_*` (corps non vide, `$tpl$`, syntaxe Tera) portent sur le HTML et le texte dérivés.
+
+L'éditeur (fenêtre « Éditeur visuel du mail ») travaille sur une copie : liste des blocs (ajouter, monter, descendre, supprimer),
+propriétés du bloc choisi, réglages, sélecteur de variables, onglets Aperçu / HTML dérivé / Texte dérivé, problèmes ;
+« Enregistrer » écrit en une modification annulable. **L'aperçu est dessiné par egui** (il n'y a pas de vue web) : il suit la
+structure, les couleurs, l'alignement, la largeur et les tailles relatives, avec les variables affichées `‹nom›` ; il ne charge pas
+les images (un cadre gris avec le texte alternatif), n'a pas de police serif et ne reproduit pas les particularités de Gmail ou
+d'Outlook. Le bouton « Ouvrir dans le navigateur » écrit le HTML dérivé (variables remplacées par `[nom]`) dans un fichier et
+l'ouvre : c'est le plus fidèle disponible sur le poste. Les images sont des adresses, pas des pièces jointes.
+
+**Vérifié** : le rendu du HTML et du texte d'un mail d'exemple est affirmé en entier dans les tests ; le HTML dérivé est compilé et
+rendu par Tera avec une valeur hostile (`<Ann> & co` ressort échappée) ; la validation (un test par code) ; un projet qui porte des
+gabarits écrits à la main s'ouvre et génère les mêmes `seed.rs` ; l'éditeur s'ouvre et dessine sur le showcase (test egui). **Non
+vérifié** : le rendu dans de vrais clients (Gmail, Outlook, Apple Mail), l'envoi d'un mail composé de bout en bout (le service
+généré n'a pas été relancé avec lui : il reçoit les mêmes chaînes qu'avant dans `seed.rs`), l'aspect de l'aperçu à l'écran
+(aucune capture n'a été regardée).
+
 Ce code vient d'un service en production (`SERVICE_BUILDER_MTA.md`), débarrassé de tout ce qui le rattachait à un projet. Deux défauts y
 ont été **corrigés** : (1) `dot_stuff` ajoutait un `\n` après le dernier segment, d'où un LF seul avant le point final des données
 SMTP (RFC 5321 §2.3.8 exige des CRLF ; Postfix et d'autres refusent un LF seul depuis les attaques de « SMTP smuggling ») ;

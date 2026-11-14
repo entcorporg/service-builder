@@ -114,6 +114,8 @@ pub struct App {
     pub mcp: pages::mcp::McpState,
     pub flows: pages::flows::FlowsState,
     pub pods: pages::pods::PodsState,
+    /// The visual editor of a mail, when one is open.
+    pub mail_editor: Option<pages::mailcanvas::MailEditor>,
 }
 
 pub fn stamp_of(path: &Path) -> u64 {
@@ -172,6 +174,7 @@ impl App {
             mcp: Default::default(),
             flows: Default::default(),
             pods: Default::default(),
+            mail_editor: None,
         };
         if let Some(path) = open {
             match sb_app::load_project(&path) {
@@ -494,6 +497,7 @@ impl App {
             });
 
         crate::widgets::toast(self, ctx);
+        pages::mailcanvas::show(self, ctx);
         crate::form::show_modals(self, ctx);
 
         for f in std::mem::take(&mut self.pending) {

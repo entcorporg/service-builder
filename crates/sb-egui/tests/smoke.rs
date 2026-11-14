@@ -137,3 +137,38 @@ fn drag_a_node_then_undo_with_the_keyboard() {
     h.run_steps(2);
     assert_eq!(position(&h), moved, "Ctrl+Shift+Z redoes it");
 }
+
+/// The visual editor of a mail opens on the composed mail of the showcase and draws (the preview paints every kind of
+/// block, including the columns), and an edit of the design reaches the HTML and the text derived from it.
+#[test]
+fn the_mail_editor_opens_draws_and_derives() {
+    let mut h = harness("showcase");
+    let si = h
+        .state()
+        .project()
+        .services
+        .iter()
+        .position(|s| s.name == "Mailer")
+        .unwrap();
+    sb_egui::pages::mailcanvas::open(h.state_mut(), si, "accounts.registered");
+    h.run_steps(3);
+    assert!(h.state().mail_editor.is_some());
+    h.state_mut().edit(|p| {
+        let t = &mut p.services[si].templates[0];
+        let sb_model::MailBlock::Heading { text, .. } = &mut t.design.as_mut().unwrap().blocks[0]
+        else {
+            panic!("the first block is a heading")
+        };
+        *text = "Bonjour {{ name }}".into();
+    });
+    h.run_steps(3);
+    let p = h.state().project();
+    let (html, text) = p.services[si].templates[0].bodies();
+    assert!(html.contains("Bonjour {{ name }}</h1>"));
+    assert!(text.starts_with("Bonjour {{ name }}\n"));
+    assert!(
+        sb_model::validate(&p)
+            .iter()
+            .all(|d| d.severity != sb_model::Severity::Error)
+    );
+}

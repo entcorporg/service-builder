@@ -1271,7 +1271,9 @@ impl<'a> Checker<'a> {
                     "a mail needs a subject",
                 );
             }
-            if t.html.trim().is_empty() && t.text.trim().is_empty() {
+            let (html, text) = t.bodies();
+            self.mail_design(t, &tp);
+            if html.trim().is_empty() && text.trim().is_empty() {
                 self.error(
                     "E_MTA_TEMPLATE_BODY",
                     &tp,
@@ -1282,8 +1284,8 @@ impl<'a> Checker<'a> {
             for (field, text) in [
                 ("eventType", &t.event_type),
                 ("subject", &t.subject),
-                ("html", &t.html),
-                ("text", &t.text),
+                ("html", &html),
+                ("text", &text),
             ] {
                 if text.contains("$tpl$") {
                     self.error(
@@ -1301,6 +1303,38 @@ impl<'a> Checker<'a> {
                     format!("{base}/consumers/{j}/topic"),
                     format!("the event `{}` has no mail: add its template", c.topic),
                 );
+            }
+        }
+    }
+
+    /// A mail composed as blocks: its colours, sizes, links and the variables of its texts, against the fields of the
+    /// event it is the mail of. Written by hand, a mail has nothing to check here.
+    fn mail_design(&mut self, t: &MailTemplate, tp: &str) {
+        let Some(design) = &t.design else { return };
+        if !t.html.trim().is_empty() || !t.text.trim().is_empty() {
+            self.warn(
+                "W_MAIL_HTML_IGNORED",
+                tp,
+                "this mail is composed as blocks: its hand-written HTML and text are ignored",
+            );
+        }
+        let project = self.project;
+        let fields: Vec<&str> = project
+            .topic(&t.event_type)
+            .and_then(|topic| project.message(&topic.message))
+            .map(|m| {
+                m.fields
+                    .iter()
+                    .filter(|f| !f.repeated && !matches!(f.ty, FieldType::Message { .. }))
+                    .map(|f| f.name.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for issue in crate::maildesign::check(design, &fields, &format!("{tp}/design")) {
+            if issue.error {
+                self.error(issue.code, issue.path, issue.message);
+            } else {
+                self.warn(issue.code, issue.path, issue.message);
             }
         }
     }
@@ -7090,6 +7124,70 @@ mod tests {
         p.services.iter_mut().find(|s| s.name == "Mailer").unwrap()
     }
 
+    use crate::maildesign::{MailBlock, MailDesign};
+
+    fn with_mail_design() -> Project {
+        let mut p = with_mailer();
+        sample::add_mail_design(&mut p);
+        p
+    }
+
+    #[test]
+    fn a_composed_mail_is_valid_and_its_checks_point_at_the_block() {
+        let p = with_mail_design();
+        assert_eq!(validate(&p), vec![], "{:?}", validate(&p));
+        let broken = |change: &dyn Fn(&mut MailDesign)| {
+            let mut p = with_mail_design();
+            change(mailer(&mut p).templates[0].design.as_mut().unwrap());
+            validate(&p)
+        };
+        let has = |d: &[Diagnostic], code: &str, path: &str| {
+            d.iter().any(|d| d.code == code && d.path == path)
+        };
+        let base = "/services/";
+        let at = |tail: &str| {
+            let p = with_mail_design();
+            let i = p.services.iter().position(|s| s.name == "Mailer").unwrap();
+            format!("{base}{i}/templates/0/design/{tail}")
+        };
+        let d = broken(&|d| d.blocks[1] = MailBlock::paragraph("Hi {{ nobody }}"));
+        assert!(
+            has(&d, "E_MAIL_VARIABLE_UNKNOWN", &at("blocks/1/text")),
+            "{d:?}"
+        );
+        let d = broken(&|d| d.blocks[2] = MailBlock::button("Go", "ftp://x"));
+        assert!(has(&d, "E_MAIL_LINK", &at("blocks/2/url")), "{d:?}");
+        let d = broken(&|d| d.settings.background = "white".into());
+        assert!(has(&d, "E_MAIL_COLOR", &at("settings/background")), "{d:?}");
+        let d = broken(&|d| d.blocks.clear());
+        assert!(has(&d, "E_MAIL_DESIGN_EMPTY", &at("blocks")), "{d:?}");
+        let d = broken(&|d| d.blocks[0] = MailBlock::heading("{% if x %}"));
+        assert!(has(&d, "E_MAIL_TEXT_SYNTAX", &at("blocks/0/text")), "{d:?}");
+        // Warnings do not stop the generation.
+        let d = broken(&|d| d.blocks.push(MailBlock::image("https://a.b/c.png", "")));
+        assert!(has(&d, "W_MAIL_IMAGE_ALT", &at("blocks/5/alt")), "{d:?}");
+        assert!(!has_errors(&d));
+        // A design and hand-written HTML at once: the HTML is ignored, and the author is told.
+        let mut p = with_mail_design();
+        mailer(&mut p).templates[0].html = "<p>x</p>".into();
+        assert!(validate(&p).iter().any(|d| d.code == "W_MAIL_HTML_IGNORED"));
+        // A design with no block has no body, hand-written or not.
+        let d = broken(&|d| d.blocks.clear());
+        assert!(
+            d.iter().any(|d| d.code == "E_MTA_TEMPLATE_BODY")
+                || has(&d, "E_MAIL_DESIGN_EMPTY", &at("blocks"))
+        );
+    }
+
+    #[test]
+    fn a_hand_written_mail_still_opens_without_a_design() {
+        let json = r#"{"eventType":"a.b","subject":"s","html":"<p>x</p>","text":"x"}"#;
+        let t: MailTemplate = serde_json::from_str(json).unwrap();
+        assert!(t.design.is_none());
+        assert_eq!(t.bodies(), ("<p>x</p>".to_string(), "x".to_string()));
+        assert!(!serde_json::to_string(&t).unwrap().contains("design"));
+    }
+
     #[test]
     fn a_mail_service_mails_the_events_it_listens_to() {
         let p = with_mailer();
@@ -7153,6 +7251,7 @@ mod tests {
                     subject: "s".into(),
                     html: "h".into(),
                     text: "t".into(),
+                    design: None,
                 })
             }),
             // The names end up in a Redis command, a key, a route and a Cookie header.

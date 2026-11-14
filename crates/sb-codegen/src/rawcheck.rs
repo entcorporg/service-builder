@@ -37,11 +37,9 @@ pub fn check(project: &Project) -> Vec<Diagnostic> {
 /// stop every mail.
 fn mail_templates(si: usize, s: &sb_model::Service, out: &mut Vec<Diagnostic>) {
     for (ti, t) in s.templates.iter().enumerate() {
-        for (field, source) in [
-            ("subject", &t.subject),
-            ("html", &t.html),
-            ("text", &t.text),
-        ] {
+        // A mail composed as blocks is checked as the HTML and the text it derives to.
+        let (html, text) = t.bodies();
+        for (field, source) in [("subject", &t.subject), ("html", &html), ("text", &text)] {
             if let Err(e) = tera::Tera::default().add_raw_template(field, source) {
                 // Tera's message spans several lines (the cause is on the last).
                 let why = std::error::Error::source(&e)

@@ -427,8 +427,29 @@ pub struct MailTemplate {
     /// The topic it is the mail of.
     pub event_type: String,
     pub subject: String,
+    /// The HTML written by hand. Ignored when the mail has a `design`.
+    #[serde(default)]
     pub html: String,
+    /// The plain text written by hand. Ignored when the mail has a `design`.
+    #[serde(default)]
     pub text: String,
+    /// The mail composed as blocks: its HTML and its text are derived from it (see [`MailTemplate::bodies`]). Absent for a
+    /// mail written by hand, which keeps working as it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub design: Option<crate::maildesign::MailDesign>,
+}
+
+impl MailTemplate {
+    /// The HTML and the plain text the mail is sent with: derived from the design when there is one, as written otherwise.
+    pub fn bodies(&self) -> (String, String) {
+        match &self.design {
+            Some(d) => (
+                crate::maildesign::render_html(d),
+                crate::maildesign::render_text(d),
+            ),
+            None => (self.html.clone(), self.text.clone()),
+        }
+    }
 }
 
 /// What a `mta` does with an event it listens to.

@@ -2,7 +2,7 @@
 
 use eframe::egui::Ui;
 use sb_model::{
-    Consumer, DedupFallback, FieldType, MailRule, MailTemplate, Project, RealtimeConfig,
+    Consumer, DedupFallback, FieldType, MailBlock, MailRule, MailTemplate, Project, RealtimeConfig,
 };
 
 use super::common::{empty, list_card};
@@ -62,16 +62,21 @@ pub fn default_rule(p: &Project, topic: &str) -> MailRule {
     }
 }
 
+/// A first mail, composed as blocks (the author writes no HTML): a heading, and a paragraph with a field of the event.
 pub fn starter_template(p: &Project, topic: &str, rule: &MailRule) -> MailTemplate {
     let shown = mail_fields(p, topic)
         .into_iter()
         .find(|f| *f != rule.recipient && *f != rule.dedup_field);
     let line = shown.map_or_else(|| topic.to_string(), |f| format!("{{{{ {f} }}}}"));
+    let subject = format!("Notification : {topic}");
+    let mut design = super::mailcanvas::starter_design(&subject);
+    design.blocks = vec![MailBlock::heading("Bonjour,"), MailBlock::paragraph(&line)];
     MailTemplate {
         event_type: topic.into(),
-        subject: format!("Notification : {topic}"),
-        html: format!("<p>Bonjour,</p>\n<p>{line}</p>\n"),
-        text: format!("Bonjour,\n\n{line}\n"),
+        subject,
+        html: String::new(),
+        text: String::new(),
+        design: Some(design),
     }
 }
 
@@ -100,15 +105,22 @@ pub fn draw_mail(app: &mut App, ui: &mut Ui, p: &Project, si: usize) {
     for (ci, c) in svc.consumers.iter().enumerate() {
         let template = svc.templates.iter().find(|t| t.event_type == c.topic);
         let subject = template.map_or("sans sujet", |t| t.subject.as_str());
+        let how = if template.is_some_and(|t| t.design.is_some()) {
+            "composé en blocs"
+        } else {
+            "écrit à la main"
+        };
+        let subject = format!("{subject} · {how}");
         match list_card(
             ui,
             &format!("Mail de {}", c.topic),
-            subject,
+            &subject,
             0.0,
-            &["Modifier", "Supprimer"],
+            &["Modifier", "Éditeur visuel", "Supprimer"],
         ) {
             Some(0) => mail_form(app, si, ci),
-            Some(1) => {
+            Some(1) => super::mailcanvas::open(app, si, &c.topic),
+            Some(2) => {
                 let topic = c.topic.clone();
                 app.edit(move |p| {
                     let svc = &mut p.services[si];
@@ -233,7 +245,7 @@ fn mail_form(app: &mut App, si: usize, ci: usize) {
         .iter()
         .find(|(f, _)| *f == rule.dedup_fallback)
         .map(|(_, l)| (*l).to_string());
-    let inputs = vec![
+    let mut inputs = vec![
         Input::new("Événement", Kind::Fixed(consumer.topic.clone())),
         Input::new(
             "Adresse",
@@ -276,9 +288,13 @@ fn mail_form(app: &mut App, si: usize, ci: usize) {
             },
         ),
         Input::new("Sujet", Kind::Text(template.subject.clone())),
-        Input::new("HTML", Kind::Multiline(template.html.clone())),
-        Input::new("Texte", Kind::Multiline(template.text.clone())),
     ];
+    // A mail composed as blocks has no HTML to type: its body is edited in the visual editor.
+    if template.design.is_none() {
+        inputs.push(Input::new("HTML", Kind::Multiline(template.html.clone())));
+        inputs.push(Input::new("Texte", Kind::Multiline(template.text.clone())));
+    }
+    let design = template.design.clone();
     let topic = consumer.topic.clone();
     ask(app, "Mail", inputs, move |app, values| {
         let mut v = values.into_iter();
@@ -293,6 +309,7 @@ fn mail_form(app: &mut App, si: usize, ci: usize) {
         let subject = next().map(Value::text).unwrap_or_default();
         let html = next().map(Value::text).unwrap_or_default();
         let text = next().map(Value::text).unwrap_or_default();
+        let design = design.clone();
         if recipient.is_empty() || dedup_field.is_empty() {
             return Err("L'événement n'a aucun champ texte : ajoutez-en un au message.".into());
         }
@@ -318,6 +335,7 @@ fn mail_form(app: &mut App, si: usize, ci: usize) {
                 subject,
                 html,
                 text,
+                design,
             };
             match svc.templates.iter_mut().find(|t| t.event_type == topic) {
                 Some(t) => *t = new,
