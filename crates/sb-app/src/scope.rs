@@ -219,6 +219,7 @@ mod tests {
                     if let Step::Sql {
                         bind: Some(b),
                         columns,
+                        many: false,
                         ..
                     } = s
                         && !columns.is_empty()

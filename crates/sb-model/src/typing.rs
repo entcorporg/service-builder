@@ -6,7 +6,7 @@ use std::fmt;
 
 use serde_json::Value;
 
-use crate::project::{Field, FieldType, Project};
+use crate::project::{Expr, Field, FieldType, Func, Project};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeRef {
@@ -308,6 +308,288 @@ pub fn parse_template(template: &str) -> Result<Vec<TemplatePart>, String> {
         parts.push(TemplatePart::Text(text));
     }
     Ok(parts)
+}
+
+impl Func {
+    /// Every operation, in the order the editors list them.
+    pub const ALL: [Func; 30] = [
+        Func::Concat,
+        Func::Lower,
+        Func::Upper,
+        Func::Trim,
+        Func::Length,
+        Func::Contains,
+        Func::StartsWith,
+        Func::EndsWith,
+        Func::Replace,
+        Func::Split,
+        Func::Join,
+        Func::Add,
+        Func::Sub,
+        Func::Mul,
+        Func::Div,
+        Func::Rem,
+        Func::Min,
+        Func::Max,
+        Func::Round,
+        Func::Floor,
+        Func::Ceil,
+        Func::ToInt32,
+        Func::ToInt64,
+        Func::ToDouble,
+        Func::ToText,
+        Func::ParseInt64,
+        Func::ParseDouble,
+        Func::Default,
+        Func::NewUuid,
+        Func::ListLength,
+    ];
+
+    /// The name used in JSON and in the compact syntax (`startsWith`).
+    pub fn name(self) -> String {
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default()
+    }
+
+    pub fn from_name(name: &str) -> Option<Func> {
+        Func::ALL.into_iter().find(|f| f.name() == name)
+    }
+
+    /// Fewest and most arguments (`None`: any number).
+    pub fn arity(self) -> (usize, Option<usize>) {
+        use Func::*;
+        match self {
+            NewUuid => (0, Some(0)),
+            Concat => (1, None),
+            Lower | Upper | Trim | Length | Round | Floor | Ceil | ToInt32 | ToInt64 | ToDouble
+            | ToText | ParseInt64 | ParseDouble | ListLength => (1, Some(1)),
+            Replace => (3, Some(3)),
+            _ => (2, Some(2)),
+        }
+    }
+
+    /// Whether the arguments are numbers of one same type.
+    pub fn is_arithmetic(self) -> bool {
+        matches!(
+            self,
+            Func::Add | Func::Sub | Func::Mul | Func::Div | Func::Rem | Func::Min | Func::Max
+        )
+    }
+}
+
+pub fn is_number(t: &TypeRef) -> bool {
+    !t.repeated
+        && !t.optional
+        && matches!(
+            t.ty,
+            FieldType::Int32 | FieldType::Int64 | FieldType::Float | FieldType::Double
+        )
+}
+
+fn is_integer(t: &FieldType) -> bool {
+    matches!(t, FieldType::Int32 | FieldType::Int64)
+}
+
+/// The type of an expression, or `None` when it is Rust code the editor cannot see into. `hint` is the type the
+/// context wants: it types literals (`1` is an int32 where an int32 is wanted). Pure: it is the one source of
+/// truth for validation and generation alike.
+pub fn expr_type(
+    project: &Project,
+    scope: &Scope,
+    expr: &Expr,
+    hint: Option<&TypeRef>,
+) -> Result<Option<TypeRef>, String> {
+    match expr {
+        Expr::Path { path } => Ok(Some(resolve_path(project, scope, path)?.ty)),
+        Expr::Literal { value } => match hint {
+            Some(to) => coerce_literal(value, to).map(|_| Some(to.clone())),
+            None => Ok(infer_literal(value)),
+        },
+        Expr::Raw { .. } => Ok(None),
+        Expr::Now => {
+            Err("`now()` is the database clock: it only fills a column of an SQL step".into())
+        }
+        Expr::Template { template } => {
+            for part in parse_template(template)? {
+                if let TemplatePart::Path(p) = part {
+                    let ty = resolve_path(project, scope, &p)?.ty;
+                    if !ty.is_simple_scalar() {
+                        return Err(format!("`{p}` is a {ty}: only plain values go in a text"));
+                    }
+                }
+            }
+            Ok(Some(TypeRef::scalar(FieldType::String)))
+        }
+        Expr::Call { func, args } => call_type(project, scope, *func, args, hint),
+    }
+}
+
+fn call_type(
+    project: &Project,
+    scope: &Scope,
+    func: Func,
+    args: &[Expr],
+    hint: Option<&TypeRef>,
+) -> Result<Option<TypeRef>, String> {
+    use Func::*;
+    let name = func.name();
+    let (min, max) = func.arity();
+    if args.len() < min || max.is_some_and(|m| args.len() > m) {
+        return Err(format!(
+            "`{name}` takes {} argument(s), found {}",
+            match max {
+                Some(m) if m == min => m.to_string(),
+                Some(m) => format!("{min} to {m}"),
+                None => format!("at least {min}"),
+            },
+            args.len()
+        ));
+    }
+    let text = TypeRef::scalar(FieldType::String);
+    let text_list = TypeRef {
+        repeated: true,
+        ..text.clone()
+    };
+    // `want`: the type argument `i` must have; raw Rust passes.
+    let check = |i: usize, want: &TypeRef| -> Result<(), String> {
+        match expr_type(project, scope, &args[i], Some(want))? {
+            Some(got) if !want.accepts(&got) => Err(format!(
+                "argument {} of `{name}` is a {got} but a {want} is expected",
+                i + 1
+            )),
+            _ => Ok(()),
+        }
+    };
+    let result = |ty: FieldType| Ok(Some(TypeRef::scalar(ty)));
+    match func {
+        Concat | Lower | Upper | Trim | Replace | Length | Contains | StartsWith | EndsWith
+        | Split | ParseInt64 | ParseDouble => {
+            for i in 0..args.len() {
+                check(i, &text)?;
+            }
+            match func {
+                Length => result(FieldType::Int64),
+                Contains | StartsWith | EndsWith => result(FieldType::Bool),
+                Split => Ok(Some(text_list)),
+                ParseInt64 | ParseDouble => Ok(Some(TypeRef {
+                    optional: true,
+                    ty: if func == ParseInt64 {
+                        FieldType::Int64
+                    } else {
+                        FieldType::Double
+                    },
+                    repeated: false,
+                })),
+                _ => result(FieldType::String),
+            }
+        }
+        Join => {
+            check(0, &text_list)?;
+            check(1, &text)?;
+            result(FieldType::String)
+        }
+        Add | Sub | Mul | Div | Rem | Min | Max => {
+            match arithmetic_type(project, scope, args, hint)? {
+                None => Ok(None),
+                Some(ty) => {
+                    if !is_number(&ty) {
+                        return Err(format!("`{name}` works on numbers, found a {ty}"));
+                    }
+                    if func == Rem && !is_integer(&ty.ty) {
+                        return Err("`rem` works on integers".into());
+                    }
+                    for i in 0..args.len() {
+                        check(i, &ty)?;
+                    }
+                    Ok(Some(ty))
+                }
+            }
+        }
+        Round | Floor | Ceil => {
+            let float = TypeRef::scalar(FieldType::Double);
+            if let Some(t) = expr_type(project, scope, &args[0], Some(&float))?
+                && !(is_number(&t) && matches!(t.ty, FieldType::Float | FieldType::Double))
+            {
+                return Err(format!("`{name}` rounds a float or a double, found a {t}"));
+            }
+            result(FieldType::Int64)
+        }
+        ToInt32 | ToInt64 | ToDouble | ToText => {
+            if let Some(t) = expr_type(project, scope, &args[0], None)? {
+                if func == ToText && !t.is_simple_scalar() {
+                    return Err(format!("`toText` needs a plain value, found a {t}"));
+                }
+                if func != ToText && !is_number(&t) {
+                    return Err(format!("`{name}` converts a number, found a {t}"));
+                }
+            }
+            result(match func {
+                ToInt32 => FieldType::Int32,
+                ToInt64 => FieldType::Int64,
+                ToDouble => FieldType::Double,
+                _ => FieldType::String,
+            })
+        }
+        Default => {
+            let Some(first) = expr_type(project, scope, &args[0], None)? else {
+                return Ok(None);
+            };
+            if !first.optional || first.repeated || first.is_message() {
+                return Err(format!(
+                    "`default` needs an optional value, which may be absent; this one is a {first}"
+                ));
+            }
+            let plain = TypeRef {
+                optional: false,
+                ..first
+            };
+            check(1, &plain)?;
+            Ok(Some(plain))
+        }
+        NewUuid => result(FieldType::Uuid),
+        ListLength => {
+            if let Some(t) = expr_type(project, scope, &args[0], None)?
+                && !t.repeated
+            {
+                return Err(format!("`listLength` needs a list, found a {t}"));
+            }
+            result(FieldType::Int64)
+        }
+    }
+}
+
+/// The type of the operands of an arithmetic call: the one of the first argument that has a type of its own, and
+/// the literals follow it; else what the context wants; else the natural type of the literals.
+fn arithmetic_type(
+    project: &Project,
+    scope: &Scope,
+    args: &[Expr],
+    hint: Option<&TypeRef>,
+) -> Result<Option<TypeRef>, String> {
+    let hint = hint.filter(|h| is_number(h));
+    for a in args {
+        if !matches!(a, Expr::Literal { .. })
+            && let Some(t) = expr_type(project, scope, a, hint)?
+        {
+            return Ok(Some(t));
+        }
+    }
+    if let Some(h) = hint {
+        return Ok(Some(h.clone()));
+    }
+    if args.iter().any(|a| matches!(a, Expr::Raw { .. })) {
+        return Ok(None);
+    }
+    let float = args
+        .iter()
+        .any(|a| matches!(a, Expr::Literal { value } if value.is_f64()));
+    Ok(Some(TypeRef::scalar(if float {
+        FieldType::Double
+    } else {
+        FieldType::Int64
+    })))
 }
 
 #[cfg(test)]

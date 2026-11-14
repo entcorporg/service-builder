@@ -781,7 +781,10 @@ fn response_body(
         .rposition(|s| matches!(s, Step::Respond { .. }));
     let scope_end = respond_at.unwrap_or(route.steps.len());
     let vars = variables(project, Some(&route.request), &route.steps[..scope_end]);
-    let nested = route.steps.iter().any(|s| matches!(s, Step::Branch { .. }));
+    let nested = route
+        .steps
+        .iter()
+        .any(|s| matches!(s, Step::Branch { .. } | Step::ForEach { .. }));
     if let Some(at) = respond_at {
         let Step::Respond { fields, .. } = &route.steps[at] else {
             unreachable!()

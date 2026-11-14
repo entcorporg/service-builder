@@ -13,6 +13,7 @@ const RUNTIME_OUTBOX: &str = include_str!("../templates/runtime/outbox.rs");
 const RUNTIME_DB: &str = include_str!("../templates/runtime/db.rs");
 const RUNTIME_DEDUP: &str = include_str!("../templates/runtime/dedup.rs");
 const RUNTIME_JWT: &str = include_str!("../templates/runtime/jwt.rs");
+const RUNTIME_LOGIC: &str = include_str!("../templates/runtime/logic.rs");
 const RUNTIME_JOBS: &str = include_str!("../templates/runtime/jobs.rs");
 const RUNTIME_CRYPTO: &str = include_str!("../templates/runtime/crypto.rs");
 const RUNTIME_VALIDATION: &str = include_str!("../templates/runtime/validation.rs");
@@ -46,6 +47,7 @@ pub fn files(project: &Project) -> Vec<GeneratedFile> {
         GeneratedFile::new("runtime/src/dedup.rs", RUNTIME_DEDUP),
         GeneratedFile::new("runtime/src/jobs.rs", RUNTIME_JOBS),
         GeneratedFile::new("runtime/src/jwt.rs", RUNTIME_JWT),
+        GeneratedFile::new("runtime/src/logic.rs", RUNTIME_LOGIC),
         GeneratedFile::new("runtime/src/rate_limit.rs", RUNTIME_RATE_LIMIT),
         GeneratedFile::new("runtime/src/live.rs", RUNTIME_LIVE),
         GeneratedFile::new("runtime/src/s3.rs", RUNTIME_S3),

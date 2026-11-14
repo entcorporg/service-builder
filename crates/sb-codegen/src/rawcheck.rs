@@ -213,15 +213,15 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                 otherwise,
                 ..
             } => {
-                match condition {
-                    Condition::Raw { code } => parse_expr(code, &format!("{path}/condition"), out),
-                    Condition::Compare { left, right, .. } => {
-                        expr(left, &format!("{path}/condition/left"), out);
-                        expr(right, &format!("{path}/condition/right"), out);
-                    }
-                }
+                condition_exprs(condition, &format!("{path}/condition"), out);
                 steps(&format!("{path}/then"), then, out);
                 steps(&format!("{path}/otherwise"), otherwise, out);
+            }
+            Step::ForEach {
+                list, steps: body, ..
+            } => {
+                expr(list, &format!("{path}/list"), out);
+                steps(&format!("{path}/steps"), body, out);
             }
             Step::Code { code, .. } => {
                 if !code.trim().is_empty()
@@ -248,8 +248,42 @@ fn app_url_expr(app_url: &Option<Expr>, path: &str, out: &mut Vec<Diagnostic>) {
 }
 
 fn expr(e: &Expr, path: &str, out: &mut Vec<Diagnostic>) {
-    if let Expr::Raw { code } = e {
-        parse_expr(code, path, out);
+    match e {
+        Expr::Raw { code } => parse_expr(code, path, out),
+        Expr::Call { args, .. } => {
+            for (i, a) in args.iter().enumerate() {
+                expr(a, &format!("{path}/args/{i}"), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn condition_exprs(c: &Condition, path: &str, out: &mut Vec<Diagnostic>) {
+    match c {
+        Condition::Raw { code } => parse_expr(code, path, out),
+        Condition::Compare { left, right, .. } => {
+            expr(left, &format!("{path}/left"), out);
+            expr(right, &format!("{path}/right"), out);
+        }
+        Condition::And { conditions } | Condition::Or { conditions } => {
+            for (i, c) in conditions.iter().enumerate() {
+                condition_exprs(c, &format!("{path}/conditions/{i}"), out);
+            }
+        }
+        Condition::Not { condition } => {
+            condition_exprs(condition, &format!("{path}/condition"), out)
+        }
+        Condition::Present { value }
+        | Condition::Absent { value }
+        | Condition::Empty { value }
+        | Condition::Test { value } => expr(value, &format!("{path}/value"), out),
+        Condition::In { value, values } => {
+            expr(value, &format!("{path}/value"), out);
+            for (i, v) in values.iter().enumerate() {
+                expr(v, &format!("{path}/values/{i}"), out);
+            }
+        }
     }
 }
 

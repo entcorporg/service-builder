@@ -6,10 +6,13 @@
 //! ```text
 //! input.order_id      a variable or a field of one        "paid"  42  true  null   a literal (JSON)
 //! now                 the current time                    rust: code              Rust, inserted verbatim
+//! add(input.qty, 1)   an operation (`concat`, `default`...)   template("Order {input.id}")   a text with values
 //! ```
 //!
-//! A list of assignments is one `field = expression` per line; a condition is `left op right` (`== != > >= < <=`)
-//! or `rust: code`; a list of words is comma separated; anything more structured is shown as JSON.
+//! A list of assignments is one `field = expression` per line; a condition is `left op right` (`== != > >= < <=`),
+//! `x is present`, `x is absent`, `x is empty`, `x in [1, 2]`, a yes/no operation (`contains(a, "x")`), these joined by
+//! `and`, `or`, `not` and parentheses, or `rust: code`; a list of words is comma separated; anything more structured
+//! is shown as JSON.
 
 use std::sync::OnceLock;
 
@@ -201,14 +204,115 @@ pub fn specs(kind: &str) -> Vec<Spec> {
 
 // ---- text <-> JSON ----
 
+/// An expression as text. Inside an operation, Rust code and templates are written as calls (`rust("code")`,
+/// `template("text {x}")`) so that their commas and parentheses cannot be mistaken for the structure.
 pub fn expr_to_text(expr: &Value) -> String {
+    expr_text(expr, false)
+}
+
+fn json_text(s: &str) -> String {
+    Value::String(s.to_string()).to_string()
+}
+
+fn expr_text(expr: &Value, nested: bool) -> String {
     match expr["kind"].as_str() {
         Some("path") => expr["path"].as_str().unwrap_or_default().to_string(),
         Some("literal") => expr["value"].to_string(),
-        Some("raw") => format!("rust: {}", expr["code"].as_str().unwrap_or_default()),
+        Some("raw") => {
+            let code = expr["code"].as_str().unwrap_or_default();
+            if nested {
+                format!("rust({})", json_text(code))
+            } else {
+                format!("rust: {code}")
+            }
+        }
         Some("now") => "now".into(),
+        Some("template") => format!(
+            "template({})",
+            json_text(expr["template"].as_str().unwrap_or_default())
+        ),
+        Some("call") => {
+            let args: Vec<String> = expr["args"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|a| expr_text(a, true))
+                .collect();
+            format!(
+                "{}({})",
+                expr["func"].as_str().unwrap_or_default(),
+                args.join(", ")
+            )
+        }
         _ => String::new(),
     }
+}
+
+/// Splits at the commas that are not inside a quoted text, parentheses or brackets.
+fn split_top_commas(text: &str) -> Vec<&str> {
+    let mut parts = vec![];
+    let (mut depth, mut start) = (0i32, 0);
+    let (mut quoted, mut escaped) = (false, false);
+    for (i, c) in text.char_indices() {
+        if quoted {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => quoted = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => quoted = true,
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&text[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&text[start..]);
+    parts
+}
+
+/// `name(args)`: the name and what is between the outer parentheses.
+fn as_call(t: &str) -> Option<(&str, &str)> {
+    let open = t.find('(')?;
+    let name = &t[..open];
+    if !name.chars().next()?.is_ascii_alphabetic()
+        || !name.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    let inner = t[open + 1..].strip_suffix(')')?;
+    // The closing parenthesis must be the one of the opening one: `f(a) + g(b)` is not a call.
+    let (mut depth, mut quoted, mut escaped) = (0i32, false, false);
+    for c in inner.chars() {
+        if quoted {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => quoted = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => quoted = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    Some((name, inner))
 }
 
 pub fn parse_expr(text: &str) -> Result<Value, String> {
@@ -219,8 +323,36 @@ pub fn parse_expr(text: &str) -> Result<Value, String> {
     if let Some(code) = t.strip_prefix("rust:") {
         return Ok(json!({"kind": "raw", "code": code.trim()}));
     }
+    if let Some(template) = t.strip_prefix("template:") {
+        return Ok(json!({"kind": "template", "template": template.trim()}));
+    }
     if t == "now" {
         return Ok(json!({"kind": "now"}));
+    }
+    if let Some((name, inner)) = as_call(t) {
+        let text_arg = || -> Result<String, String> {
+            match serde_json::from_str::<Value>(inner.trim()) {
+                Ok(Value::String(s)) => Ok(s),
+                _ => Err(format!("`{name}(\"…\")` attend un texte entre guillemets")),
+            }
+        };
+        match name {
+            "rust" => return Ok(json!({"kind": "raw", "code": text_arg()?})),
+            "template" => return Ok(json!({"kind": "template", "template": text_arg()?})),
+            _ => {}
+        }
+        let func = sb_model::Func::from_name(name).ok_or_else(|| {
+            format!("« {name} » n'est pas une opération (concat, add, default, listLength…)")
+        })?;
+        let args = if inner.trim().is_empty() {
+            vec![]
+        } else {
+            split_top_commas(inner)
+                .into_iter()
+                .map(parse_expr)
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        return Ok(json!({"kind": "call", "func": func.name(), "args": args}));
     }
     if let Ok(value) = serde_json::from_str::<Value>(t) {
         return Ok(json!({"kind": "literal", "value": value}));
@@ -232,16 +364,17 @@ pub fn parse_expr(text: &str) -> Result<Value, String> {
         Ok(json!({"kind": "path", "path": t}))
     } else {
         Err(format!(
-            "« {t} » n'est ni une variable (a.b), ni un littéral JSON (\"texte\", 42), ni `rust: code`"
+            "« {t} » n'est ni une variable (a.b), ni un littéral JSON (\"texte\", 42), ni une opération `add(a, 1)`, ni `rust: code`"
         ))
     }
 }
 
-/// Splits `left op right` at the first comparison operator that is outside a quoted text.
+/// Splits `left op right` at the first comparison operator that is outside a quoted text, parentheses and brackets.
 fn split_comparison(text: &str) -> Option<(&str, &str, &str)> {
     const OPS: [&str; 6] = ["==", "!=", ">=", "<=", ">", "<"];
     let mut quoted = false;
     let mut escaped = false;
+    let mut depth = 0i32;
     for (i, c) in text.char_indices() {
         if quoted {
             match (escaped, c) {
@@ -252,11 +385,18 @@ fn split_comparison(text: &str) -> Option<(&str, &str, &str)> {
             }
             continue;
         }
-        if c == '"' {
-            quoted = true;
-            continue;
+        match c {
+            '"' => {
+                quoted = true;
+                continue;
+            }
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            _ => {}
         }
-        if let Some(op) = OPS.iter().find(|op| text[i..].starts_with(**op)) {
+        if depth == 0
+            && let Some(op) = OPS.iter().find(|op| text[i..].starts_with(**op))
+        {
             return Some((&text[..i], op, &text[i + op.len()..]));
         }
     }
@@ -286,15 +426,103 @@ fn op_symbol(word: &str) -> &'static str {
 }
 
 pub fn condition_to_text(c: &Value) -> String {
+    condition_text(c, 0, false)
+}
+
+/// `level`: 0 anywhere, 1 inside an `or`, 2 inside an `and`, 3 after a `not` (what needs parentheses grows).
+fn condition_text(c: &Value, level: u8, nested: bool) -> String {
+    let e = |v: &Value| expr_text(v, true);
+    let group = |word: &str, own: u8| {
+        let parts: Vec<String> = c["conditions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|x| condition_text(x, own, true))
+            .collect();
+        match parts.len() {
+            0 => {
+                if word == "and" {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                }
+            }
+            1 => parts[0].clone(),
+            _ => {
+                let joined = parts.join(&format!(" {word} "));
+                if level > own - 1 {
+                    format!("({joined})")
+                } else {
+                    joined
+                }
+            }
+        }
+    };
     match c["kind"].as_str() {
         Some("compare") => format!(
             "{} {} {}",
-            expr_to_text(&c["left"]),
+            e(&c["left"]),
             op_symbol(c["op"].as_str().unwrap_or("eq")),
-            expr_to_text(&c["right"])
+            e(&c["right"])
         ),
-        _ => format!("rust: {}", c["code"].as_str().unwrap_or_default()),
+        Some("and") => group("and", 2),
+        Some("or") => group("or", 1),
+        Some("not") => format!("not {}", condition_text(&c["condition"], 3, true)),
+        Some("present") => format!("{} is present", e(&c["value"])),
+        Some("absent") => format!("{} is absent", e(&c["value"])),
+        Some("empty") => format!("{} is empty", e(&c["value"])),
+        Some("test") => e(&c["value"]),
+        Some("in") => format!(
+            "{} in [{}]",
+            e(&c["value"]),
+            c["values"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(e)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => {
+            let code = c["code"].as_str().unwrap_or_default();
+            if nested {
+                format!("rust({})", json_text(code))
+            } else {
+                format!("rust: {code}")
+            }
+        }
     }
+}
+
+/// Splits at ` word ` (spaces around) outside quotes, parentheses and brackets.
+fn split_word<'a>(text: &'a str, word: &str) -> Vec<&'a str> {
+    let pat = format!(" {word} ");
+    let mut parts = vec![];
+    let (mut depth, mut start) = (0i32, 0);
+    let (mut quoted, mut escaped) = (false, false);
+    for (i, c) in text.char_indices() {
+        if quoted {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => quoted = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => quoted = true,
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && !quoted && text[i..].starts_with(&pat) && i >= start {
+            parts.push(&text[start..i]);
+            start = i + pat.len();
+        }
+    }
+    parts.push(&text[start..]);
+    parts
 }
 
 pub fn parse_condition(text: &str) -> Result<Value, String> {
@@ -302,14 +530,67 @@ pub fn parse_condition(text: &str) -> Result<Value, String> {
     if let Some(code) = t.strip_prefix("rust:") {
         return Ok(json!({"kind": "raw", "code": code.trim()}));
     }
-    let (left, op, right) = split_comparison(t)
-        .ok_or("une condition s'écrit `gauche == droite` (== != > >= < <=) ou `rust: code`")?;
-    Ok(json!({
-        "kind": "compare",
-        "left": parse_expr(left)?,
-        "op": op_word(op),
-        "right": parse_expr(right)?,
-    }))
+    for (word, kind) in [("or", "or"), ("and", "and")] {
+        let parts = split_word(t, word);
+        if parts.len() > 1 {
+            let conditions = parts
+                .into_iter()
+                .map(parse_condition)
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(json!({"kind": kind, "conditions": conditions}));
+        }
+    }
+    if let Some(rest) = t.strip_prefix("not ") {
+        return Ok(json!({"kind": "not", "condition": parse_condition(rest)?}));
+    }
+    // A group: `(a or b)`, but not `(a) == (b)`.
+    if t.starts_with('(')
+        && let Some((name, inner)) = as_call(&format!("g{t}"))
+        && name == "g"
+    {
+        return parse_condition(inner);
+    }
+    if let Some((name, inner)) = as_call(t)
+        && name == "rust"
+        && let Ok(Value::String(code)) = serde_json::from_str::<Value>(inner.trim())
+    {
+        return Ok(json!({"kind": "raw", "code": code}));
+    }
+    for (suffix, kind) in [
+        (" is present", "present"),
+        (" is absent", "absent"),
+        (" is empty", "empty"),
+    ] {
+        if let Some(value) = t.strip_suffix(suffix) {
+            return Ok(json!({"kind": kind, "value": parse_expr(value)?}));
+        }
+    }
+    if let Some((value, list)) = split_word(t, "in").split_first().and_then(|(v, rest)| {
+        let list = rest.first()?.trim();
+        let list = list.strip_prefix('[')?.strip_suffix(']')?;
+        Some((*v, list))
+    }) {
+        let values = if list.trim().is_empty() {
+            vec![]
+        } else {
+            split_top_commas(list)
+                .into_iter()
+                .map(parse_expr)
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        return Ok(json!({"kind": "in", "value": parse_expr(value)?, "values": values}));
+    }
+    match split_comparison(t) {
+        Some((left, op, right)) => Ok(json!({
+            "kind": "compare",
+            "left": parse_expr(left)?,
+            "op": op_word(op),
+            "right": parse_expr(right)?,
+        })),
+        None => parse_expr(t).map(|value| json!({"kind": "test", "value": value})).map_err(|_| {
+            "une condition s'écrit `gauche == droite` (== != > >= < <=), `x is present`, `x in [1, 2]`, `a and b`, `not a` ou `rust: code`".to_string()
+        }),
+    }
 }
 
 pub fn assignments_to_text(list: &Value) -> String {
@@ -617,6 +898,45 @@ mod tests {
     }
 
     #[test]
+    fn operations_and_templates_round_trip() {
+        for text in [
+            "add(input.qty, 1)",
+            "default(input.note, \"none\")",
+            "concat(\"a, b\", lower(input.name), template(\"x {input.id}\"))",
+            "listLength(split(input.csv, \",\"))",
+            "newUuid()",
+            "add(rust(\"a(1, 2)\"), 2)",
+        ] {
+            let v = parse_expr(text).unwrap();
+            assert_eq!(expr_to_text(&v), text, "{v}");
+        }
+        assert!(parse_expr("nope(1)").is_err());
+        assert_eq!(
+            parse_expr("template: Hi {a}").unwrap(),
+            json!({"kind":"template","template":"Hi {a}"})
+        );
+    }
+
+    #[test]
+    fn conditions_combine_with_and_or_not() {
+        for text in [
+            "input.a is present and input.b > 3",
+            "(input.a == 1 or input.b == 2) and not input.c is empty",
+            "not (input.a == 1 and input.b == 2)",
+            "input.state in [\"a\", \"b or c\"]",
+            "contains(input.name, \"x\") or input.note is absent",
+            "rust: a || b",
+        ] {
+            let v = parse_condition(text).unwrap();
+            assert_eq!(condition_to_text(&v), text, "{v}");
+        }
+        let v = parse_condition("a.x == 1 or a.y == 2 and a.z == 3").unwrap();
+        assert_eq!(v["kind"], "or");
+        assert_eq!(v["conditions"][1]["kind"], "and");
+        assert_eq!(parse_condition("(a.x == 1)").unwrap()["kind"], "compare");
+    }
+
+    #[test]
     fn a_wrong_text_names_the_field() {
         let step = blank("log", "x1").unwrap();
         let err = from_texts(&step, &["fatal".into(), "hello".into()]).unwrap_err();
@@ -627,5 +947,7 @@ mod tests {
     fn nested_steps_are_not_part_of_the_form() {
         let keys: Vec<String> = specs("branch").into_iter().map(|s| s.key).collect();
         assert_eq!(keys, vec!["condition"]);
+        let keys: Vec<String> = specs("forEach").into_iter().map(|s| s.key).collect();
+        assert_eq!(keys, vec!["item", "list"]);
     }
 }

@@ -63,6 +63,21 @@ fn lit(v: impl Into<Value>) -> Expr {
     Expr::Literal { value: v.into() }
 }
 
+/// A new random UUID, the typed operation (no Rust).
+fn new_uuid() -> Expr {
+    call(Func::NewUuid, vec![])
+}
+
+fn call(func: Func, args: Vec<Expr>) -> Expr {
+    Expr::Call { func, args }
+}
+
+fn template(text: &str) -> Expr {
+    Expr::Template {
+        template: text.into(),
+    }
+}
+
 fn raw(code: &str) -> Expr {
     Expr::Raw { code: code.into() }
 }
@@ -199,7 +214,7 @@ pub fn orders() -> Project {
                         value_type: FieldType::String,
                         optional: false,
                         repeated: false,
-                        value: raw("eda_runtime::new_id()"),
+                        value: new_uuid(),
                     },
                     Step::Log {
                         id: "o2".into(),
@@ -288,7 +303,7 @@ pub fn orders() -> Project {
                         value_type: FieldType::String,
                         optional: false,
                         repeated: false,
-                        value: raw("eda_runtime::new_id()"),
+                        value: new_uuid(),
                     },
                     Step::Sql {
                         id: "h5".into(),
@@ -424,7 +439,7 @@ pub fn orders() -> Project {
                         topic: "payments.completed".into(),
                         payload: vec![
                             set("order_id", path("input.order_id")),
-                            set("reference", raw("eda_runtime::new_id()")),
+                            set("reference", new_uuid()),
                         ],
                     }],
                     otherwise: vec![Step::Publish {
@@ -828,6 +843,7 @@ pub fn showcase() -> Project {
     add_notes(&mut p);
     add_mailer(&mut p);
     add_live_events(&mut p);
+    add_basket_lines(&mut p);
     p
 }
 
@@ -1760,7 +1776,7 @@ pub fn add_notes(p: &mut Project) {
             value_type: FieldType::String,
             optional: false,
             repeated: false,
-            value: raw("eda_runtime::new_id()"),
+            value: new_uuid(),
         },
         sql(
             "n5",
@@ -1884,7 +1900,7 @@ pub fn add_mailer(p: &mut Project) {
             value_type: FieldType::String,
             optional: false,
             repeated: false,
-            value: raw("eda_runtime::new_id()"),
+            value: new_uuid(),
         },
     );
     signup.steps.insert(
@@ -1989,4 +2005,234 @@ pub fn add_live_events(p: &mut Project) {
             data: vec![set("id", path("order_id"))],
         },
     );
+}
+
+/// Adds to the first service the logic of a flow without a line of code: a route that takes a list of order lines,
+/// checks each one with conditions (`or`, `empty`, comparisons), stores it in a loop (`forEach`: one insert per
+/// element, all in the transaction of the request, so that one refused line undoes the others), building the text and
+/// the default of a column with operations (`lower`, `trim`, `default`, a template); and a second route that loops over
+/// the rows of a `many` query. The answers count with `listLength` and `concat`/`toText`.
+pub fn add_basket_lines(p: &mut Project) {
+    let string = || FieldType::String;
+    let mut sku = field("sku", string());
+    sku.optional = false;
+    let mut note = field("note", string());
+    note.optional = true;
+    let mut lines = msg_field("lines", "OrderLine");
+    lines.repeated = true;
+    let mut coupon = field("coupon", string());
+    coupon.optional = true;
+    p.messages.push(api(
+        "OrderLine",
+        vec![sku, field("qty", FieldType::Int32), note],
+    ));
+    p.messages.push(api(
+        "AddLines",
+        vec![field("order_id", string()), lines, coupon],
+    ));
+    p.messages
+        .push(api("OrderRef", vec![field("order_id", string())]));
+    p.messages.push(api(
+        "AddedLines",
+        vec![field("count", FieldType::Int64), field("summary", string())],
+    ));
+
+    let mut lnote = Column::new("note", ColumnType::String);
+    lnote.nullable = true;
+    let mut line_id = Column::new("line_id", ColumnType::String);
+    line_id.primary_key = true;
+    p.services[0].tables.push(Table::new(
+        "basket_lines",
+        vec![
+            line_id,
+            Column::new("order_id", ColumnType::String),
+            Column::new("sku", ColumnType::String),
+            Column::new("qty", ColumnType::Int32),
+            Column::new("label", ColumnType::String),
+            lnote,
+        ],
+    ));
+
+    let invalid_line = Condition::Or {
+        conditions: vec![
+            Condition::Compare {
+                left: path("line.qty"),
+                op: CmpOp::Le,
+                right: lit(0),
+            },
+            Condition::Compare {
+                left: path("line.qty"),
+                op: CmpOp::Gt,
+                right: lit(1000),
+            },
+            Condition::Empty {
+                value: call(Func::Trim, vec![path("line.sku")]),
+            },
+        ],
+    };
+    let steps = vec![
+        Step::Branch {
+            id: "l1".into(),
+            condition: Condition::Empty {
+                value: path("input.lines"),
+            },
+            then: vec![Step::Fail {
+                id: "l2".into(),
+                status: 400,
+                message: "an order has at least one line".into(),
+                retry_after: None,
+            }],
+            otherwise: vec![],
+        },
+        // A coupon is optional: absent, a fixed word stands for it.
+        Step::Let {
+            id: "l3".into(),
+            name: "coupon".into(),
+            value_type: string(),
+            optional: false,
+            repeated: false,
+            value: call(
+                Func::Upper,
+                vec![call(Func::Default, vec![path("input.coupon"), lit("none")])],
+            ),
+        },
+        Step::ForEach {
+            id: "l4".into(),
+            item: "line".into(),
+            list: path("input.lines"),
+            steps: vec![
+                Step::Branch {
+                    id: "l5".into(),
+                    condition: invalid_line,
+                    then: vec![Step::Fail {
+                        id: "l6".into(),
+                        status: 400,
+                        message: "a line needs a sku and a quantity from 1 to 1000".into(),
+                        retry_after: None,
+                    }],
+                    otherwise: vec![],
+                },
+                Step::Sql {
+                    id: "l7".into(),
+                    op: SqlOp::Insert,
+                    table: "basket_lines".into(),
+                    bind: None,
+                    columns: vec![],
+                    many: false,
+                    into: None,
+                    conditions: vec![],
+                    values: vec![
+                        set("line_id", new_uuid()),
+                        set("order_id", path("input.order_id")),
+                        set(
+                            "sku",
+                            call(Func::Lower, vec![call(Func::Trim, vec![path("line.sku")])]),
+                        ),
+                        set("qty", path("line.qty")),
+                        set("label", template("{input.order_id}/{line.sku} ({coupon})")),
+                        set(
+                            "note",
+                            call(Func::Default, vec![path("line.note"), lit("-")]),
+                        ),
+                    ],
+                    order_by: None,
+                    descending: false,
+                    limit: None,
+                    missing: None,
+                },
+            ],
+        },
+        Step::Respond {
+            id: "l8".into(),
+            fields: vec![
+                set("count", call(Func::ListLength, vec![path("input.lines")])),
+                set(
+                    "summary",
+                    call(
+                        Func::Concat,
+                        vec![
+                            lit("added "),
+                            call(
+                                Func::ToText,
+                                vec![call(Func::ListLength, vec![path("input.lines")])],
+                            ),
+                            lit(" lines"),
+                        ],
+                    ),
+                ),
+            ],
+            status: None,
+            cookies: vec![],
+        },
+    ];
+    p.services[0].routes.push(Route {
+        name: "add_lines".into(),
+        method: HttpMethod::Post,
+        path: "/orders/{order_id}/lines".into(),
+        request: "AddLines".into(),
+        response: "AddedLines".into(),
+        status: 200,
+        steps,
+    });
+
+    let steps = vec![
+        Step::Sql {
+            id: "l9".into(),
+            op: SqlOp::Select,
+            table: "basket_lines".into(),
+            bind: Some("found".into()),
+            columns: vec!["sku".into(), "qty".into(), "note".into()],
+            many: true,
+            into: Some("OrderLine".into()),
+            conditions: vec![SqlCondition {
+                column: "order_id".into(),
+                op: CmpOp::Eq,
+                value: path("input.order_id"),
+            }],
+            values: vec![],
+            order_by: Some("sku".into()),
+            descending: false,
+            limit: None,
+            missing: None,
+        },
+        Step::ForEach {
+            id: "l10".into(),
+            item: "row".into(),
+            list: path("found"),
+            steps: vec![Step::Branch {
+                id: "l11".into(),
+                condition: Condition::Present {
+                    value: path("row.note"),
+                },
+                then: vec![Step::Log {
+                    id: "l12".into(),
+                    level: LogLevel::Info,
+                    message: "line {row.sku} x {row.qty} has a note".into(),
+                }],
+                otherwise: vec![Step::Log {
+                    id: "l13".into(),
+                    level: LogLevel::Info,
+                    message: "line {row.sku} x {row.qty}".into(),
+                }],
+            }],
+        },
+        Step::Respond {
+            id: "l14".into(),
+            fields: vec![
+                set("count", call(Func::ListLength, vec![path("found")])),
+                set("summary", template("lines of {input.order_id}")),
+            ],
+            status: None,
+            cookies: vec![],
+        },
+    ];
+    p.services[0].routes.push(Route {
+        name: "get_lines".into(),
+        method: HttpMethod::Get,
+        path: "/orders/{order_id}/lines".into(),
+        request: "OrderRef".into(),
+        response: "AddedLines".into(),
+        status: 200,
+        steps,
+    });
 }

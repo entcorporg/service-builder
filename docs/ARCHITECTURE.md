@@ -51,7 +51,7 @@ vérité : le canvas, l'inspecteur et le code généré en sont des vues.
   Un producteur sans étape *Publier* donne un avertissement. Les projets enregistrés avant (`schemaVersion` 1) sont
   migrés à l'ouverture : tout service qui publiait sur un topic en devient producteur.
 - **Services** : des RPC (gRPC), des routes HTTP, des consumers (Kafka) et des tâches planifiées. Chacun contient une **liste d'étapes**.
-- **Étapes** : `log`, `let`, `publish`, `publishLive`, `callRpc`, `branch` (étapes imbriquées), `respond`, `fail`, `rateLimit` et `verifyHmac` (routes HTTP), `sql`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
+- **Étapes** : `log`, `let`, `publish`, `publishLive`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `rateLimit` et `verifyHmac` (routes HTTP), `sql`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
   Une liste d'étapes est un arbre (pas un graphe arbitraire) : cela se génère en Rust structuré et s'édite comme
   une pile de blocs, comme dans un page builder.
 
@@ -77,6 +77,47 @@ cast `$n::uuid` de la base. L'étape **Variable** (`let`) porte les indicateurs 
 schéma peut être une liste mais jamais optionnel, sa présence étant implicite. Les chemins vers une variable
 optionnelle ou liste suivent les règles ci-dessus : une valeur simple s'élargit en optionnelle, une liste ne remplit
 qu'une liste.
+
+#### La logique d'un flux, sans Rust
+
+Quatre ajouts au modèle (additifs : les projets existants s'ouvrent à l'identique) rendent inutiles l'étape *Code* et
+les expressions brutes pour la logique courante. Le typage est une seule fonction, `typing::expr_type`, que partagent
+la validation et la génération.
+
+- **Texte avec des valeurs** : `{"kind":"template","template":"Commande {input.id} de {client.nom}"}`. Chaque `{chemin}`
+  est une valeur simple (texte, nombre, booléen, uuid) écrite en texte ; `{{` et `}}` sont des accolades (`E_TEMPLATE`).
+- **Opérations** : `{"kind":"call","func":"add","args":[...]}`. Le nombre d'arguments et leurs types sont fixés par
+  opération (`E_EXPR_TYPE`, `E_TYPE_MISMATCH`, avec le pointeur de l'argument fautif) :
+  - texte : `concat` (autant de textes qu'on veut), `lower`, `upper`, `trim`, `length` (caractères, int64),
+    `contains`, `startsWith`, `endsWith` (bool), `replace`, `split` (liste de textes), `join` ;
+  - nombres : `add`, `sub`, `mul`, `div`, `rem`, `min`, `max` sur deux nombres **du même type** (un littéral prend le
+    type de l'autre côté, ou celui que le contexte attend) ; `round`, `floor`, `ceil` (float/double vers int64) ;
+    `toInt32`, `toInt64`, `toDouble`, `toText` ; `parseInt64` et `parseDouble` donnent un nombre **optionnel**
+    (absent si le texte n'en est pas un). Aucune conversion n'est implicite ;
+  - valeurs : `default(optionnel, repli)` (le repli a le type de la valeur), `newUuid`, `listLength` (int64).
+
+  **Comportement défini** : l'arithmétique entière est vérifiée (`checked_*`) : un dépassement ou une division par zéro
+  est une erreur interne (500, journalisée), jamais un retour à zéro silencieux ; `round`, `toInt32` et `toInt64`
+  refusent de la même façon un nombre hors limites ou NaN. Les flottants suivent IEEE (division par zéro : l'infini).
+  Ces appels passent par `eda_runtime::logic` (source : `templates/runtime/logic.rs`, avec ses tests).
+- **Conditions** : `compare` accepte une opération de chaque côté (`length(x) >= 3`) ; s'ajoutent `and` / `or`
+  (`conditions`), `not` (`condition`), `present` / `absent` (une valeur optionnelle ou un champ de schéma,
+  `E_PRESENCE_TYPE`), `empty` (un texte ou une liste, `E_EMPTY_TYPE`), `in` (une valeur parmi une liste de
+  valeurs du même type simple) et `test` (une valeur booléenne : une variable, ou `contains(...)`). Un groupe vide
+  vaut vrai (`and`) ou faux (`or`) et donne `W_EMPTY_LOGIC`.
+- **Boucle** : `{"type":"forEach","item":"ligne","list":<expr>,"steps":[...]}` répète les étapes pour chaque élément
+  d'une liste (un champ répété, une variable liste, les lignes d'un `sql` avec `many`). `item` est une variable du
+  corps seulement (un texte, un nombre ou un schéma lu par `ligne.champ`) ; elle ne peut pas masquer une variable du
+  flux (`E_VAR_SHADOW`) et ce qui est lié dans le corps ne ressort pas. Le corps partage **la transaction** du
+  handler : un `sql` y est écrit dans la même transaction, et un `fail` (ou une erreur) arrête la requête entière,
+  annulant les écritures déjà faites. Une étape `respond` y est refusée (`E_RESPOND_IN_LOOP`), elle répondrait
+  une fois par élément ; la liste doit être typée (`E_FOREACH_LIST`). Génération : `for item in liste.clone() { .. }`.
+
+Syntaxe compacte (`sb_app::stepform`, CLI et MCP) : `add(input.qty, 1)`, `default(input.note, "-")`,
+`template("Commande {input.id}")` ; conditions `a == 1 and not b is empty`, `x is present`, `x is absent`,
+`x in ["a", "b"]`, `contains(a, "x")`, avec parenthèses (`or` lie moins fort que `and`). Dans une opération, le Rust brut
+s'écrit `rust("code")`. Dans l'interface, tout se choisit (modes *Texte* et *Opération* de chaque valeur, éditeur de
+condition en arbre, carte *Pour chaque*) ; l'échantillon `sample::add_basket_lines` les utilise.
 
 Le Rust brut n'est pas typé : c'est l'échappatoire. Sa syntaxe est tout de même vérifiée avec `syn`, avec le chemin
 exact de l'étape fautive.

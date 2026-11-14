@@ -5,10 +5,10 @@
 
 use eframe::egui::{self, RichText, Ui};
 use sb_app::scope::Var;
-use sb_model::{Assignment, Expr, Field, FieldType, Project};
+use sb_model::{Assignment, Expr, Field, FieldType, Func, Project};
 use serde_json::Value;
 
-use super::common::{commit_entry, link};
+use super::common::{commit_entry, icon_btn, link};
 use crate::app::App;
 use crate::icons::icon;
 use crate::theme::*;
@@ -67,12 +67,16 @@ fn literal_kind(f: &Field) -> Literal {
 
 /// Whether a value of type `have` can fill a field of type `want`: the same, text for text, or a plain value for an optional one.
 fn fits(have: &str, want: &str) -> bool {
+    // `liste de *`: any list.
+    if want == "liste de *" {
+        return have.starts_with("liste de ");
+    }
     let norm = |s: &str| s.replace("uuid", "string");
     let (h, w) = (norm(have), norm(want));
     h == w || w.strip_prefix("optionnel ") == Some(h.as_str())
 }
 
-const MODES: [&str; 4] = ["—", "Champ", "Valeur", "Rust"];
+const MODES: [&str; 6] = ["—", "Champ", "Valeur", "Texte", "Opération", "Rust"];
 /// One more source, for a timestamp column of an SQL step only: the clock of the database (`now()`).
 const CLOCK: &str = "Maintenant";
 
@@ -81,7 +85,9 @@ fn mode_of(e: &Option<Expr>) -> &'static str {
         None => MODES[0],
         Some(Expr::Path { .. }) => MODES[1],
         Some(Expr::Literal { .. }) => MODES[2],
-        Some(Expr::Raw { .. }) => MODES[3],
+        Some(Expr::Raw { .. }) => MODES[5],
+        Some(Expr::Template { .. }) => MODES[3],
+        Some(Expr::Call { .. }) => MODES[4],
         Some(Expr::Now) => CLOCK,
     }
 }
@@ -183,7 +189,7 @@ fn expr_editor_with(
     let mut out: Option<Option<Expr>> = None;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        if let Some(m) = pick(ui, id.with("mode"), mode_of(&current), &modes, 78.0) {
+        if let Some(m) = pick(ui, id.with("mode"), mode_of(&current), &modes, 90.0) {
             out = Some(match m.as_str() {
                 "Champ" => Some(Expr::Path {
                     path: first_path.clone(),
@@ -198,6 +204,33 @@ fn expr_editor_with(
                 }),
                 "Rust" => Some(Expr::Raw {
                     code: String::new(),
+                }),
+                "Texte" => Some(Expr::Template {
+                    template: String::new(),
+                }),
+                "Opération" => Some(match kind {
+                    Literal::Int | Literal::Float => Expr::Call {
+                        func: Func::Add,
+                        args: vec![
+                            Expr::Path {
+                                path: String::new(),
+                            },
+                            Expr::Literal {
+                                value: Value::from(1),
+                            },
+                        ],
+                    },
+                    _ => Expr::Call {
+                        func: Func::Concat,
+                        args: vec![
+                            Expr::Literal {
+                                value: Value::String(String::new()),
+                            },
+                            Expr::Path {
+                                path: String::new(),
+                            },
+                        ],
+                    },
                 }),
                 CLOCK => Some(Expr::Now),
                 _ => None,
@@ -247,9 +280,183 @@ fn expr_editor_with(
             Some(Expr::Now) => {
                 ui.label(RichText::new("l’heure de la base (now())").color(MUTED));
             }
+            Some(Expr::Template { template }) => {
+                if let Some(v) = commit_entry(
+                    ui,
+                    id.with("template"),
+                    template,
+                    false,
+                    "Commande {input.id} reçue (les valeurs entre accolades)",
+                    true,
+                ) {
+                    out = Some(Some(Expr::Template { template: v }));
+                }
+            }
+            Some(Expr::Call { func, args }) => {
+                // The arguments are laid out under the picker, one editor each: the same editor, recursively.
+                ui.vertical(|ui| {
+                    if let Some(e) = call_editor(_app, ui, id, *func, args, vars) {
+                        out = Some(Some(e));
+                    }
+                });
+            }
             None => {}
         }
     });
+    out
+}
+
+/// The operations, as a person reads them.
+fn func_label(f: Func) -> &'static str {
+    match f {
+        Func::Concat => "Coller des textes",
+        Func::Lower => "Minuscules",
+        Func::Upper => "Majuscules",
+        Func::Trim => "Retirer les espaces autour",
+        Func::Length => "Nombre de caractères",
+        Func::Contains => "Contient (oui/non)",
+        Func::StartsWith => "Commence par (oui/non)",
+        Func::EndsWith => "Finit par (oui/non)",
+        Func::Replace => "Remplacer dans un texte",
+        Func::Split => "Découper un texte en liste",
+        Func::Join => "Assembler une liste en texte",
+        Func::Add => "Addition",
+        Func::Sub => "Soustraction",
+        Func::Mul => "Multiplication",
+        Func::Div => "Division",
+        Func::Rem => "Reste de la division",
+        Func::Min => "Le plus petit",
+        Func::Max => "Le plus grand",
+        Func::Round => "Arrondir",
+        Func::Floor => "Arrondir vers le bas",
+        Func::Ceil => "Arrondir vers le haut",
+        Func::ToInt32 => "En entier 32 bits",
+        Func::ToInt64 => "En entier 64 bits",
+        Func::ToDouble => "En nombre décimal",
+        Func::ToText => "En texte",
+        Func::ParseInt64 => "Lire un entier dans un texte",
+        Func::ParseDouble => "Lire un décimal dans un texte",
+        Func::Default => "Valeur par défaut si absente",
+        Func::NewUuid => "Nouvel identifiant (UUID)",
+        Func::ListLength => "Nombre d’éléments d’une liste",
+    }
+}
+
+/// The name of argument `i`, and the field that types what can fill it (`None`: any plain value).
+fn arg_spec(f: Func, i: usize) -> (String, Option<Field>) {
+    let text = || Some(Field::new("", FieldType::String));
+    let list = |ty: FieldType| {
+        let mut f = Field::new("", ty);
+        f.repeated = true;
+        Some(f)
+    };
+    match f {
+        Func::Concat => (format!("Texte {}", i + 1), text()),
+        Func::Lower
+        | Func::Upper
+        | Func::Trim
+        | Func::Length
+        | Func::ParseInt64
+        | Func::ParseDouble => ("Texte".into(), text()),
+        Func::Contains => (["Texte", "Contient"][i.min(1)].into(), text()),
+        Func::StartsWith => (["Texte", "Commence par"][i.min(1)].into(), text()),
+        Func::EndsWith => (["Texte", "Finit par"][i.min(1)].into(), text()),
+        Func::Replace => (["Texte", "Remplacer", "Par"][i.min(2)].into(), text()),
+        Func::Split => (["Texte", "Séparateur"][i.min(1)].into(), text()),
+        Func::Join => match i {
+            0 => ("Liste de textes".into(), list(FieldType::String)),
+            _ => ("Séparateur".into(), text()),
+        },
+        Func::Div | Func::Rem => (["Dividende", "Diviseur"][i.min(1)].into(), None),
+        Func::Add | Func::Sub | Func::Mul | Func::Min | Func::Max => {
+            (["Premier nombre", "Second nombre"][i.min(1)].into(), None)
+        }
+        Func::Round | Func::Floor | Func::Ceil | Func::ToInt32 | Func::ToInt64 | Func::ToDouble => {
+            ("Nombre".into(), None)
+        }
+        Func::ToText => ("Valeur".into(), None),
+        Func::Default => (
+            ["Valeur (peut être absente)", "Sinon"][i.min(1)].into(),
+            None,
+        ),
+        Func::NewUuid => (String::new(), None),
+        Func::ListLength => (
+            "Liste".into(),
+            list(FieldType::Message { name: "*".into() }),
+        ),
+    }
+}
+
+/// An operation: which one, then one value per argument. Returns the new expression when something changed.
+fn call_editor(
+    app: &mut App,
+    ui: &mut Ui,
+    id: egui::Id,
+    func: Func,
+    args: &[Expr],
+    vars: &[Var],
+) -> Option<Expr> {
+    let mut out: Option<Expr> = None;
+    let names: Vec<String> = Func::ALL
+        .iter()
+        .map(|f| func_label(*f).to_string())
+        .collect();
+    let width = ui.available_width();
+    if let Some(v) = pick(ui, id.with("func"), func_label(func), &names, width)
+        && let Some(f) = Func::ALL.iter().find(|f| func_label(**f) == v)
+    {
+        // Keep the values already given where the new operation still has a place for them.
+        let (min, max) = f.arity();
+        let mut next: Vec<Expr> = args
+            .iter()
+            .take(max.unwrap_or(args.len()))
+            .cloned()
+            .collect();
+        while next.len() < min {
+            next.push(Expr::Path {
+                path: String::new(),
+            });
+        }
+        return Some(Expr::Call {
+            func: *f,
+            args: next,
+        });
+    }
+    let (min, max) = func.arity();
+    for (i, a) in args.iter().enumerate() {
+        let (name, target) = arg_spec(func, i);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if max.is_none() && args.len() > min && icon_btn(ui, "trash", "Retirer", true).clicked()
+            {
+                let mut list = args.to_vec();
+                list.remove(i);
+                out = Some(Expr::Call { func, args: list });
+            }
+            ui.label(RichText::new(&name).size(11.0).color(FAINT));
+        });
+        if let Some(Some(e)) = expr_editor_with(
+            app,
+            ui,
+            id.with(("arg", i)),
+            target.as_ref(),
+            false,
+            Some(a),
+            vars,
+            false,
+        ) {
+            let mut list = args.to_vec();
+            list[i] = e;
+            out = Some(Expr::Call { func, args: list });
+        }
+    }
+    if max.is_none() && link(ui, "+ Ajouter un texte").clicked() {
+        let mut list = args.to_vec();
+        list.push(Expr::Literal {
+            value: Value::String(String::new()),
+        });
+        out = Some(Expr::Call { func, args: list });
+    }
     out
 }
 

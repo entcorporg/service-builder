@@ -1209,6 +1209,21 @@ pub enum Step {
         #[serde(default)]
         retry_after: Option<Expr>,
     },
+    /// Runs `steps` once per element of a list: a repeated field, a `Vec` variable, the rows of a `many` SQL step.
+    /// `item` is the element, visible inside only (a scalar, or a schema whose fields are read with `item.field`);
+    /// the variables of the enclosing flow stay visible, the ones bound inside do not leak out. The steps share the
+    /// transaction of the handler: a `fail` or an error inside ends the whole request and rolls everything back.
+    /// A `respond` is not allowed inside a loop (it would answer once per element).
+    #[serde(rename_all = "camelCase")]
+    ForEach {
+        id: String,
+        /// Name of the variable holding the current element.
+        item: String,
+        /// The list: an expression whose value is repeated.
+        list: Expr,
+        #[serde(default)]
+        steps: Vec<Step>,
+    },
     /// Escape hatch: raw Rust statements inserted verbatim.
     #[serde(rename_all = "camelCase")]
     Code { id: String, code: String },
@@ -1350,6 +1365,7 @@ impl Step {
             | Step::VerifyPassword { id, .. }
             | Step::RandomToken { id, .. }
             | Step::Sha256 { id, .. }
+            | Step::ForEach { id, .. }
             | Step::Code { id, .. } => id,
         }
     }
@@ -1362,6 +1378,11 @@ impl Step {
         } = self
         {
             for s in then.iter().chain(otherwise) {
+                s.walk(f);
+            }
+        }
+        if let Step::ForEach { steps, .. } = self {
+            for s in steps {
                 s.walk(f);
             }
         }
@@ -1400,6 +1421,84 @@ pub enum Expr {
     },
     /// The database clock (`now()`), for the timestamp columns of an SQL step: `expires_at > now()`.
     Now,
+    /// A text with values in it: `Order {input.id} of {customer.name}`. Each `{path}` is a plain value (text, number,
+    /// bool, uuid) written as text; `{{` and `}}` are literal braces.
+    Template {
+        template: String,
+    },
+    /// A typed operation on values (see [`Func`]): arithmetic, text, defaults. No Rust involved.
+    Call {
+        func: Func,
+        args: Vec<Expr>,
+    },
+}
+
+/// The typed operations of [`Expr::Call`]. The number of arguments and their types are fixed per operation (the
+/// editor lists them); integer arithmetic is checked: an overflow or a division by zero fails the request with a
+/// 500 instead of wrapping around silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum Func {
+    /// Joins any number (at least one) of texts.
+    Concat,
+    /// Lower case of a text.
+    Lower,
+    /// Upper case of a text.
+    Upper,
+    /// A text without the spaces around it.
+    Trim,
+    /// Number of characters of a text (int64).
+    Length,
+    /// Whether a text contains another one (bool).
+    Contains,
+    /// Whether a text starts with another one (bool).
+    StartsWith,
+    /// Whether a text ends with another one (bool).
+    EndsWith,
+    /// `replace(text, from, to)`: every occurrence of `from` replaced by `to`.
+    Replace,
+    /// `split(text, separator)`: the list of the pieces (a list of texts).
+    Split,
+    /// `join(list, separator)`: a list of texts as one text.
+    Join,
+    /// `a + b` on two numbers of the same type.
+    Add,
+    /// `a - b` on two numbers of the same type.
+    Sub,
+    /// `a * b` on two numbers of the same type.
+    Mul,
+    /// `a / b`, truncated for integers; a division by zero is a 500.
+    Div,
+    /// Remainder of `a / b` for integers; a division by zero is a 500.
+    Rem,
+    /// The smaller of two numbers of the same type.
+    Min,
+    /// The larger of two numbers of the same type.
+    Max,
+    /// A float rounded to the nearest integer (int64); halves go away from zero.
+    Round,
+    /// A float rounded down (int64).
+    Floor,
+    /// A float rounded up (int64).
+    Ceil,
+    /// A number as an int32; a value that does not fit is a 500.
+    ToInt32,
+    /// A number as an int64; a float is truncated, an out-of-range one is a 500.
+    ToInt64,
+    /// A number as a double.
+    ToDouble,
+    /// A plain value as text.
+    ToText,
+    /// A text as an int64: absent when it is not a number (an optional int64).
+    ParseInt64,
+    /// A text as a double: absent when it is not a number (an optional double).
+    ParseDouble,
+    /// `default(optional, fallback)`: the value when it is present, else the fallback.
+    Default,
+    /// A new random UUID (v4), as a uuid.
+    NewUuid,
+    /// Number of elements of a list (int64).
+    ListLength,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1413,6 +1512,39 @@ pub enum Condition {
     /// Rust boolean expression.
     Raw {
         code: String,
+    },
+    /// True when every condition is (an empty list is true).
+    And {
+        conditions: Vec<Condition>,
+    },
+    /// True when one condition is (an empty list is false).
+    Or {
+        conditions: Vec<Condition>,
+    },
+    /// The opposite of a condition.
+    Not {
+        condition: Box<Condition>,
+    },
+    /// An optional value has a value (a path to an optional field or variable, or a call).
+    Present {
+        value: Expr,
+    },
+    /// An optional value is absent.
+    Absent {
+        value: Expr,
+    },
+    /// A text has no character, or a list no element.
+    Empty {
+        value: Expr,
+    },
+    /// The value equals one of these (all of the same plain type).
+    In {
+        value: Expr,
+        values: Vec<Expr>,
+    },
+    /// A bool value: a `bool` variable or field, or an operation that answers yes or no (`contains`...).
+    Test {
+        value: Expr,
     },
 }
 

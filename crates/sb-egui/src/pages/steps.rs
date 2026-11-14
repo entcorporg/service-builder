@@ -56,6 +56,7 @@ pub fn list_mut<'a>(p: &'a mut Project, loc: &Loc) -> Option<&'a mut Vec<Step>> 
             Step::Branch {
                 then, otherwise: o, ..
             } => steps = if otherwise { o } else { then },
+            Step::ForEach { steps: body, .. } => steps = body,
             _ => return None,
         }
     }
@@ -92,11 +93,54 @@ pub fn vars_at(app: &App, loc: &Loc, index: usize) -> Vec<sb_app::scope::Var> {
             Some(Step::Branch {
                 then, otherwise: o, ..
             }) => list = if otherwise { o } else { then },
+            Some(Step::ForEach {
+                item,
+                list: items,
+                steps: body,
+                ..
+            }) => {
+                // The element is a variable of the body: a synthetic `let` stands for it.
+                let known = variables(p, initial.as_deref(), &before);
+                before.push(loop_item(&known, item, items));
+                list = body;
+            }
             _ => return vec![],
         }
     }
     before.extend(list[..index.min(list.len())].iter().cloned());
     variables(p, initial.as_deref(), &before)
+}
+
+/// The variable a loop binds for its body, as a `let` the scope reads. Its type is the one of the list's elements,
+/// found among the variables known before the loop (a list of schemas, of texts...).
+fn loop_item(known: &[sb_app::scope::Var], item: &str, list: &sb_model::Expr) -> Step {
+    let element = match list {
+        sb_model::Expr::Path { path } => known
+            .iter()
+            .find(|v| v.path == *path)
+            .and_then(|v| v.ty.strip_prefix("liste de "))
+            .map(str::to_string),
+        // `split` and the like give texts.
+        _ => Some("string".to_string()),
+    };
+    let ty = match element.as_deref() {
+        Some(n @ ("string" | "bool" | "int32" | "int64" | "float" | "double" | "uuid")) => {
+            serde_json::from_value(serde_json::json!({ "kind": n }))
+        }
+        Some(n) => serde_json::from_value(serde_json::json!({ "kind": "message", "name": n })),
+        None => serde_json::from_value(serde_json::json!({ "kind": "string" })),
+    }
+    .unwrap_or(sb_model::FieldType::String);
+    Step::Let {
+        id: String::new(),
+        name: item.to_string(),
+        value_type: ty,
+        optional: false,
+        repeated: false,
+        value: sb_model::Expr::Raw {
+            code: String::new(),
+        },
+    }
 }
 
 /// A short random id, unique enough within a project (the web editor uses 8 hex digits too).

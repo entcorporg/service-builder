@@ -184,6 +184,12 @@ La CI le fait.
 - Les flèches du canvas sont **dérivées** du modèle. On ne peut tracer à la souris que *topic → service* (cela crée
   un consumer) et *service → topic* (cela déclare le producteur) ; publier et appeler un RPC se configurent dans les
   étapes de l'inspecteur.
+- La logique d'un flux se fait sans Rust (conditions `et` / `ou` / `non`, présence, boucle `forEach`, texte avec
+  valeurs, arithmétique, `default`, `newUuid`), mais il reste des manques : pas de **variable modifiable** (une boucle
+  ne peut donc ni cumuler un total ni compter), pas de somme ni de filtre sur une liste, pas de **dates** (maintenant
+  ± une durée, comparaison d'expiration : seule l'horloge de la base, dans un bloc SQL), pas de `break` ni d'appel de
+  sous-flux, pas d'accès à l'élément *n* d'une liste, pas d'expressions régulières, et une `Variable` de type schéma
+  reste en Rust. Un nombre n'est jamais converti en silence : `toInt64`, `toDouble`… s'écrivent.
 - Le bloc SQL lit une seule table à la fois : pas de jointure, pas de pagination (une limite, pas de décalage).
 - L'API HTTP n'a pas de spécification OpenAPI générée ; un champ absent d'une requête prend sa valeur par défaut au
   lieu d'être refusé ; une réponse pose un statut et des cookies, pas d'en-têtes libres.

@@ -27,6 +27,7 @@ pub fn path(name: &str) -> &'static str {
         "branch" => {
             "M6 3v12M18 9a3 3 0 100-6 3 3 0 000 6zM6 21a3 3 0 100-6 3 3 0 000 6zM18 9c0 6-12 3-12 6"
         }
+        "forEach" => "M17 2l4 4-4 4M3 11V9a3 3 0 013-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 01-3 3H3",
         "respond" => "M20 4v7a4 4 0 01-4 4H4M9 10l-5 5 5 5",
         "signJwt" => "M4 7h16v10H4zM8 12h8M14 9l3 3-3 3",
         "verifyJwt" => "M4 7h16v10H4zM8 12l2.5 2.5L16 9",

@@ -4,10 +4,10 @@
 //! [`CodegenError::Internal`] rather than panics so the UI can still show them.
 
 use sb_model::typing::{
-    Adapt, Literal, ResolvedPath, Scope, TemplatePart, TypeRef, coerce_literal, infer_literal,
-    parse_template, resolve_path,
+    Adapt, Literal, ResolvedPath, Scope, TemplatePart, TypeRef, coerce_literal, expr_type,
+    infer_literal, parse_template, resolve_path,
 };
-use sb_model::{Assignment, CmpOp, Condition, Expr, FieldType, LogLevel, Project};
+use sb_model::{Assignment, CmpOp, Condition, Expr, FieldType, Func, LogLevel, Project};
 
 use crate::CodegenError;
 
@@ -114,7 +114,198 @@ pub fn lower(
         }
         Expr::Raw { code } => Ok(code.trim().to_string()),
         Expr::Now => internal("`now()` only exists in an SQL step"),
+        Expr::Template { .. } | Expr::Call { .. } => {
+            let got = expr_type(project, scope, expr, Some(to))
+                .map_err(CodegenError::Internal)?
+                .ok_or_else(|| CodegenError::Internal("untyped operation".into()))?;
+            let code = typed_code(project, scope, expr, &got)?;
+            if to.accepts(&got) {
+                Ok(code)
+            } else if to.optional && !to.repeated && to.ty.assignable_from(&got.ty) {
+                Ok(format!("Some({code})"))
+            } else {
+                internal(format!("a {got} cannot fill a {to}"))
+            }
+        }
     }
+}
+
+/// The code of a template or an operation, a value of type `ty` (what `expr_type` found).
+fn typed_code(
+    project: &Project,
+    scope: &Scope,
+    expr: &Expr,
+    ty: &TypeRef,
+) -> Result<String, CodegenError> {
+    match expr {
+        Expr::Template { template } => template_code(project, scope, template),
+        Expr::Call { func, args } => call_code(project, scope, *func, args, ty),
+        _ => lower(project, scope, expr, ty),
+    }
+}
+
+/// `format!("Order {} paid", id)`: every hole is a plain value.
+fn template_code(project: &Project, scope: &Scope, template: &str) -> Result<String, CodegenError> {
+    let mut fmt = String::new();
+    let mut args = String::new();
+    for part in parse_template(template).map_err(CodegenError::Internal)? {
+        match part {
+            TemplatePart::Text(t) => {
+                let escaped = format!("{t:?}");
+                let inner = &escaped[1..escaped.len() - 1];
+                fmt.push_str(&inner.replace('{', "{{").replace('}', "}}"));
+            }
+            TemplatePart::Path(p) => {
+                let rp = resolve_path(project, scope, &p).map_err(CodegenError::Internal)?;
+                fmt.push_str("{}");
+                args.push_str(&format!(", {}", path_code(&rp)));
+            }
+        }
+    }
+    Ok(format!("format!(\"{fmt}\"{args})"))
+}
+
+fn call_code(
+    project: &Project,
+    scope: &Scope,
+    func: Func,
+    args: &[Expr],
+    ty: &TypeRef,
+) -> Result<String, CodegenError> {
+    use Func::*;
+    let text = TypeRef::scalar(FieldType::String);
+    let text_list = TypeRef {
+        repeated: true,
+        ..text.clone()
+    };
+    // Code of argument `i` as a value of type `t`.
+    let arg = |i: usize, t: &TypeRef| lower(project, scope, &args[i], t);
+    let rust = rust_scalar(&ty.ty);
+    let is_int = matches!(ty.ty, FieldType::Int32 | FieldType::Int64);
+    Ok(match func {
+        Concat => {
+            let parts = (0..args.len())
+                .map(|i| arg(i, &text))
+                .collect::<Result<Vec<_>, _>>()?;
+            format!("[{}].concat()", parts.join(", "))
+        }
+        Lower => format!("({}).to_lowercase()", arg(0, &text)?),
+        Upper => format!("({}).to_uppercase()", arg(0, &text)?),
+        Trim => format!("({}).trim().to_string()", arg(0, &text)?),
+        Length => format!("({}).chars().count() as i64", arg(0, &text)?),
+        Contains | StartsWith | EndsWith => {
+            let method = match func {
+                Contains => "contains",
+                StartsWith => "starts_with",
+                _ => "ends_with",
+            };
+            format!(
+                "({}).{method}(({}).as_str())",
+                arg(0, &text)?,
+                arg(1, &text)?
+            )
+        }
+        Replace => format!(
+            "({}).replace(({}).as_str(), ({}).as_str())",
+            arg(0, &text)?,
+            arg(1, &text)?,
+            arg(2, &text)?
+        ),
+        Split => format!(
+            "({}).split(({}).as_str()).map(str::to_string).collect::<Vec<String>>()",
+            arg(0, &text)?,
+            arg(1, &text)?
+        ),
+        Join => format!(
+            "({}).join(({}).as_str())",
+            arg(0, &text_list)?,
+            arg(1, &text)?
+        ),
+        Add | Sub | Mul | Div | Rem | Min | Max => {
+            let (a, b) = (arg(0, ty)?, arg(1, ty)?);
+            match (func, is_int) {
+                (Min | Max, _) => {
+                    let f = if func == Min { "min" } else { "max" };
+                    if is_int {
+                        format!("std::cmp::{f}({a}, {b})")
+                    } else {
+                        format!("{rust}::{f}({a}, {b})")
+                    }
+                }
+                (_, true) => {
+                    let method = match func {
+                        Add => "checked_add",
+                        Sub => "checked_sub",
+                        Mul => "checked_mul",
+                        Div => "checked_div",
+                        _ => "checked_rem",
+                    };
+                    format!(
+                        "eda_runtime::logic::checked({rust}::{method}({a}, {b}), {:?})?",
+                        func.name()
+                    )
+                }
+                (_, false) => {
+                    let op = match func {
+                        Add => "+",
+                        Sub => "-",
+                        Mul => "*",
+                        _ => "/",
+                    };
+                    format!("(({a}) {op} ({b}))")
+                }
+            }
+        }
+        Round | Floor | Ceil => {
+            let f = match func {
+                Round => "round",
+                Floor => "floor",
+                _ => "ceil",
+            };
+            let float = TypeRef::scalar(FieldType::Double);
+            format!(
+                "eda_runtime::logic::f64_to_i64((({}) as f64).{f}())?",
+                arg(0, &float)?
+            )
+        }
+        ToInt32 | ToInt64 | ToDouble | ToText => {
+            let from = typed(project, scope, &args[0])?;
+            let a = arg(0, &from)?;
+            let from_float = matches!(from.ty, FieldType::Float | FieldType::Double);
+            match func {
+                ToText => format!("({a}).to_string()"),
+                ToDouble => format!("({a}) as f64"),
+                ToInt64 if from_float => format!("eda_runtime::logic::f64_to_i64(({a}) as f64)?"),
+                ToInt64 => format!("i64::from({a})"),
+                _ if from_float => format!(
+                    "eda_runtime::logic::int::<i32>(eda_runtime::logic::f64_to_i64(({a}) as f64)?)?"
+                ),
+                _ if from.ty == FieldType::Int32 => a,
+                _ => format!("eda_runtime::logic::int::<i32>({a})?"),
+            }
+        }
+        ParseInt64 => format!("({}).trim().parse::<i64>().ok()", arg(0, &text)?),
+        ParseDouble => format!(
+            "({}).trim().parse::<f64>().ok().filter(|v| v.is_finite())",
+            arg(0, &text)?
+        ),
+        Default => {
+            let optional = TypeRef {
+                optional: true,
+                ..ty.clone()
+            };
+            format!(
+                "({}).unwrap_or_else(|| {})",
+                arg(0, &optional)?,
+                arg(1, ty)?
+            )
+        }
+        NewUuid => "eda_runtime::logic::new_uuid()".to_string(),
+        ListLength => {
+            let from = typed(project, scope, &args[0])?;
+            format!("({}).len() as i64", arg(0, &from)?)
+        }
+    })
 }
 
 /// `pb::Message { field: value, ..Default::default() }`
@@ -146,14 +337,70 @@ pub fn condition_code(
 ) -> Result<String, CodegenError> {
     match cond {
         Condition::Raw { code } => Ok(code.trim().to_string()),
+        Condition::And { conditions } | Condition::Or { conditions } => {
+            let and = matches!(cond, Condition::And { .. });
+            if conditions.is_empty() {
+                return Ok(and.to_string());
+            }
+            let parts = conditions
+                .iter()
+                .map(|c| condition_code(project, scope, c).map(|c| format!("({c})")))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(format!(
+                "({})",
+                parts.join(if and { " && " } else { " || " })
+            ))
+        }
+        Condition::Not { condition } => {
+            Ok(format!("!({})", condition_code(project, scope, condition)?))
+        }
+        Condition::Present { value } | Condition::Absent { value } => {
+            let ty = typed(project, scope, value)?;
+            let method = if matches!(cond, Condition::Present { .. }) {
+                "is_some"
+            } else {
+                "is_none"
+            };
+            Ok(format!(
+                "({}).{method}()",
+                lower(project, scope, value, &ty)?
+            ))
+        }
+        Condition::Empty { value } => {
+            let ty = typed(project, scope, value)?;
+            Ok(format!(
+                "({}).is_empty()",
+                lower(project, scope, value, &ty)?
+            ))
+        }
+        Condition::Test { value } => {
+            lower(project, scope, value, &TypeRef::scalar(FieldType::Bool))
+                .map(|c| format!("({c})"))
+        }
+        Condition::In { value, values } => {
+            let ty = match expr_type(project, scope, value, None).map_err(CodegenError::Internal)? {
+                Some(t) => t,
+                None => match values.first() {
+                    Some(v) => typed(project, scope, v)?,
+                    None => return Ok("false".into()),
+                },
+            };
+            let items = values
+                .iter()
+                .map(|v| lower(project, scope, v, &ty))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(format!(
+                "[{}].contains(&({}))",
+                items.join(", "),
+                lower(project, scope, value, &ty)?
+            ))
+        }
         Condition::Compare { left, op, right } => {
             let side_type = |e: &Expr| -> Result<Option<TypeRef>, CodegenError> {
                 match e {
-                    Expr::Path { path } => Ok(Some(
-                        resolve_path(project, scope, path)
-                            .map_err(CodegenError::Internal)?
-                            .ty,
-                    )),
+                    Expr::Path { .. } | Expr::Call { .. } | Expr::Template { .. } => {
+                        expr_type(project, scope, e, None).map_err(CodegenError::Internal)
+                    }
                     _ => Ok(None),
                 }
             };
@@ -174,12 +421,22 @@ pub fn condition_code(
                             .ok_or_else(|| CodegenError::Internal("unsupported literal".into()))?;
                         lower(project, scope, e, &t)
                     }
-                    (Expr::Path { .. } | Expr::Now, None) => internal("unresolved comparison side"),
+                    (
+                        Expr::Path { .. } | Expr::Now | Expr::Call { .. } | Expr::Template { .. },
+                        None,
+                    ) => internal("unresolved comparison side"),
                 }
             };
             Ok(format!("({}) {} ({})", side(left)?, cmp(*op), side(right)?))
         }
     }
+}
+
+/// The type of an expression the editor can see into.
+fn typed(project: &Project, scope: &Scope, e: &Expr) -> Result<TypeRef, CodegenError> {
+    expr_type(project, scope, e, None)
+        .map_err(CodegenError::Internal)?
+        .ok_or_else(|| CodegenError::Internal("the type of raw Rust is unknown".into()))
 }
 
 fn cmp(op: CmpOp) -> &'static str {
@@ -379,5 +636,123 @@ mod tests {
             right: Expr::Literal { value: 3.into() },
         };
         assert_eq!(condition_code(&p, &scope, &cond).unwrap(), "(x) > (3)");
+    }
+
+    fn path(p: &str) -> Expr {
+        Expr::Path { path: p.into() }
+    }
+
+    fn lit(v: impl Into<serde_json::Value>) -> Expr {
+        Expr::Literal { value: v.into() }
+    }
+
+    fn call(func: Func, args: Vec<Expr>) -> Expr {
+        Expr::Call { func, args }
+    }
+
+    #[test]
+    fn integer_arithmetic_is_checked_and_floats_are_plain() {
+        let (p, scope) = orders_scope();
+        let int = TypeRef::scalar(FieldType::Int64);
+        let add = call(Func::Add, vec![path("input.amount"), lit(5)]);
+        assert_eq!(
+            lower(&p, &scope, &add, &int).unwrap(),
+            "eda_runtime::logic::checked(i64::checked_add(input.amount.clone(), 5), \"add\")?"
+        );
+        let div = call(Func::Div, vec![path("input.amount"), lit(0)]);
+        assert!(
+            lower(&p, &scope, &div, &int)
+                .unwrap()
+                .contains("checked_div(input.amount.clone(), 0)")
+        );
+        let double = TypeRef::scalar(FieldType::Double);
+        let mul = call(Func::Mul, vec![lit(1.5), lit(2.0)]);
+        assert_eq!(lower(&p, &scope, &mul, &double).unwrap(), "((1.5) * (2.0))");
+        let min = call(Func::Min, vec![path("input.amount"), lit(10)]);
+        assert_eq!(
+            lower(&p, &scope, &min, &int).unwrap(),
+            "std::cmp::min(input.amount.clone(), 10)"
+        );
+    }
+
+    #[test]
+    fn conversions_and_text_go_through_the_runtime_or_std() {
+        let (p, scope) = orders_scope();
+        let int32 = TypeRef::scalar(FieldType::Int32);
+        let to = call(Func::ToInt32, vec![path("input.amount")]);
+        assert_eq!(
+            lower(&p, &scope, &to, &int32).unwrap(),
+            "eda_runtime::logic::int::<i32>(input.amount.clone())?"
+        );
+        let text = TypeRef::scalar(FieldType::String);
+        let t = Expr::Template {
+            template: "n={input.amount} {{ok}}".into(),
+        };
+        assert_eq!(
+            lower(&p, &scope, &t, &text).unwrap(),
+            "format!(\"n={} {{ok}}\", input.amount.clone())"
+        );
+        let up = call(
+            Func::Upper,
+            vec![call(Func::Trim, vec![path("input.customer.name")])],
+        );
+        assert!(
+            lower(&p, &scope, &up, &text)
+                .unwrap()
+                .ends_with(".trim().to_string()).to_uppercase()")
+        );
+        // A value that cannot be absent fills an optional field.
+        let note = TypeRef {
+            optional: true,
+            ..text.clone()
+        };
+        let low = call(Func::Lower, vec![lit("A")]);
+        assert!(lower(&p, &scope, &low, &note).unwrap().starts_with("Some("));
+    }
+
+    #[test]
+    fn conditions_nest_and_test_presence() {
+        let (p, scope) = orders_scope();
+        let gt = Condition::Compare {
+            left: path("input.amount"),
+            op: CmpOp::Gt,
+            right: lit(10),
+        };
+        let both = Condition::And {
+            conditions: vec![
+                gt.clone(),
+                Condition::Not {
+                    condition: Box::new(Condition::Empty {
+                        value: path("input.customer.name"),
+                    }),
+                },
+            ],
+        };
+        assert_eq!(
+            condition_code(&p, &scope, &both).unwrap(),
+            "(((input.amount.clone()) > (10)) && (!((input.customer.as_ref().map(|m| m.name.clone()).unwrap_or_default()).is_empty())))"
+        );
+        let any = Condition::In {
+            value: path("input.amount"),
+            values: vec![lit(1), lit(2)],
+        };
+        assert_eq!(
+            condition_code(&p, &scope, &any).unwrap(),
+            "[1, 2].contains(&(input.amount.clone()))"
+        );
+        assert_eq!(
+            condition_code(&p, &scope, &Condition::Or { conditions: vec![] }).unwrap(),
+            "false"
+        );
+        let length = Condition::Compare {
+            left: call(Func::Length, vec![path("input.customer.name")]),
+            op: CmpOp::Ge,
+            right: lit(3),
+        };
+        assert!(
+            condition_code(&p, &scope, &length)
+                .unwrap()
+                .contains(".chars().count() as i64")
+        );
     }
 }

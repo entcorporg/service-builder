@@ -7,7 +7,7 @@ use eframe::egui::{
 };
 use sb_app::scope::Var;
 use sb_app::stepform::{self, Kind};
-use sb_model::{Assignment, CmpOp, Condition, Expr, Field, FieldType, Project, Step};
+use sb_model::{Assignment, Condition, Expr, Field, FieldType, Project, Step};
 
 use super::assignments::{assignments, expr_editor};
 use super::common::{commit_entry, icon_btn};
@@ -27,6 +27,7 @@ pub fn title(kind: &str) -> &'static str {
         "publishLive" => "Pousser vers les navigateurs",
         "callRpc" => "Appeler un RPC",
         "branch" => "Condition",
+        "forEach" => "Pour chaque",
         "respond" => "Répondre",
         "signJwt" => "Signer un jeton",
         "verifyJwt" => "Vérifier un jeton",
@@ -68,6 +69,7 @@ fn tone(kind: &str) -> (Color32, u8, Color32) {
         "publish" | "publishLive" => (0xffb04a, 46, 0xffb04a),
         "callRpc" | "sql" => (0x7886ff, 51, 0x7886ff),
         "branch" => (0xff66a0, 43, 0xff8fb8),
+        "forEach" => (0xa78bfa, 43, 0xbfa8ff),
         "respond" => (0x3ecf8e, 43, 0x3ecf8e),
         "fail" => (0xff6678, 38, 0xff6678),
         "rateLimit" => (0xff8c5a, 41, 0xff9c6e),
@@ -100,6 +102,7 @@ fn summary(step: &Step, kind: &str) -> String {
                 .replace("==", "=");
             format!("si {c}")
         }
+        "forEach" => format!("{} dans {}", get("item"), get("list")),
         "fail" => format!("{} {}", get("status"), get("message"))
             .trim()
             .to_string(),
@@ -204,28 +207,7 @@ fn kind_of(step: &Step) -> String {
         .unwrap_or_default()
 }
 
-const OPS: [(&str, CmpOp); 6] = [
-    ("=", CmpOp::Eq),
-    ("≠", CmpOp::Ne),
-    (">", CmpOp::Gt),
-    ("≥", CmpOp::Ge),
-    ("<", CmpOp::Lt),
-    ("≤", CmpOp::Le),
-];
-
-fn default_compare() -> Condition {
-    Condition::Compare {
-        left: Expr::Path {
-            path: String::new(),
-        },
-        op: CmpOp::Eq,
-        right: Expr::Literal {
-            value: serde_json::Value::from(0),
-        },
-    }
-}
-
-/// `Si` a comparison of two values, or a Rust condition. Returns the new text when it changed.
+/// `Si`: the condition as a tree of words (see `conditions`). Returns the new text when it changed.
 fn condition_widget(
     app: &mut App,
     ui: &mut Ui,
@@ -236,79 +218,15 @@ fn condition_widget(
     let start = stepform::parse_condition(text)
         .ok()
         .and_then(|v| serde_json::from_value::<Condition>(v).ok())
-        .unwrap_or_else(default_compare);
-    let mut next: Option<Condition> = None;
+        .unwrap_or_else(super::conditions::default_compare);
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 6.0;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            field_label(ui, "Si");
-            let kinds = ["comparaison".to_string(), "Rust".to_string()];
-            let now = if matches!(start, Condition::Raw { .. }) {
-                "Rust"
-            } else {
-                "comparaison"
-            };
-            if let Some(m) = super::assignments::pick(ui, id.with("mode"), now, &kinds, f32::MAX)
-                && m != now
-            {
-                next = Some(if m == "Rust" {
-                    Condition::Raw {
-                        code: String::new(),
-                    }
-                } else {
-                    default_compare()
-                });
-            }
-        });
-        match &start {
-            Condition::Compare { left, op, right } => {
-                if let Some(Some(e)) =
-                    expr_editor(app, ui, id.with("left"), None, false, Some(left), vars)
-                {
-                    next = Some(Condition::Compare {
-                        left: e,
-                        op: *op,
-                        right: right.clone(),
-                    });
-                }
-                let names: Vec<String> = OPS.iter().map(|(n, _)| (*n).to_string()).collect();
-                let shown = OPS.iter().find(|(_, o)| o == op).map_or("=", |(n, _)| *n);
-                if let Some(v) = super::assignments::pick(ui, id.with("op"), shown, &names, 60.0)
-                    && let Some((_, o)) = OPS.iter().find(|(n, _)| *n == v)
-                {
-                    next = Some(Condition::Compare {
-                        left: left.clone(),
-                        op: *o,
-                        right: right.clone(),
-                    });
-                }
-                if let Some(Some(e)) =
-                    expr_editor(app, ui, id.with("right"), None, false, Some(right), vars)
-                {
-                    next = Some(Condition::Compare {
-                        left: left.clone(),
-                        op: *op,
-                        right: e,
-                    });
-                }
-            }
-            Condition::Raw { code } => {
-                if let Some(v) = commit_entry(
-                    ui,
-                    id.with("raw"),
-                    code,
-                    true,
-                    "condition Rust, par exemple input.amount > 0",
-                    true,
-                ) {
-                    next = Some(Condition::Raw { code: v });
-                }
-            }
-        }
-    });
-    next.and_then(|c| serde_json::to_value(&c).ok())
-        .map(|v| stepform::condition_to_text(&v))
+        field_label(ui, "Si");
+        super::conditions::condition_editor(app, ui, id, &start, vars)
+    })
+    .inner
+    .and_then(|c| serde_json::to_value(&c).ok())
+    .map(|v| stepform::condition_to_text(&v))
 }
 
 /// The message an assignment list fills, when it is known: the payload of a topic, the request of an RPC, the response.
@@ -503,12 +421,13 @@ fn form(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, index: usize) {
 }
 
 /// The blocks that can be added, in the order of the web version.
-const ORDER: [&str; 35] = [
+const ORDER: [&str; 36] = [
     "publish",
     "publishLive",
     "sql",
     "callRpc",
     "branch",
+    "forEach",
     "let",
     "log",
     "respond",
@@ -552,6 +471,9 @@ fn hint(kind: &str) -> &'static str {
         }
         "callRpc" => "Appeler un autre service en gRPC",
         "branch" => "Si … alors … sinon …",
+        "forEach" => {
+            "Répéter des étapes pour chaque élément d’une liste (les lignes d’un SQL, un champ répété)"
+        }
         "respond" => "Renvoyer la réponse du RPC",
         "signJwt" => {
             "Access token Ed25519 (EdDSA) : vos claims, plus émetteur, émission et expiration"
@@ -933,13 +855,15 @@ fn step_card(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, i: usize, len: 
                     ui.set_width(ui.available_width());
                     ui.spacing_mut().item_spacing.y = 8.0;
                     form(app, ui, step, loc, i);
-                    if let Step::Branch {
-                        then, otherwise, ..
-                    } = step
-                    {
-                        for (name, side, list) in
-                            [("ALORS", false, then), ("SINON", true, otherwise)]
-                        {
+                    let sides: Option<Vec<(&str, bool, &Vec<Step>)>> = match step {
+                        Step::Branch {
+                            then, otherwise, ..
+                        } => Some(vec![("ALORS", false, then), ("SINON", true, otherwise)]),
+                        Step::ForEach { steps, .. } => Some(vec![("POUR CHAQUE", false, steps)]),
+                        _ => None,
+                    };
+                    if let Some(sides) = sides {
+                        for (name, side, list) in sides {
                             let r = Frame::new()
                                 .inner_margin(Margin {
                                     left: 12,

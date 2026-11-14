@@ -168,6 +168,7 @@ mod tests {
                 "runtime/src/jwt.rs",
                 "runtime/src/lib.rs",
                 "runtime/src/live.rs",
+                "runtime/src/logic.rs",
                 "runtime/src/outbox.rs",
                 "runtime/src/rate_limit.rs",
                 "runtime/src/s3.rs",
@@ -218,13 +219,36 @@ mod tests {
     }
 
     #[test]
+    fn a_loop_runs_its_steps_in_the_transaction_of_the_handler() {
+        let files = generate(&sb_model::sample::showcase()).unwrap();
+        let api = files
+            .iter()
+            .find(|f| f.path == "services/orders/src/flows/api.rs")
+            .unwrap()
+            .content
+            .clone();
+        let start = api
+            .find("for line in input.lines.clone() {")
+            .expect("a loop");
+        let body = &api[start..];
+        let end = body.find("\n    }\n").unwrap();
+        let body = &body[..end];
+        // The insert of each element uses the same `tx` as the rest of the flow, and a refusal returns from the handler.
+        assert!(body.contains(".execute(&mut *tx).await?;"), "{body}");
+        assert!(body.contains("return Err(error.into());"), "{body}");
+        assert!(!body.contains("tx.commit()"), "{body}");
+        // The rows of a query are a list like any other.
+        assert!(api.contains("for row in found.clone() {"));
+    }
+
+    #[test]
     fn rpc_flow_snapshot() {
         let files = generate(&sample::orders()).unwrap();
         let flows = file(&files, "services/orders/src/flows/rpc.rs");
         assert!(
             flows.contains("pub async fn create_order(ctx: &Ctx, input: pb::CreateOrderRequest)")
         );
-        assert!(flows.contains("let order_id: String = eda_runtime::new_id();"));
+        assert!(flows.contains("let order_id: String = eda_runtime::logic::new_uuid();"));
         assert!(flows.contains(
             "eda_runtime::outbox::enqueue(&mut tx, topics::ORDERS_CREATED, Some(&key), &event)"
         ));

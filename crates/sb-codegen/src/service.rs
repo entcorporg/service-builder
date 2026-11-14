@@ -1344,6 +1344,15 @@ fn claim_json(project: &Project, scope: &Scope, value: &Expr) -> Result<String, 
                 "`now()` only exists in an SQL step".into(),
             ));
         }
+        Expr::Template { .. } | Expr::Call { .. } => {
+            let ty = sb_model::typing::expr_type(project, scope, value, None)
+                .map_err(CodegenError::Internal)?
+                .ok_or_else(|| CodegenError::Internal("untyped operation".into()))?;
+            format!(
+                "eda_runtime::jwt::json!({})",
+                crate::expr::lower(project, scope, value, &ty)?
+            )
+        }
     })
 }
 
@@ -1791,6 +1800,31 @@ fn steps(
                         reply,
                     )?;
                 }
+                c.close();
+            }
+            Step::ForEach {
+                item,
+                list,
+                steps: body,
+                ..
+            } => {
+                let ty = sb_model::typing::expr_type(project, scope, list, None)
+                    .map_err(CodegenError::Internal)?
+                    .filter(|t| t.repeated)
+                    .ok_or_else(|| CodegenError::Internal("a loop needs a list".into()))?;
+                c.open(format!(
+                    "for {item} in {}",
+                    lower(project, scope, list, &ty)?
+                ));
+                let mut inner = scope.clone();
+                inner.bind(
+                    item.clone(),
+                    TypeRef {
+                        repeated: false,
+                        ..ty
+                    },
+                );
+                steps(c, project, service, &mut inner, body, response, reply)?;
                 c.close();
             }
             Step::Respond {
@@ -2577,6 +2611,7 @@ fn describe(step: &Step) -> String {
             service, method, ..
         } => format!("call {service}.{method}"),
         Step::Branch { .. } => "branch".into(),
+        Step::ForEach { item, .. } => format!("for each {item}"),
         Step::Respond { .. } => "respond".into(),
         Step::Fail { status, .. } => format!("fail {status}"),
         Step::VerifyHmac { header, .. } => format!("verify the signature in {header}"),

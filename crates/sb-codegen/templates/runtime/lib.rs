@@ -9,6 +9,7 @@ pub mod db;
 pub mod dedup;
 pub mod jobs;
 pub mod jwt;
+pub mod logic;
 #[cfg(feature = "live")]
 pub mod live;
 pub mod outbox;

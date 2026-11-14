@@ -4,6 +4,7 @@ pub mod assignments;
 pub mod canvas;
 pub mod codeview;
 pub mod common;
+pub mod conditions;
 pub mod editors;
 pub mod endpoint;
 pub mod flows;

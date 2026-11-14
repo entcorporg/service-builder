@@ -2397,6 +2397,58 @@ impl<'a> Checker<'a> {
                 );
                 a && b
             }
+            Step::ForEach {
+                item, list, steps, ..
+            } => {
+                self.check_var_name(item, &format!("{path}/item"));
+                let at = format!("{path}/list");
+                let mut inner = scope.clone();
+                match self.check_expr(scope, list, None, &at) {
+                    Some(t) if t.repeated => {
+                        inner.bind(
+                            item.clone(),
+                            TypeRef {
+                                repeated: false,
+                                ..t
+                            },
+                        );
+                    }
+                    Some(t) => self.error(
+                        "E_FOREACH_LIST",
+                        &at,
+                        format!("a loop runs over a list, found a {t}"),
+                    ),
+                    None => {
+                        if matches!(list, Expr::Raw { .. }) {
+                            self.error(
+                                "E_FOREACH_LIST",
+                                &at,
+                                "the editor cannot tell the type of Rust code: loop over a list variable",
+                            );
+                        }
+                    }
+                }
+                if scope.get(item).is_some() {
+                    self.error(
+                        "E_VAR_SHADOW",
+                        format!("{path}/item"),
+                        format!("`{item}` already names a variable of the flow"),
+                    );
+                }
+                let mut responds = false;
+                for s in steps {
+                    s.walk(&mut |st| responds |= matches!(st, Step::Respond { .. }));
+                }
+                if responds {
+                    self.error(
+                        "E_RESPOND_IN_LOOP",
+                        format!("{path}/steps"),
+                        "a `respond` inside a loop would answer once per element: answer after the loop",
+                    );
+                }
+                self.steps(env, &format!("{path}/steps"), steps, &mut inner);
+                false
+            }
             Step::Respond {
                 fields,
                 status,
@@ -3474,6 +3526,77 @@ impl<'a> Checker<'a> {
                 }
                 None
             }
+            Expr::Template { .. } | Expr::Call { .. } => {
+                self.check_typed_expr(scope, expr, expected, path)
+            }
+        }
+    }
+
+    /// Templates and operations: typed as a whole by `typing::expr_type`, then each argument is walked so that an
+    /// error points to the argument at fault.
+    fn check_typed_expr(
+        &mut self,
+        scope: &Scope,
+        expr: &Expr,
+        expected: Option<&TypeRef>,
+        path: &str,
+    ) -> Option<TypeRef> {
+        if let Expr::Call { args, .. } = expr {
+            for (i, a) in args.iter().enumerate() {
+                if let Expr::Raw { code } = a
+                    && code.trim().is_empty()
+                {
+                    self.error(
+                        "E_EMPTY_EXPR",
+                        format!("{path}/args/{i}"),
+                        "empty Rust expression",
+                    );
+                }
+                if matches!(a, Expr::Now) {
+                    self.error(
+                        "E_NOW_OUTSIDE_SQL",
+                        format!("{path}/args/{i}"),
+                        "`now()` is the database clock: it only fills a timestamp column of an SQL step",
+                    );
+                    return None;
+                }
+                if matches!(a, Expr::Call { .. } | Expr::Template { .. }) {
+                    // Nested: reported at its own path.
+                    let before = self.out.len();
+                    self.check_typed_expr(scope, a, None, &format!("{path}/args/{i}"));
+                    if self.out.len() > before {
+                        return None;
+                    }
+                }
+            }
+        }
+        match crate::typing::expr_type(self.project, scope, expr, expected) {
+            Err(e) => {
+                let code = if matches!(expr, Expr::Template { .. }) {
+                    "E_TEMPLATE"
+                } else {
+                    "E_EXPR_TYPE"
+                };
+                self.error(code, path, e);
+                None
+            }
+            Ok(ty) => {
+                if let (Some(want), Some(got)) = (expected, &ty)
+                    && !want.accepts(got)
+                    && !(!got.optional
+                        && want.optional
+                        && want.ty.assignable_from(&got.ty)
+                        && !want.repeated
+                        && !got.repeated)
+                {
+                    self.error(
+                        "E_TYPE_MISMATCH",
+                        path,
+                        format!("this gives a {got} but a {want} is expected"),
+                    );
+                }
+                ty
+            }
         }
     }
 
@@ -3484,11 +3607,103 @@ impl<'a> Checker<'a> {
                     self.error("E_EMPTY_EXPR", path, "empty Rust condition");
                 }
             }
+            Condition::And { conditions } | Condition::Or { conditions } => {
+                let key = if matches!(cond, Condition::And { .. }) {
+                    "and"
+                } else {
+                    "or"
+                };
+                if conditions.is_empty() {
+                    self.warn(
+                        "W_EMPTY_LOGIC",
+                        path,
+                        format!("an empty `{key}` is always {}", key == "and"),
+                    );
+                }
+                for (i, c) in conditions.iter().enumerate() {
+                    self.condition(scope, c, &format!("{path}/conditions/{i}"));
+                }
+            }
+            Condition::Not { condition } => {
+                self.condition(scope, condition, &format!("{path}/condition"));
+            }
+            Condition::Present { value } | Condition::Absent { value } => {
+                let at = format!("{path}/value");
+                if let Some(t) = self.check_expr(scope, value, None, &at) {
+                    // A field of a schema is present or absent as well; a bare schema variable always is.
+                    let has_presence = t.optional
+                        || (t.is_message()
+                            && !t.repeated
+                            && matches!(value, Expr::Path { path } if path.contains('.')));
+                    if !has_presence {
+                        self.error(
+                            "E_PRESENCE_TYPE",
+                            at,
+                            format!("a {t} is never absent: only an optional value, or a field of a schema, can be"),
+                        );
+                    }
+                }
+            }
+            Condition::Empty { value } => {
+                let at = format!("{path}/value");
+                if let Some(t) = self.check_expr(scope, value, None, &at)
+                    && !(t.repeated
+                        || (!t.optional && matches!(t.ty, FieldType::String | FieldType::Uuid)))
+                {
+                    self.error(
+                        "E_EMPTY_TYPE",
+                        at,
+                        format!("only a text or a list can be empty, found a {t}"),
+                    );
+                }
+            }
+            Condition::Test { value } => {
+                let want = TypeRef::scalar(FieldType::Bool);
+                self.check_expr(scope, value, Some(&want), &format!("{path}/value"));
+            }
+            Condition::In { value, values } => {
+                let at = format!("{path}/value");
+                let t = match value {
+                    Expr::Literal { .. } => None,
+                    _ => self.check_expr(scope, value, None, &at),
+                };
+                if let Some(t) = &t
+                    && !t.is_simple_scalar()
+                {
+                    self.error(
+                        "E_COMPARE_TYPE",
+                        &at,
+                        format!("only plain scalars can be compared, found {t}"),
+                    );
+                    return;
+                }
+                if values.is_empty() {
+                    self.error(
+                        "E_IN_EMPTY",
+                        format!("{path}/values"),
+                        "give at least one value",
+                    );
+                }
+                for (i, v) in values.iter().enumerate() {
+                    let vat = format!("{path}/values/{i}");
+                    match (&t, v) {
+                        (Some(t), v) => {
+                            self.check_expr(scope, v, Some(t), &vat);
+                        }
+                        (None, Expr::Literal { .. }) => {}
+                        (None, v) => {
+                            self.check_expr(scope, v, None, &vat);
+                        }
+                    }
+                }
+            }
             Condition::Compare { left, right, .. } => {
                 // Comparisons need both sides to be exactly the same plain scalar type.
                 let path_type = |this: &mut Self, e: &Expr, at: &str| -> Option<TypeRef> {
                     match e {
-                        Expr::Path { .. } => this.check_expr(scope, e, None, at),
+                        Expr::Path { .. } | Expr::Call { .. } | Expr::Template { .. } => {
+                            this.check_expr(scope, e, None, at)
+                        }
                         _ => None,
                     }
                 };
@@ -3649,6 +3864,354 @@ mod tests {
             .collect();
         let missing: Vec<_> = all.iter().filter(|t| !kinds.contains(*t)).collect();
         assert!(missing.is_empty(), "the showcase never uses {missing:?}");
+    }
+
+    /// The orders sample with the steps of the first RPC replaced by `steps` (the request has `amount`: int64, `customer`).
+    fn with_steps(steps: Vec<Step>) -> Project {
+        let mut p = sample::orders();
+        p.services[0].rpcs[0].steps = steps;
+        p
+    }
+
+    fn lit(v: impl Into<serde_json::Value>) -> Expr {
+        Expr::Literal { value: v.into() }
+    }
+
+    fn call(func: Func, args: Vec<Expr>) -> Expr {
+        Expr::Call { func, args }
+    }
+
+    fn let_step(name: &str, ty: FieldType, optional: bool, value: Expr) -> Step {
+        Step::Let {
+            id: format!("t_{name}"),
+            name: name.into(),
+            value_type: ty,
+            optional,
+            repeated: false,
+            value,
+        }
+    }
+
+    fn branch(condition: Condition) -> Step {
+        Step::Branch {
+            id: "t_branch".into(),
+            condition,
+            then: vec![],
+            otherwise: vec![],
+        }
+    }
+
+    #[test]
+    fn operations_are_typed() {
+        let good = |ty: FieldType, optional: bool, value: Expr| {
+            let p = with_steps(vec![let_step("x", ty, optional, value)]);
+            assert_eq!(errors(&p), Vec::<String>::new());
+        };
+        let bad = |code: &str, ty: FieldType, optional: bool, value: Expr| {
+            let p = with_steps(vec![let_step("x", ty, optional, value)]);
+            assert!(
+                errors(&p).contains(&code.to_string()),
+                "{code}: {:?}",
+                validate(&p)
+            );
+        };
+        // `input.amount` is an int64: a literal follows it, a text does not.
+        good(
+            FieldType::Int64,
+            false,
+            call(Func::Add, vec![path("input.amount"), lit(1)]),
+        );
+        good(
+            FieldType::Int64,
+            false,
+            call(
+                Func::Mul,
+                vec![path("input.amount"), call(Func::ToInt64, vec![lit(2)])],
+            ),
+        );
+        bad(
+            "E_EXPR_TYPE",
+            FieldType::Int64,
+            false,
+            call(Func::Add, vec![path("input.amount"), lit("a")]),
+        );
+        bad(
+            "E_EXPR_TYPE",
+            FieldType::Int64,
+            false,
+            call(Func::Add, vec![lit(1)]),
+        );
+        bad(
+            "E_EXPR_TYPE",
+            FieldType::String,
+            false,
+            call(Func::Upper, vec![path("input.amount")]),
+        );
+        bad(
+            "E_TYPE_MISMATCH",
+            FieldType::String,
+            false,
+            call(Func::Add, vec![path("input.amount"), lit(1)]),
+        );
+        // A conversion is explicit, and a text is read into an optional number.
+        good(
+            FieldType::Int32,
+            false,
+            call(Func::ToInt32, vec![path("input.amount")]),
+        );
+        good(
+            FieldType::Int64,
+            true,
+            call(Func::ParseInt64, vec![lit("12")]),
+        );
+        bad(
+            "E_TYPE_MISMATCH",
+            FieldType::Int64,
+            false,
+            call(Func::ParseInt64, vec![lit("12")]),
+        );
+        good(
+            FieldType::Int64,
+            false,
+            call(
+                Func::Default,
+                vec![call(Func::ParseInt64, vec![lit("12")]), lit(0)],
+            ),
+        );
+        // `default` wants an optional first argument; `rem` an integer.
+        bad(
+            "E_EXPR_TYPE",
+            FieldType::Int64,
+            false,
+            call(Func::Default, vec![path("input.amount"), lit(0)]),
+        );
+        bad(
+            "E_EXPR_TYPE",
+            FieldType::Double,
+            false,
+            call(Func::Rem, vec![lit(1.5), lit(2.0)]),
+        );
+        good(FieldType::Uuid, false, call(Func::NewUuid, vec![]));
+        bad(
+            "E_EXPR_TYPE",
+            FieldType::Uuid,
+            false,
+            call(Func::NewUuid, vec![lit(1)]),
+        );
+        // Templates read plain values only.
+        good(
+            FieldType::String,
+            false,
+            Expr::Template {
+                template: "n {input.amount}".into(),
+            },
+        );
+        bad(
+            "E_TEMPLATE",
+            FieldType::String,
+            false,
+            Expr::Template {
+                template: "{input.customer}".into(),
+            },
+        );
+        bad(
+            "E_TEMPLATE",
+            FieldType::String,
+            false,
+            Expr::Template {
+                template: "{nope}".into(),
+            },
+        );
+        bad(
+            "E_TEMPLATE",
+            FieldType::String,
+            false,
+            Expr::Template {
+                template: "{open".into(),
+            },
+        );
+        // The error points to the nested operation at fault.
+        let p = with_steps(vec![let_step(
+            "x",
+            FieldType::String,
+            false,
+            call(
+                Func::Concat,
+                vec![lit("a"), call(Func::Upper, vec![path("input.amount")])],
+            ),
+        )]);
+        assert!(
+            validate(&p)
+                .iter()
+                .any(|d| d.code == "E_EXPR_TYPE" && d.path.ends_with("/steps/0/value/args/1")),
+            "{:?}",
+            validate(&p)
+        );
+    }
+
+    #[test]
+    fn conditions_are_checked_all_the_way_down() {
+        let ok = |c: Condition| {
+            let p = with_steps(vec![branch(c)]);
+            assert_eq!(errors(&p), Vec::<String>::new());
+        };
+        let bad = |code: &str, c: Condition| {
+            let p = with_steps(vec![branch(c)]);
+            assert!(
+                errors(&p).contains(&code.to_string()),
+                "{code}: {:?}",
+                validate(&p)
+            );
+        };
+        let gt = |v: i64| Condition::Compare {
+            left: path("input.amount"),
+            op: CmpOp::Gt,
+            right: lit(v),
+        };
+        ok(Condition::And {
+            conditions: vec![
+                gt(1),
+                Condition::Not {
+                    condition: Box::new(Condition::Or {
+                        conditions: vec![
+                            gt(5),
+                            Condition::Empty {
+                                value: path("input.customer.name"),
+                            },
+                        ],
+                    }),
+                },
+            ],
+        });
+        ok(Condition::In {
+            value: path("input.amount"),
+            values: vec![lit(1), lit(2)],
+        });
+        ok(Condition::Test {
+            value: call(
+                Func::StartsWith,
+                vec![path("input.customer.name"), lit("a")],
+            ),
+        });
+        // A comparison takes operations on both sides.
+        ok(Condition::Compare {
+            left: call(Func::Length, vec![path("input.customer.name")]),
+            op: CmpOp::Ge,
+            right: lit(3),
+        });
+        // An error deep inside a group keeps its own path.
+        let p = with_steps(vec![branch(Condition::And {
+            conditions: vec![
+                gt(1),
+                Condition::Present {
+                    value: path("input.amount"),
+                },
+            ],
+        })]);
+        assert!(
+            validate(&p).iter().any(|d| d.code == "E_PRESENCE_TYPE"
+                && d.path.ends_with("/condition/conditions/1/value")),
+            "{:?}",
+            validate(&p)
+        );
+        bad(
+            "E_EMPTY_TYPE",
+            Condition::Empty {
+                value: path("input.amount"),
+            },
+        );
+        bad(
+            "E_TYPE_MISMATCH",
+            Condition::Test {
+                value: path("input.amount"),
+            },
+        );
+        bad(
+            "E_IN_EMPTY",
+            Condition::In {
+                value: path("input.amount"),
+                values: vec![],
+            },
+        );
+        bad(
+            "E_TYPE_MISMATCH",
+            Condition::In {
+                value: path("input.amount"),
+                values: vec![lit("a")],
+            },
+        );
+        bad(
+            "E_UNKNOWN_PATH",
+            Condition::Not {
+                condition: Box::new(Condition::Absent {
+                    value: path("input.nope"),
+                }),
+            },
+        );
+    }
+
+    #[test]
+    fn a_loop_binds_its_element_and_keeps_the_flow_honest() {
+        let mut p = sample::showcase();
+        // The loop of the showcase runs over a list of lines; its element is typed after the list.
+        assert_eq!(errors(&p), Vec::<String>::new());
+        let route = p.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == "add_lines")
+            .unwrap();
+        let Step::ForEach { steps, .. } = &mut route.steps[2] else {
+            panic!("sample layout changed")
+        };
+        // `respond` in a loop would answer once per element.
+        steps.push(Step::Respond {
+            id: "r".into(),
+            fields: vec![],
+            status: None,
+            cookies: vec![],
+        });
+        assert!(errors(&p).contains(&"E_RESPOND_IN_LOOP".to_string()));
+        let route = p.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == "add_lines")
+            .unwrap();
+        let Step::ForEach { steps, list, .. } = &mut route.steps[2] else {
+            unreachable!()
+        };
+        steps.pop();
+        // The element is not visible after the loop, and cannot hide a variable of the flow.
+        *list = path("input.order_id");
+        assert!(errors(&p).contains(&"E_FOREACH_LIST".to_string()));
+        let route = p.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == "add_lines")
+            .unwrap();
+        let Step::ForEach { list, item, .. } = &mut route.steps[2] else {
+            unreachable!()
+        };
+        *list = path("input.lines");
+        *item = "input".into();
+        assert!(errors(&p).contains(&"E_VAR_SHADOW".to_string()));
+        let route = p.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == "add_lines")
+            .unwrap();
+        let Step::ForEach { item, .. } = &mut route.steps[2] else {
+            unreachable!()
+        };
+        *item = "line".into();
+        route.steps.insert(
+            3,
+            Step::Log {
+                id: "after".into(),
+                level: LogLevel::Info,
+                message: "{line.sku}".into(),
+            },
+        );
+        assert!(errors(&p).contains(&"E_UNKNOWN_PATH".to_string()));
     }
 
     #[test]
