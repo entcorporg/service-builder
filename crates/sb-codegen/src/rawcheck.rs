@@ -200,10 +200,24 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                 }
             }
             Step::Sql {
-                conditions, values, ..
+                conditions,
+                values,
+                cursor,
+                limit_from,
+                offset,
+                ..
             } => {
                 for (j, c) in conditions.iter().enumerate() {
                     expr(&c.value, &format!("{path}/where/{j}/value"), out);
+                }
+                for (j, c) in cursor.iter().enumerate() {
+                    expr(c, &format!("{path}/cursor/{j}"), out);
+                }
+                if let Some(e) = limit_from {
+                    expr(e, &format!("{path}/limitFrom"), out);
+                }
+                if let Some(e) = offset {
+                    expr(e, &format!("{path}/offset"), out);
                 }
                 assignments(values, &format!("{path}/values"), out);
             }

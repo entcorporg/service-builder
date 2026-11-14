@@ -1822,4 +1822,98 @@ mod tests {
         assert!(dir.join("contracts/proto/orders_demo.proto").exists());
         fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn joins_carry_the_rules_of_every_table_and_a_page_is_cut_by_a_cursor() {
+        use sb_model::{Expr, SqlCondition, SqlTest, Step};
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_sql_reads(&mut p);
+        let flat_of = |p: &sb_model::Project| {
+            assert!(
+                !sb_model::has_errors(&sb_model::validate(p)),
+                "{:?}",
+                sb_model::validate(p)
+            );
+            let files = generate(p).unwrap();
+            file(&files, "services/orders/src/flows/api.rs")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let flat = flat_of(&p);
+        // A left join: the tenant and the soft delete of the joined table are in its `ON`, so that a row of another tenant is
+        // no match instead of dropping the row; the table of the step has them in its `WHERE`.
+        assert!(
+            flat.contains("LEFT JOIN \\\"authors\\\" ON \\\"posts\\\".\\\"author_id\\\" = \\\"authors\\\".\\\"author_id\\\" AND \\\"authors\\\".\\\"tenant_id\\\" = $1 AND \\\"authors\\\".\\\"deleted_at\\\" IS NULL WHERE"),
+            "{flat}"
+        );
+        assert!(
+            flat.contains("AND \\\"posts\\\".\\\"tenant_id\\\" = $3 AND \\\"posts\\\".\\\"deleted_at\\\" IS NULL AND ($4::text IS NULL OR"),
+            "{flat}"
+        );
+        // Keyset: each key is compared once the keys before it are equal; the sort has both keys; the page is bound, and
+        // one more row is read to know whether another page follows.
+        assert!(
+            flat.contains("(\\\"posts\\\".\\\"title\\\" = $4::text AND \\\"posts\\\".\\\"post_id\\\" > $5::text)")
+                && flat.contains("ORDER BY \\\"posts\\\".\\\"title\\\", \\\"posts\\\".\\\"post_id\\\" LIMIT $6")
+                && flat.contains(".bind(posts_sql_limit + 1)")
+                && flat.contains("clamp(1, 50_i64)"),
+            "{flat}"
+        );
+        // The total repeats the statement without the page: no cursor, no sort, no limit.
+        let count = flat
+            .split("SELECT count(*)")
+            .nth(1)
+            .and_then(|c| c.split(".bind(").next())
+            .unwrap_or_default();
+        assert!(
+            count.contains("LEFT JOIN") && !count.contains("::text") && !count.contains("LIMIT"),
+            "{count}"
+        );
+        // The text search escapes the wildcards of the value.
+        assert!(flat.contains("replace('%', \"\\\\%\")"), "{flat}");
+
+        // An offset, a list and null tests, without a cursor.
+        if let Some(Step::Sql {
+            cursor,
+            conditions,
+            offset,
+            ..
+        }) = p.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == "list_posts")
+            .map(|r| &mut r.steps[3])
+        {
+            cursor.clear();
+            *offset = Some(Expr::Path {
+                path: "input.page_size".into(),
+            });
+            conditions.push(SqlCondition {
+                column: "authors.name".into(),
+                op: sb_model::CmpOp::Eq,
+                value: Expr::Literal {
+                    value: serde_json::Value::Null,
+                },
+                test: SqlTest::IsNotNull,
+            });
+            conditions.push(SqlCondition {
+                column: "post_id".into(),
+                op: sb_model::CmpOp::Eq,
+                value: Expr::Path {
+                    path: "input.search".into(),
+                },
+                test: SqlTest::StartsWith,
+            });
+        }
+        let flat = flat_of(&p);
+        assert!(
+            flat.contains("\\\"authors\\\".\\\"name\\\" IS NOT NULL")
+                && flat.contains("\\\"posts\\\".\\\"post_id\\\" ILIKE $")
+                && flat.contains("LIMIT $5 OFFSET $6")
+                && flat.contains("clamp(0, 1_000_000_i64)"),
+            "{flat}"
+        );
+    }
 }

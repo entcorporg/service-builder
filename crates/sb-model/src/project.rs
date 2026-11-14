@@ -1342,9 +1342,7 @@ fn default_cmp() -> CmpOp {
 }
 
 fn default_null() -> Expr {
-    Expr::Literal {
-        value: Value::Null,
-    }
+    Expr::Literal { value: Value::Null }
 }
 
 /// What a `where` condition tests.
@@ -1396,6 +1394,10 @@ pub struct SqlJoin {
     pub kind: SqlJoinKind,
     /// A table of the service, not already in the query.
     pub table: String,
+    /// The prefix of the fields this table's columns give in the row (`alias_column`); the table name when absent. A
+    /// rename of the table sets it, so that the schemas the rows are converted into keep their field names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
     /// The pairs of columns that match, all together (`ON a = b AND c = d`). A foreign key declared on one of the two
     /// tables gives them.
     pub on: Vec<SqlJoinOn>,
@@ -1467,11 +1469,14 @@ impl Service {
             .iter()
             .filter_map(|n| {
                 let (table, column, left) = self.sql_column(base, joins, n)?;
+                let prefix = joins
+                    .iter()
+                    .find(|j| j.table == table.name)
+                    .map(|j| j.alias.as_deref().unwrap_or(&j.table));
                 Some(SqlOutColumn {
-                    field: if table.name == base {
-                        column.name.clone()
-                    } else {
-                        format!("{}_{}", table.name, column.name)
+                    field: match prefix.filter(|_| table.name != base) {
+                        None => column.name.clone(),
+                        Some(prefix) => format!("{prefix}_{}", column.name),
                     },
                     table,
                     column,

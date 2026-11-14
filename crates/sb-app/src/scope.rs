@@ -94,6 +94,16 @@ fn bind(project: &Project, scope: &mut BTreeMap<String, Ty>, step: &Step) {
             if !has_columns {
                 return;
             }
+            // What a page adds: the number of rows that match, whether another page follows, the last row.
+            if let Some(v) = text("totalBind") {
+                scope.insert(v.into(), scalar("int64"));
+            }
+            if let Some(v) = text("moreBind") {
+                scope.insert(v.into(), scalar("bool"));
+            }
+            if let (Some(v), Some(schema)) = (text("lastBind"), text("into")) {
+                scope.insert(v.into(), message(schema));
+            }
             let name = text("into").map_or_else(
                 || {
                     sb_model::sql_row_name(
@@ -219,6 +229,7 @@ mod tests {
                     if let Step::Sql {
                         bind: Some(b),
                         columns,
+                        many: false,
                         ..
                     } = s
                         && !columns.is_empty()

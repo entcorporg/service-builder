@@ -191,8 +191,55 @@ pub fn table(p: &mut Project, service: &str, from: &str, to: &str) {
         rewrite(steps, |o| {
             if kind(o) == "sql" {
                 set_if(o, "table", from, to);
+                requalify(o, from, to);
             }
         });
+    }
+}
+
+/// The joins of an SQL step name tables, and the columns of a joined table are written `table.column`. The fields of the
+/// row are named after the table (`table_column`), and the schemas they are converted into hold those names: the old name is
+/// kept as the alias of the join so that nothing there changes.
+fn requalify(o: &mut serde_json::Map<String, Value>, from: &str, to: &str) {
+    let prefix = format!("{from}.");
+    let fix = |v: &mut Value| {
+        if let Some(rest) = v.as_str().and_then(|s| s.strip_prefix(&prefix)) {
+            *v = format!("{to}.{rest}").into();
+        }
+    };
+    let fix_key = |v: &mut Value, key: &str| {
+        if let Some(c) = v.get_mut(key) {
+            fix(c);
+        }
+    };
+    if let Some(joins) = o.get_mut("joins").and_then(Value::as_array_mut) {
+        for j in joins {
+            if j["table"] == from {
+                if j.get("alias").is_none_or(Value::is_null) {
+                    j["alias"] = from.into();
+                }
+                j["table"] = to.into();
+            }
+            for on in j["on"].as_array_mut().into_iter().flatten() {
+                fix_key(on, "column");
+            }
+        }
+    }
+    if let Some(c) = o.get_mut("columns").and_then(Value::as_array_mut) {
+        c.iter_mut().for_each(fix);
+    }
+    if let Some(c) = o.get_mut("orderBy") {
+        fix(c);
+    }
+    for key in ["thenBy", "where"] {
+        for k in o
+            .get_mut(key)
+            .and_then(Value::as_array_mut)
+            .into_iter()
+            .flatten()
+        {
+            fix_key(k, "column");
+        }
     }
 }
 

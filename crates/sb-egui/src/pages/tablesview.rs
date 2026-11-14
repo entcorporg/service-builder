@@ -112,9 +112,13 @@ fn usages(svc: &Service, table: &str) -> usize {
     fn walk(v: &serde_json::Value, table: &str) -> usize {
         match v {
             serde_json::Value::Object(o) => {
+                // A step reads the table as its own, or joined to another.
                 let me = usize::from(
                     o.get("type").and_then(|t| t.as_str()) == Some("sql")
-                        && o.get("table").and_then(|t| t.as_str()) == Some(table),
+                        && (o.get("table").and_then(|t| t.as_str()) == Some(table)
+                            || o.get("joins").and_then(|j| j.as_array()).is_some_and(|j| {
+                                j.iter().any(|j| j["table"].as_str() == Some(table))
+                            })),
                 );
                 me + o.values().map(|x| walk(x, table)).sum::<usize>()
             }

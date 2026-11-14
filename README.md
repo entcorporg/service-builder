@@ -184,7 +184,8 @@ La CI le fait.
 - Les flèches du canvas sont **dérivées** du modèle. On ne peut tracer à la souris que *topic → service* (cela crée
   un consumer) et *service → topic* (cela déclare le producteur) ; publier et appeler un RPC se configurent dans les
   étapes de l'inspecteur.
-- Le bloc SQL lit une seule table à la fois : pas de jointure, pas de pagination (une limite, pas de décalage).
+- Le bloc SQL n'a pas encore d'agrégats (`COUNT` par groupe, `SUM`, `GROUP BY`), de jointure à soi-même (alias) ni de `OR` entre
+  conditions ; le total d'une page est le seul `COUNT`.
 - L'API HTTP n'a pas de spécification OpenAPI générée ; un champ absent d'une requête prend sa valeur par défaut au
   lieu d'être refusé ; une réponse pose un statut et des cookies, pas d'en-têtes libres.
 - Pas d'appel à une API HTTP externe (Stripe, Twilio…) : seuls les webhooks entrants signés sont modélisés
