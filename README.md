@@ -189,7 +189,8 @@ La CI le fait.
   lieu d'être refusé ; une réponse pose un statut et des cookies, pas d'en-têtes libres.
 - Pas d'appel à une API HTTP externe (Stripe, Twilio…) : seuls les webhooks entrants signés sont modélisés
   (`verifyHmac`). Un appel sortant s'écrit dans l'étape *Code Rust*.
-- Le HTML et le texte des mails se saisissent à la main : pas d'éditeur visuel de gabarits.
+- L'aperçu de l'éditeur de mails est dessiné par l'interface, pas par un client de messagerie : il ne charge pas les
+  images et ne dit pas ce que Gmail ou Outlook feront du HTML (le bouton « Ouvrir dans le navigateur » s'en approche).
 - Les tables se conçoivent dans la vue **Tables** et se lisent avec le bloc SQL ; les migrations sont additives (pas de
   renommage ni de suppression de colonne).
 - L'export **écrase** les fichiers générés : la logique sur mesure passe par l'étape *Code Rust*, pas par l'édition
