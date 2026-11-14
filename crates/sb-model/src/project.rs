@@ -515,7 +515,10 @@ impl ColumnType {
                 (self, to),
                 (ColumnType::Int64, ColumnType::Int32)
                     | (ColumnType::Double, ColumnType::Float)
-                    | (ColumnType::Float | ColumnType::Double, ColumnType::Int32 | ColumnType::Int64)
+                    | (
+                        ColumnType::Float | ColumnType::Double,
+                        ColumnType::Int32 | ColumnType::Int64
+                    )
                     | (ColumnType::Int64, ColumnType::Float)
                     | (ColumnType::Int32 | ColumnType::Int64, ColumnType::Bool)
             )

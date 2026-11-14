@@ -54,14 +54,30 @@ fn old_names_and_dropped_names_must_be_unambiguous() {
     assert!(has(&p, "E_RENAMED_FROM", &format!("{COL1}/renamedFrom/0")));
     p.services[0].tables[0].columns[2].renamed_from = vec![];
     p.services[0].tables[0].dropped_columns = vec!["old".into(), "amount".into()];
-    assert!(has(&p, "E_DROPPED_NAME", "/services/0/tables/0/droppedColumns/0"));
-    assert!(has(&p, "E_DROPPED_NAME", "/services/0/tables/0/droppedColumns/1"));
+    assert!(has(
+        &p,
+        "E_DROPPED_NAME",
+        "/services/0/tables/0/droppedColumns/0"
+    ));
+    assert!(has(
+        &p,
+        "E_DROPPED_NAME",
+        "/services/0/tables/0/droppedColumns/1"
+    ));
     p.services[0].tables[0].dropped_columns.clear();
     p.services[0].tables[0].renamed_from = vec!["orders".into()];
-    assert!(has(&p, "E_RENAMED_FROM", "/services/0/tables/0/renamedFrom/0"));
+    assert!(has(
+        &p,
+        "E_RENAMED_FROM",
+        "/services/0/tables/0/renamedFrom/0"
+    ));
     p.services[0].tables[0].renamed_from = vec!["old_orders".into()];
     p.services[0].dropped_tables = vec!["old_orders".into(), "orders".into()];
-    assert!(has(&p, "E_RENAMED_FROM", "/services/0/tables/0/renamedFrom/0"));
+    assert!(has(
+        &p,
+        "E_RENAMED_FROM",
+        "/services/0/tables/0/renamedFrom/0"
+    ));
     assert!(has(&p, "E_DROPPED_NAME", "/services/0/droppedTables/1"));
 }
 
@@ -96,7 +112,11 @@ fn a_type_change_is_refused_in_a_foreign_key() {
         .iter()
         .find_map(|t| t.foreign_keys.first().cloned())
         .unwrap();
-    let target = svc.tables.iter_mut().find(|t| t.name == fk.ref_table).unwrap();
+    let target = svc
+        .tables
+        .iter_mut()
+        .find(|t| t.name == fk.ref_table)
+        .unwrap();
     let col = target
         .columns
         .iter_mut()
@@ -110,7 +130,11 @@ fn a_type_change_is_refused_in_a_foreign_key() {
 fn becoming_required_without_a_default_warns() {
     let mut p = sample::orders();
     p.services[0].tables[0].columns[1].nullable_from = Some(true);
-    assert!(has(&p, "W_REQUIRED_NO_DEFAULT", &format!("{COL1}/nullableFrom")));
+    assert!(has(
+        &p,
+        "W_REQUIRED_NO_DEFAULT",
+        &format!("{COL1}/nullableFrom")
+    ));
     p.services[0].tables[0].columns[1].default = Some("0".into());
     assert!(!codes(&p).contains(&"W_REQUIRED_NO_DEFAULT".to_string()));
 }

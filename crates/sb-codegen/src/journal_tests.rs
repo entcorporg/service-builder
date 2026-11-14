@@ -14,14 +14,19 @@ fn schema(p: &Project) -> String {
 }
 
 fn at(s: &str, needle: &str) -> usize {
-    s.find(needle)
-        .unwrap_or_else(|| panic!("missing {needle}"))
+    s.find(needle).unwrap_or_else(|| panic!("missing {needle}"))
 }
 
 #[test]
 fn without_a_journal_the_schema_is_the_additive_one() {
     let s = schema(&sample::orders());
-    for word in ["RENAME", "DROP COLUMN", "DROP TABLE", "DROP DEFAULT", "NOT NULL;"] {
+    for word in [
+        "RENAME",
+        "DROP COLUMN",
+        "DROP TABLE",
+        "DROP DEFAULT",
+        "NOT NULL;",
+    ] {
         assert!(!s.contains(word), "{word}");
     }
 }

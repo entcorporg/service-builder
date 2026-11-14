@@ -136,39 +136,51 @@ fn table_mut<'a>(p: &'a mut Project, service: &str, table: &str) -> Option<&'a m
         .find(|t| t.name == table)
 }
 
-/// Renames a column and everything in the table that names it. SQL steps are left to the validator.
-fn rename_column(p: &mut Project, service: &str, table: &str, from: &str, to: &str) {
-    let Some(svc) = p.services.iter_mut().find(|s| s.name == service) else {
-        return;
-    };
-    for t in &mut svc.tables {
-        if t.name == table {
-            for c in &mut t.columns {
-                if c.name == from {
-                    c.name = to.into();
-                }
-            }
-            let fix = |list: &mut Vec<String>| {
-                list.iter_mut()
-                    .filter(|c| *c == from)
-                    .for_each(|c| *c = to.into())
-            };
-            t.uniques.iter_mut().for_each(|u| fix(&mut u.columns));
-            t.indexes.iter_mut().for_each(|i| fix(&mut i.columns));
-            t.foreign_keys.iter_mut().for_each(|f| fix(&mut f.columns));
-            if t.tenant_column.as_deref() == Some(from) {
-                t.tenant_column = Some(to.into());
-            }
-        }
-        for f in &mut t.foreign_keys {
-            if f.ref_table == table {
-                f.ref_columns
-                    .iter_mut()
-                    .filter(|c| *c == from)
-                    .for_each(|c| *c = to.into());
-            }
-        }
+/// What a drop takes with it besides the values: the constraints built on the column and the foreign keys that point at
+/// it. Shown in the confirmation.
+fn column_impact(svc: &Service, table: &Table, name: &str) -> Vec<String> {
+    let mut out = vec![];
+    let n = table
+        .uniques
+        .iter()
+        .filter(|u| u.columns.iter().any(|c| c == name))
+        .count();
+    if n > 0 {
+        out.push(format!(
+            "{n} contrainte(s) UNIQUE qui la citent seront supprimées"
+        ));
     }
+    let n = table
+        .indexes
+        .iter()
+        .filter(|i| i.columns.iter().any(|c| c == name))
+        .count();
+    if n > 0 {
+        out.push(format!("{n} index qui la citent seront supprimés"));
+    }
+    let n = table
+        .foreign_keys
+        .iter()
+        .filter(|f| f.columns.iter().any(|c| c == name))
+        .count()
+        + svc
+            .tables
+            .iter()
+            .flat_map(|t| &t.foreign_keys)
+            .filter(|f| f.ref_table == table.name && f.ref_columns.iter().any(|c| c == name))
+            .count();
+    if n > 0 {
+        out.push(format!(
+            "{n} clé(s) étrangère(s) qui la citent seront supprimées"
+        ));
+    }
+    if table.tenant_column.as_deref() == Some(name) {
+        out.push("la colonne du tenant sera retirée de la table".into());
+    }
+    if table.soft_delete && name == DELETED_AT {
+        out.push("la suppression douce n’aura plus sa colonne (la validation le signalera)".into());
+    }
+    out
 }
 
 fn constraint_name(t: &Table, columns: &[String], prefix: &str) -> String {
@@ -521,15 +533,43 @@ fn main(app: &mut App, ui: &mut Ui, svc: &Service, table: &Table) {
             if icon_btn(ui, "trash", &format!("Supprimer la table {}", table.name), true)
                 .clicked()
             {
-                app.edit(|p| {
-                    if let Some(s) = p.services.iter_mut().find(|s| s.name == sname) {
-                        s.tables.retain(|t| t.name != tname);
-                        for t in &mut s.tables {
-                            t.foreign_keys.retain(|f| f.ref_table != tname);
-                        }
-                    }
-                });
-                app.tables.sel = None;
+                let (service, gone) = (sname.clone(), tname.clone());
+                let mut lost = vec![format!(
+                    "La table {gone} et toutes ses lignes seront supprimées de la base au prochain démarrage du service, sans retour possible."
+                )];
+                let refs: usize = svc
+                    .tables
+                    .iter()
+                    .flat_map(|t| &t.foreign_keys)
+                    .filter(|f| f.ref_table == tname)
+                    .count();
+                if refs > 0 {
+                    lost.push(format!(
+                        "- {refs} clé(s) étrangère(s) qui la visent seront supprimées"
+                    ));
+                }
+                let steps = usages(svc, &tname);
+                if steps > 0 {
+                    lost.push(format!(
+                        "{steps} étape(s) SQL l’utilisent : la validation les signalera."
+                    ));
+                }
+                app.confirm(
+                    &format!("Supprimer la table {gone} ?"),
+                    &lost.join("
+"),
+                    vec![
+                        ("Annuler".into(), false, None),
+                        (
+                            "Supprimer la table".into(),
+                            true,
+                            Some(Box::new(move |app: &mut App| {
+                                app.edit(|p| rename::drop_table(p, &service, &gone));
+                                app.tables.sel = None;
+                            })),
+                        ),
+                    ],
+                );
             }
             ui.label(
                 RichText::new(format!(
@@ -541,13 +581,14 @@ fn main(app: &mut App, ui: &mut Ui, svc: &Service, table: &Table) {
         });
     });
 
-    columns_grid(app, ui, &sname, &tname, table);
+    columns_grid(app, ui, &sname, &tname, svc, table);
 
     if link(ui, "+ Ajouter une colonne").clicked() {
         app.edit(|p| {
             if let Some(tb) = table_mut(p, &sname, &tname) {
                 let taken: Vec<&str> = tb.columns.iter().map(|c| c.name.as_str()).collect();
                 let name = unique("column", &taken);
+                tb.dropped_columns.retain(|d| *d != name);
                 let mut c = Column::new(name, ColumnType::String);
                 c.nullable = true;
                 tb.columns.push(c);
@@ -556,8 +597,9 @@ fn main(app: &mut App, ui: &mut Ui, svc: &Service, table: &Table) {
     }
     muted_small(
         ui,
-        "Les tables sont créées au démarrage du service. Ajouter une colonne met à jour une base existante ; renommer ou supprimer une colonne ne change pas les tables déjà créées. Une colonne ajoutée est nulle par défaut, pour ne pas échouer sur des lignes existantes.",
+        "Les tables sont créées au démarrage du service. Ajouter une colonne met à jour une base existante ; renommer une colonne, changer son type ou son caractère nul est enregistré dans l’historique ci-dessous et rejoué sur les bases existantes sans perdre de données ; supprimer une colonne ou une table demande une confirmation. Une colonne ajoutée est nulle par défaut, pour ne pas échouer sur des lignes existantes.",
     );
+    journal(app, ui, svc, table);
 
     constraints(app, ui, svc, table);
 
@@ -588,7 +630,7 @@ fn column_edit(app: &mut App, s: &str, t: &str, ci: usize, f: impl FnOnce(&mut C
     });
 }
 
-fn columns_grid(app: &mut App, ui: &mut Ui, s: &str, t: &str, table: &Table) {
+fn columns_grid(app: &mut App, ui: &mut Ui, s: &str, t: &str, svc: &Service, table: &Table) {
     Frame::new()
         .fill(PANEL)
         .stroke(Stroke::new(1.0, BORDER))
@@ -639,7 +681,7 @@ fn columns_grid(app: &mut App, ui: &mut Ui, s: &str, t: &str, table: &Table) {
                             } else if taken {
                                 app.say(&format!("La colonne {v} existe déjà."));
                             } else {
-                                app.edit(|p| rename_column(p, s, t, &c.name, &v));
+                                app.edit(|p| rename::column(p, s, t, &c.name, &v));
                             }
                         }
 
@@ -650,7 +692,24 @@ fn columns_grid(app: &mut App, ui: &mut Ui, s: &str, t: &str, table: &Table) {
                             && let Some(ty) = ColumnType::ALL.iter().find(|x| type_label(**x) == v)
                         {
                             let ty = *ty;
-                            column_edit(app, s, t, ci, |col| col.ty = ty);
+                            // The first type the column had is what a database may still hold: the conversion is
+                            // checked from there, and coming back to it records nothing.
+                            let origin = c.retyped_from.unwrap_or(c.ty);
+                            if ty != origin && !origin.converts_to(ty) {
+                                app.say(&format!(
+                                    "Impossible de convertir {} en {} sans perdre le sens des valeurs : supprimez la colonne puis recréez-la.",
+                                    type_label(origin),
+                                    type_label(ty)
+                                ));
+                            } else {
+                                column_edit(app, s, t, ci, |col| {
+                                    col.retyped_from = Some(origin).filter(|o| *o != ty);
+                                    col.ty = ty;
+                                });
+                                if origin.conversion_is_lossy(ty) {
+                                    app.say("Les valeurs existantes seront converties au démarrage ; une valeur qui ne convient pas arrête le démarrage sans rien modifier.");
+                                }
+                            }
                         }
 
                         let mut null = c.nullable;
@@ -668,7 +727,18 @@ fn columns_grid(app: &mut App, ui: &mut Ui, s: &str, t: &str, table: &Table) {
                             )
                             .inner;
                         if r.changed() {
-                            column_edit(app, s, t, ci, |col| col.nullable = null);
+                            // The nullability a database may still have: coming back to it records nothing.
+                            let origin = c.nullable_from.unwrap_or(c.nullable);
+                            column_edit(app, s, t, ci, |col| {
+                                col.nullable_from = Some(origin).filter(|o| *o != null);
+                                col.nullable = null;
+                            });
+                            if origin
+                                && !null
+                                && c.default.as_deref().is_none_or(|d| d.trim().is_empty())
+                            {
+                                app.say("Sans valeur par défaut, le démarrage s’arrête si une ligne existante a une valeur nulle.");
+                            }
                         }
 
                         let mut key = c.primary_key;
@@ -715,23 +785,131 @@ fn columns_grid(app: &mut App, ui: &mut Ui, s: &str, t: &str, table: &Table) {
                         )
                         .clicked()
                         {
-                            let gone = c.name.clone();
-                            app.edit(|p| {
-                                if let Some(t) = table_mut(p, s, t) {
-                                    t.columns.retain(|c| c.name != gone);
-                                    t.uniques.retain(|u| !u.columns.contains(&gone));
-                                    t.indexes.retain(|i| !i.columns.contains(&gone));
-                                    t.foreign_keys.retain(|f| !f.columns.contains(&gone));
-                                    if t.tenant_column.as_deref() == Some(&gone) {
-                                        t.tenant_column = None;
-                                    }
-                                }
-                            });
+                            let (gone, service, tname) =
+                                (c.name.clone(), s.to_string(), t.to_string());
+                            let mut lost = vec![format!(
+                                "Les valeurs de la colonne {gone} seront effacées de la base au prochain démarrage du service, sans retour possible."
+                            )];
+                            lost.extend(
+                                column_impact(svc, table, &gone)
+                                    .into_iter()
+                                    .map(|l| format!("- {l}")),
+                            );
+                            lost.push("Les étapes SQL qui la lisent ou l’écrivent seront signalées par la validation.".into());
+                            app.confirm(
+                                &format!("Supprimer la colonne {gone} ?"),
+                                &lost.join("
+"),
+                                vec![
+                                    ("Annuler".into(), false, None),
+                                    (
+                                        "Supprimer la colonne".into(),
+                                        true,
+                                        Some(Box::new(move |app: &mut App| {
+                                            app.edit(|p| {
+                                                rename::drop_column(p, &service, &tname, &gone)
+                                            });
+                                        })),
+                                    ),
+                                ],
+                            );
                         }
                         ui.end_row();
                     }
                 });
         });
+}
+
+/// The history of the table: what the migrations replay on a database that is behind. Shown so that nothing destructive is
+/// hidden, and so that it can be forgotten once every database has caught up.
+fn journal(app: &mut App, ui: &mut Ui, svc: &Service, table: &Table) {
+    let mut lines: Vec<String> = vec![];
+    if !table.renamed_from.is_empty() {
+        lines.push(format!(
+            "Table renommée, elle s’appelait : {}",
+            table.renamed_from.join(" puis ")
+        ));
+    }
+    for c in &table.columns {
+        if !c.renamed_from.is_empty() {
+            lines.push(format!(
+                "Colonne {} renommée, elle s’appelait : {}",
+                c.name,
+                c.renamed_from.join(" puis ")
+            ));
+        }
+        if let Some(from) = c.retyped_from {
+            lines.push(format!(
+                "Colonne {} convertie depuis {}",
+                c.name,
+                type_label(from)
+            ));
+        }
+        if let Some(was) = c.nullable_from {
+            lines.push(format!(
+                "Colonne {} : {}",
+                c.name,
+                if was {
+                    "devenue obligatoire"
+                } else {
+                    "devenue facultative"
+                }
+            ));
+        }
+    }
+    for d in &table.dropped_columns {
+        lines.push(format!(
+            "Colonne {d} supprimée de la base, avec ses valeurs"
+        ));
+    }
+    for d in &svc.dropped_tables {
+        lines.push(format!("Table {d} supprimée de la base, avec ses lignes"));
+    }
+    if lines.is_empty() {
+        return;
+    }
+    card_box(ui, |ui| {
+        heading(ui, "Historique des changements");
+        for l in &lines {
+            ui.label(RichText::new(l).size(SM).color(MUTED));
+        }
+        muted_small(
+            ui,
+            "Ces changements sont rejoués à chaque démarrage, sans effet sur une base déjà à jour : c’est ce qui amène une base ancienne à l’état actuel sans perdre ses données. Oubliez-les une fois toutes vos bases à jour.",
+        );
+        if link(ui, "Oublier l’historique de cette table").clicked() {
+            let (service, name) = (svc.name.clone(), table.name.clone());
+            app.confirm(
+                "Oublier l’historique ?",
+                "Une base qui n’a pas encore reçu ces changements ne les recevra plus : un renommage deviendrait une nouvelle colonne vide, et ce qui est supprimé resterait dans la base.",
+                vec![
+                    ("Annuler".into(), false, None),
+                    (
+                        "Oublier".into(),
+                        true,
+                        Some(Box::new(move |app: &mut App| {
+                            app.edit(|p| {
+                                let Some(s) = p.services.iter_mut().find(|s| s.name == service)
+                                else {
+                                    return;
+                                };
+                                s.dropped_tables.clear();
+                                if let Some(t) = s.tables.iter_mut().find(|t| t.name == name) {
+                                    t.renamed_from.clear();
+                                    t.dropped_columns.clear();
+                                    for c in &mut t.columns {
+                                        c.renamed_from.clear();
+                                        c.retyped_from = None;
+                                        c.nullable_from = None;
+                                    }
+                                }
+                            });
+                        })),
+                    ),
+                ],
+            );
+        }
+    });
 }
 
 fn add_table(app: &mut App, service: &str) {

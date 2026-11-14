@@ -660,7 +660,11 @@ fn schema_rs(service: &Service) -> String {
 /// The renames to replay, oldest first: the names a thing had, then the one it has: `[a, b]` and `c` give a -> b, b -> c.
 /// Each step only runs where its old name exists and its new one does not, so any earlier state reaches the current one.
 fn rename_steps<'a>(history: &'a [String], current: &'a str) -> Vec<(&'a str, &'a str)> {
-    let names: Vec<&str> = history.iter().map(String::as_str).chain([current]).collect();
+    let names: Vec<&str> = history
+        .iter()
+        .map(String::as_str)
+        .chain([current])
+        .collect();
     names.windows(2).map(|w| (w[0], w[1])).collect()
 }
 

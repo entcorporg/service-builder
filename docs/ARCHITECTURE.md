@@ -216,7 +216,7 @@ type (`string`, `bool`, `int32`, `int64`, `float`, `double`, `timestamp`, `uuid`
 valeur par défaut SQL. Le SQL de la table est affiché à côté. Au démarrage, le service applique le schéma de façon
 **additive** : `CREATE TABLE IF NOT EXISTS` puis `ADD COLUMN IF NOT EXISTS` pour chaque colonne, donc une colonne
 ajoutée dans la conception arrive dans une base existante (elle est nulle par défaut, pour ne pas échouer sur des lignes
-déjà là). Renommer ou supprimer une colonne ne modifie pas les tables déjà créées.
+déjà là). Renommer, supprimer ou convertir passe par l'historique décrit plus bas.
 
 Une table porte aussi trois listes de contraintes, appliquées **après** toutes les tables et toutes les colonnes (une
 clé étrangère peut donc viser une table définie plus loin) :
@@ -228,10 +228,56 @@ clé étrangère peut donc viser une table définie plus loin) :
   service. Elles peuvent être **composites**, avec `onDelete` / `onUpdate` (`noAction`, `restrict`, `cascade`,
   `setNull`, `setDefault`).
 
+#### Renommer, supprimer, convertir : l'historique des changements
+
+Le projet est un instantané du schéma, pas une suite de migrations : un renommage ne se déduit pas de deux instantanés
+(`a` disparaît, `b` apparaît : renommage, ou suppression et ajout ?). Il est donc **enregistré** dans le projet, par
+des champs optionnels (absents d'un projet ancien, qui se rouvre et génère les mêmes migrations qu'avant) :
+
+- **`renamedFrom`** (colonne ou table) : les anciens noms, du plus ancien au plus récent ; `[a, b]` sur `c` rejoue
+  `a → b` puis `b → c`. Chaque pas ne s'exécute que si l'ancien nom existe dans la base et pas le nouveau
+  (`information_schema`), donc une base à n'importe quel état intermédiaire, ou déjà à jour, arrive à l'état actuel sans
+  perdre ses lignes ni échouer à la deuxième exécution. Les renommages passent **avant** les `CREATE TABLE` / `ADD COLUMN`,
+  sinon la colonne serait recréée vide à côté de l'ancienne ; ceux des tables avant ceux des colonnes. Contraintes, index
+  et clés étrangères suivent la colonne (Postgres les rattache à la colonne, pas à son nom).
+- **`droppedColumns`** (table) et **`droppedTables`** (service) : la suppression est une liste explicite, jamais
+  déduite de l'absence : `DROP COLUMN IF EXISTS … CASCADE` / `DROP TABLE IF EXISTS … CASCADE`. `CASCADE` retire aussi
+  les index, contraintes et clés étrangères bâtis sur l'élément. Les suppressions viennent **avant** les contraintes de
+  la conception (un index de même nom redéfini sur d'autres colonnes est recréé, pas ignoré).
+- **`retypedFrom`** (colonne) : l'ancien type. La colonne est convertie (`ALTER COLUMN … TYPE … USING col::type`, valeur
+  par défaut ôtée puis remise) quand le type en base n'est pas encore le type actuel. Les conversions admises sont celles
+  qui gardent le sens : nombres entre eux, `bool` et `int32`, tout vers `string`, `string` vers tout
+  (`E_RETYPE_UNSUPPORTED` sinon : supprimer et recréer la colonne) ; `W_RETYPE_LOSSY` prévient quand une valeur peut ne pas
+  convenir (le démarrage s'arrête alors, dans la transaction, sans rien modifier). Une colonne d'une clé étrangère ne
+  change pas de type seule (`E_RETYPE_FK`).
+- **`nullableFrom`** (colonne) : le caractère nul d'avant. Devenir obligatoire remplit d'abord les nulls avec la valeur par
+  défaut puis `SET NOT NULL` (`W_REQUIRED_NO_DEFAULT` sans défaut : le démarrage s'arrête si une ligne est nulle) ; devenir
+  facultative est `DROP NOT NULL`.
+
+Validation : un ancien nom n'est le nom actuel d'aucune table ou colonne, n'est l'ancien nom que d'un seul élément et n'est
+pas aussi supprimé (`E_RENAMED_FROM`) ; un nom supprimé n'est plus une colonne ou une table du projet (`E_DROPPED_NAME`).
+Le schéma applique tout dans **une transaction** avec un verrou consultatif : un échec ne laisse rien de moitié fait.
+
+Dans la vue Tables : renommer une table ou une colonne **à même le champ** l'enregistre (`sb_app::rename::table` et
+`::column`, qui suivent aussi contraintes, clé étrangère, colonne du tenant et étapes SQL de la table) ; revenir à un
+ancien nom coupe l'historique au lieu de le boucler. Supprimer une colonne ou une table demande une **confirmation** qui
+dit ce qui est perdu (valeurs, lignes, contraintes, clés étrangères, étapes SQL à corriger) ; le changement de type et de
+caractère nul s'enregistre en éditant la colonne, et une conversion sans cast sensé est refusée. Un bloc « Historique des
+changements » liste ce qui est rejoué et permet de l'oublier une fois toutes les bases à jour. La vitrine en montre : `orders.amount`
+s'appelait `total`, `legacy_flag` et la table `order_drafts` sont supprimées.
+
+Preuve : `scripts/verify-migrations.sh` génère un projet ancien et le projet nouveau avec le vrai générateur, applique
+l'ancien schéma à un PostgreSQL 16 jetable avec des données, puis le nouveau deux fois : les valeurs survivent au
+renommage (colonne et table), à la conversion `text → integer` et au passage en obligatoire, la colonne et la table
+supprimées disparaissent, l'index suit la colonne et la seconde exécution ne change rien (colonnes, index, contraintes).
+Non vérifié : un renommage à contrainte `UNIQUE`/clé étrangère composite sur une vraie base, les conversions
+`timestamp ↔ string` (le texte rendu par PostgreSQL n'est pas du RFC 3339), un service démarré de bout en bout sur une
+base migrée.
+
 Postgres n'a pas de `ADD CONSTRAINT IF NOT EXISTS` : les contraintes `UNIQUE` et les clés étrangères sont ajoutées dans
 un bloc `DO $$ … $$` qui teste d'abord `pg_constraint`, les index avec `CREATE [UNIQUE] INDEX IF NOT EXISTS`. Le
-démarrage reste donc rejouable. Comme pour les colonnes, c'est additif : retirer une contrainte du projet ne la supprime
-pas d'une base existante, et une contrainte déjà créée n'est pas modifiée si on change ses colonnes sans changer son nom.
+démarrage reste donc rejouable. Retirer une contrainte du projet ne la supprime
+pas d'une base existante (seule la suppression de sa colonne ou de sa table l'emporte), et une contrainte déjà créée n'est pas modifiée si on change ses colonnes sans changer son nom.
 
 Règles vérifiées (`validate.rs`) : un nom de contrainte ou d'index est en snake_case, 63 caractères au plus, et partage
 l'espace de noms du service avec les tables (`E_DUPLICATE_CONSTRAINT`, `E_CONSTRAINT_NAME`) ; les colonnes existent, sans

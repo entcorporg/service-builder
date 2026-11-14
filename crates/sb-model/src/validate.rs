@@ -1639,14 +1639,11 @@ impl<'a> Checker<'a> {
                     );
                 }
                 // Postgres cannot change the type of one side of a foreign key on its own.
-                let in_fk = t
-                    .foreign_keys
-                    .iter()
-                    .any(|f| f.columns.contains(&c.name))
+                let in_fk = t.foreign_keys.iter().any(|f| f.columns.contains(&c.name))
                     || s.tables.iter().any(|o| {
-                        o.foreign_keys.iter().any(|f| {
-                            f.ref_table == t.name && f.ref_columns.contains(&c.name)
-                        })
+                        o.foreign_keys
+                            .iter()
+                            .any(|f| f.ref_table == t.name && f.ref_columns.contains(&c.name))
                     });
                 if in_fk {
                     self.error(
@@ -1660,7 +1657,9 @@ impl<'a> Checker<'a> {
                 }
             }
             if let Some(was) = c.nullable_from
-                && was && !c.nullable && c.default.as_deref().is_none_or(|d| d.trim().is_empty())
+                && was
+                && !c.nullable
+                && c.default.as_deref().is_none_or(|d| d.trim().is_empty())
             {
                 self.warn(
                     "W_REQUIRED_NO_DEFAULT",
