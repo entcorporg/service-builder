@@ -10,6 +10,7 @@ pub mod flows;
 pub mod graph;
 pub mod inspector;
 pub mod mail;
+pub mod mailcanvas;
 pub mod mcp;
 pub mod palette;
 pub mod pods;
