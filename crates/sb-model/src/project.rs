@@ -267,6 +267,10 @@ pub struct Service {
     /// The tables of the service's own database.
     #[serde(default)]
     pub tables: Vec<Table>,
+    /// Tables removed from the design. The migration drops them, with their rows, from a database that still has them: an
+    /// explicit list, like `Table::dropped_columns`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped_tables: Vec<String>,
     #[serde(default)]
     pub consumers: Vec<Consumer>,
     /// Tasks run on a schedule, with no request and no event: purging what expired, for instance.
@@ -483,6 +487,43 @@ impl ColumnType {
         }
     }
 
+    fn is_numeric(self) -> bool {
+        matches!(
+            self,
+            ColumnType::Int32 | ColumnType::Int64 | ColumnType::Float | ColumnType::Double
+        )
+    }
+
+    /// Whether a column of this type can be converted to `to` by `USING col::to`, with the meaning kept: numbers among
+    /// themselves, `bool` and `int32`, anything to text, and text to anything (which fails, with nothing changed, on a
+    /// value that is not of the target type). Other pairs (a uuid to a number, a timestamp to a bool) have no sound cast.
+    pub fn converts_to(self, to: ColumnType) -> bool {
+        self != to
+            && (self.is_numeric() && to.is_numeric()
+                || to == ColumnType::String
+                || self == ColumnType::String
+                || matches!(
+                    (self, to),
+                    (ColumnType::Bool, ColumnType::Int32) | (ColumnType::Int32, ColumnType::Bool)
+                ))
+    }
+
+    /// Whether the conversion to `to` can fail or lose precision on existing values.
+    pub fn conversion_is_lossy(self, to: ColumnType) -> bool {
+        self == ColumnType::String && to != ColumnType::String
+            || matches!(
+                (self, to),
+                (ColumnType::Int64, ColumnType::Int32)
+                    | (ColumnType::Double, ColumnType::Float)
+                    | (
+                        ColumnType::Float | ColumnType::Double,
+                        ColumnType::Int32 | ColumnType::Int64
+                    )
+                    | (ColumnType::Int64, ColumnType::Float)
+                    | (ColumnType::Int32 | ColumnType::Int64, ColumnType::Bool)
+            )
+    }
+
     /// The type a flow sees.
     pub fn field_type(self) -> FieldType {
         match self {
@@ -519,6 +560,19 @@ pub struct Column {
     /// SQL expression used when an insert does not give the column a value (`now()`, `0`, `'new'`).
     #[serde(default)]
     pub default: Option<String>,
+    /// The names this column had before, oldest first. The snapshot of the schema has no history, so a rename is
+    /// recorded here: the migration renames the column of a database that still has an old name (and only then), which
+    /// keeps its data. A name stays listed for as long as a database may still carry it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub renamed_from: Vec<String>,
+    /// The type before a change of type. The migration converts the column (`USING col::type`) when the database does not
+    /// have the current type yet; the conversion must be a sound one (`E_RETYPE_UNSUPPORTED`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retyped_from: Option<ColumnType>,
+    /// Whether the column was nullable before a change of nullability. Making a column required fills its nulls with the
+    /// default first (and fails when there is none and a row holds a null: nothing is lost, the start-up stops).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nullable_from: Option<bool>,
 }
 
 impl Column {
@@ -529,6 +583,9 @@ impl Column {
             nullable: false,
             primary_key: false,
             default: None,
+            renamed_from: vec![],
+            retyped_from: None,
+            nullable_from: None,
         }
     }
 
@@ -562,6 +619,13 @@ pub struct Table {
     /// have it. The table needs a nullable timestamp column `deleted_at`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub soft_delete: bool,
+    /// The names this table had before, oldest first (see `Column::renamed_from`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub renamed_from: Vec<String>,
+    /// Columns removed from the design. The migration drops them from a database that still has them, with their data:
+    /// this is destructive, so it is an explicit list and not the mere absence of the column.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped_columns: Vec<String>,
 }
 
 /// The column a soft delete sets.
@@ -577,6 +641,8 @@ impl Table {
             foreign_keys: vec![],
             tenant_column: None,
             soft_delete: false,
+            renamed_from: vec![],
+            dropped_columns: vec![],
         }
     }
 

@@ -179,6 +179,7 @@ pub fn table(p: &mut Project, service: &str, from: &str, to: &str) {
         for t in &mut s.tables {
             if t.name == from {
                 t.name = to.into();
+                record(&mut t.renamed_from, from, to);
             }
             for f in &mut t.foreign_keys {
                 if f.ref_table == from {
@@ -186,6 +187,7 @@ pub fn table(p: &mut Project, service: &str, from: &str, to: &str) {
                 }
             }
         }
+        s.dropped_tables.retain(|d| d != to);
     }
     for steps in handlers(p, |n| n == service) {
         rewrite(steps, |o| {
@@ -240,6 +242,130 @@ fn requalify(o: &mut serde_json::Map<String, Value>, from: &str, to: &str) {
         {
             fix_key(k, "column");
         }
+    }
+}
+
+/// Writes a rename in a journal of old names (oldest first). Going back to a name the thing already had cuts the history
+/// there: a database at any of the names then reaches the current one, with no loop to replay.
+fn record(history: &mut Vec<String>, from: &str, to: &str) {
+    if let Some(at) = history.iter().position(|n| n == to) {
+        history.truncate(at);
+    } else if !history.iter().any(|n| n == from) {
+        history.push(from.into());
+    }
+}
+
+/// Renames a column and everything that names it: the other columns' constraints, the foreign keys that point at it, the
+/// tenant column and the SQL steps on the table. The rename is recorded in the column's journal (`renamedFrom`), which
+/// is what lets the migration rename the column of an existing database instead of adding an empty one.
+pub fn column(p: &mut Project, service: &str, table: &str, from: &str, to: &str) {
+    if let Some(s) = p.services.iter_mut().find(|s| s.name == service) {
+        for t in &mut s.tables {
+            if t.name == table {
+                for c in &mut t.columns {
+                    if c.name == from {
+                        c.name = to.into();
+                        record(&mut c.renamed_from, from, to);
+                    }
+                }
+                let fix = |list: &mut Vec<String>| {
+                    list.iter_mut()
+                        .filter(|c| *c == from)
+                        .for_each(|c| *c = to.into())
+                };
+                t.uniques.iter_mut().for_each(|u| fix(&mut u.columns));
+                t.indexes.iter_mut().for_each(|i| fix(&mut i.columns));
+                t.foreign_keys.iter_mut().for_each(|f| fix(&mut f.columns));
+                if t.tenant_column.as_deref() == Some(from) {
+                    t.tenant_column = Some(to.into());
+                }
+                t.dropped_columns.retain(|d| d != to);
+            }
+            for f in &mut t.foreign_keys {
+                if f.ref_table == table {
+                    f.ref_columns
+                        .iter_mut()
+                        .filter(|c| *c == from)
+                        .for_each(|c| *c = to.into());
+                }
+            }
+        }
+    }
+    for steps in handlers(p, |n| n == service) {
+        rewrite(steps, |o| {
+            if kind(o) != "sql" || o.get("table").and_then(Value::as_str) != Some(table) {
+                return;
+            }
+            set_if(o, "orderBy", from, to);
+            if let Some(Value::Array(columns)) = o.get_mut("columns") {
+                for c in columns {
+                    if c.as_str() == Some(from) {
+                        *c = to.into();
+                    }
+                }
+            }
+            for list in ["where", "values"] {
+                if let Some(Value::Array(items)) = o.get_mut(list) {
+                    for item in items.iter_mut().filter_map(Value::as_object_mut) {
+                        set_if(item, "column", from, to);
+                        set_if(item, "field", from, to);
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// Removes a column from the design and records the drop: the migration then drops it, with its data, from a database
+/// that still has it. Its old names are dropped too (a database may still carry one), and so is everything of the table
+/// that was built on the column.
+pub fn drop_column(p: &mut Project, service: &str, table: &str, name: &str) {
+    let Some(s) = p.services.iter_mut().find(|s| s.name == service) else {
+        return;
+    };
+    for t in &mut s.tables {
+        if t.name == table {
+            let Some(at) = t.columns.iter().position(|c| c.name == name) else {
+                return;
+            };
+            let gone = t.columns.remove(at);
+            for old in gone.renamed_from.into_iter().chain([name.to_string()]) {
+                if !t.dropped_columns.contains(&old) {
+                    t.dropped_columns.push(old);
+                }
+            }
+            t.uniques.retain(|u| !u.columns.iter().any(|c| c == name));
+            t.indexes.retain(|i| !i.columns.iter().any(|c| c == name));
+            t.foreign_keys
+                .retain(|f| !f.columns.iter().any(|c| c == name));
+            if t.tenant_column.as_deref() == Some(name) {
+                t.tenant_column = None;
+            }
+        }
+    }
+    // A foreign key pointing at the column cannot survive it.
+    for t in &mut s.tables {
+        t.foreign_keys
+            .retain(|f| !(f.ref_table == table && f.ref_columns.iter().any(|c| c == name)));
+    }
+}
+
+/// Removes a table from the design and records the drop (its old names too), with the foreign keys that point at it.
+pub fn drop_table(p: &mut Project, service: &str, table: &str) {
+    let Some(s) = p.services.iter_mut().find(|s| s.name == service) else {
+        return;
+    };
+    let Some(at) = s.tables.iter().position(|t| t.name == table) else {
+        return;
+    };
+    let gone = s.tables.remove(at);
+    for old in gone.renamed_from.into_iter().chain([table.to_string()]) {
+        if !s.dropped_tables.contains(&old) {
+            s.dropped_tables.push(old);
+        }
+    }
+    for t in &mut s.tables {
+        t.foreign_keys.retain(|f| f.ref_table != table);
     }
 }
 
@@ -320,5 +446,54 @@ mod tests {
         p.services[0].rpcs[0].steps.push(step.clone());
         topic(&mut p, &topic_name, "renamed.topic");
         assert_eq!(p.services[0].rpcs[0].steps.last(), Some(&step));
+    }
+
+    #[test]
+    fn renaming_a_column_is_recorded_and_followed_by_the_steps() {
+        let mut p = sample::orders();
+        column(&mut p, "Orders", "orders", "amount", "total");
+        let c = &p.services[0].tables[0].columns[1];
+        assert_eq!(
+            (c.name.as_str(), c.renamed_from.clone()),
+            ("total", vec!["amount".to_string()])
+        );
+        assert_eq!(errors(&p), 0);
+        // A second rename extends the history; going back to a former name cuts it.
+        column(&mut p, "Orders", "orders", "total", "sum");
+        assert_eq!(
+            p.services[0].tables[0].columns[1].renamed_from,
+            ["amount", "total"]
+        );
+        column(&mut p, "Orders", "orders", "sum", "amount");
+        assert!(p.services[0].tables[0].columns[1].renamed_from.is_empty());
+        assert_eq!(errors(&p), 0);
+    }
+
+    #[test]
+    fn renaming_a_table_is_recorded() {
+        let mut p = sample::orders();
+        table(&mut p, "Orders", "orders", "purchases");
+        assert_eq!(p.services[0].tables[0].renamed_from, ["orders"]);
+        assert_eq!(errors(&p), 0);
+    }
+
+    #[test]
+    fn dropping_is_recorded_with_the_old_names_and_cleans_what_leaned_on_it() {
+        let mut p = sample::orders();
+        column(&mut p, "Orders", "orders", "amount", "total");
+        p.services[0].tables[0].indexes.push(sb_model::Index {
+            name: "orders_total_idx".into(),
+            columns: vec!["total".into()],
+            unique: false,
+        });
+        // The steps that still read the column are what the validation then points at.
+        drop_column(&mut p, "Orders", "orders", "total");
+        let t = &p.services[0].tables[0];
+        assert_eq!(t.dropped_columns, ["amount", "total"]);
+        assert!(t.indexes.is_empty() && t.column("total").is_none());
+        let mut p = sample::orders();
+        drop_table(&mut p, "Orders", "orders");
+        assert_eq!(p.services[0].dropped_tables, ["orders"]);
+        assert!(p.services[0].tables.is_empty());
     }
 }

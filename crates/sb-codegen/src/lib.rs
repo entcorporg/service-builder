@@ -3,6 +3,8 @@
 //! docker-compose for Kafka.
 
 mod expr;
+#[cfg(test)]
+mod journal_tests;
 mod mta;
 pub mod pods;
 mod proto;

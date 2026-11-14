@@ -197,8 +197,9 @@ La CI le fait.
 - Pas d'appel à une API HTTP externe (Stripe, Twilio…) : seuls les webhooks entrants signés sont modélisés
   (`verifyHmac`). Un appel sortant s'écrit dans l'étape *Code Rust*.
 - Le HTML et le texte des mails se saisissent à la main : pas d'éditeur visuel de gabarits.
-- Les tables se conçoivent dans la vue **Tables** et se lisent avec le bloc SQL ; les migrations sont additives (pas de
-  renommage ni de suppression de colonne).
+- Les tables se conçoivent dans la vue **Tables** et se lisent avec le bloc SQL. Les migrations renomment et suppriment
+  (colonnes, tables), convertissent le type et changent le caractère nul d'une colonne, d'après un historique gardé dans
+  le projet ; ce qui est retiré de l'historique avant que toutes les bases l'aient reçu n'est plus rejoué.
 - L'export **écrase** les fichiers générés : la logique sur mesure passe par l'étape *Code Rust*, pas par l'édition
   des fichiers exportés.
 - Renommer un champ met à jour les mappings qui le ciblent, mais pas les expressions qui le *lisent*

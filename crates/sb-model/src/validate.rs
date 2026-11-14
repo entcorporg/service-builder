@@ -1537,7 +1537,166 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The journal of changes of a table: the old names, the dropped columns and the changes of type and nullability.
+    /// The generated migration trusts it, so it must be unambiguous: an old name is never a current one, and a name is
+    /// never both dropped and kept.
+    fn table_journal(&mut self, s: &Service, t: &Table, tp: &str) {
+        let others = || s.tables.iter().filter(|o| o.name != t.name);
+        for (k, old) in t.renamed_from.iter().enumerate() {
+            let at = format!("{tp}/renamedFrom/{k}");
+            let problem = if !is_snake_ident(old) {
+                Some("must be snake_case")
+            } else if *old == t.name || s.tables.iter().any(|o| o.name == *old) {
+                Some("is the name of a table of the service")
+            } else if others().any(|o| o.renamed_from.contains(old)) {
+                Some("is also the previous name of another table")
+            } else if s.dropped_tables.contains(old) {
+                Some("is also listed in droppedTables")
+            } else if t.renamed_from[..k].contains(old) {
+                Some("is listed twice")
+            } else {
+                None
+            };
+            if let Some(problem) = problem {
+                self.error(
+                    "E_RENAMED_FROM",
+                    at,
+                    format!("previous name `{old}` of table `{}` {problem}", t.name),
+                );
+            }
+        }
+        let renamed_cols: Vec<&String> = t.columns.iter().flat_map(|c| &c.renamed_from).collect();
+        for (k, name) in t.dropped_columns.iter().enumerate() {
+            let at = format!("{tp}/droppedColumns/{k}");
+            let problem = if !is_snake_ident(name) {
+                Some("must be snake_case")
+            } else if t.column(name).is_some() {
+                Some("is still a column of the table: remove it from the columns first")
+            } else if renamed_cols.contains(&name) {
+                Some("is also the previous name of a column")
+            } else if t.dropped_columns[..k].contains(name) {
+                Some("is listed twice")
+            } else {
+                None
+            };
+            if let Some(problem) = problem {
+                self.error(
+                    "E_DROPPED_NAME",
+                    at,
+                    format!("dropped column `{name}` of `{}` {problem}", t.name),
+                );
+            }
+        }
+        for (j, c) in t.columns.iter().enumerate() {
+            let cp = format!("{tp}/columns/{j}");
+            for (k, old) in c.renamed_from.iter().enumerate() {
+                let problem = if !is_snake_ident(old) {
+                    Some("must be snake_case")
+                } else if t.column(old).is_some() {
+                    Some("is the name of a column of the table")
+                } else if t
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .any(|(i, o)| i != j && o.renamed_from.contains(old))
+                {
+                    Some("is also the previous name of another column")
+                } else if c.renamed_from[..k].contains(old) {
+                    Some("is listed twice")
+                } else {
+                    None
+                };
+                if let Some(problem) = problem {
+                    self.error(
+                        "E_RENAMED_FROM",
+                        format!("{cp}/renamedFrom/{k}"),
+                        format!("previous name `{old}` of column `{}` {problem}", c.name),
+                    );
+                }
+            }
+            if let Some(from) = c.retyped_from {
+                if !from.converts_to(c.ty) {
+                    self.error(
+                        "E_RETYPE_UNSUPPORTED",
+                        format!("{cp}/retypedFrom"),
+                        format!(
+                            "`{}` cannot be converted from {} to {}: no sound cast exists (convert through text, or add a new column and drop this one)",
+                            c.name,
+                            from.sql(),
+                            c.ty.sql()
+                        ),
+                    );
+                } else if from.conversion_is_lossy(c.ty) {
+                    self.warn(
+                        "W_RETYPE_LOSSY",
+                        format!("{cp}/retypedFrom"),
+                        format!(
+                            "converting `{}` from {} to {} can lose precision or fail on values that do not fit (the start-up then stops, nothing is changed)",
+                            c.name,
+                            from.sql(),
+                            c.ty.sql()
+                        ),
+                    );
+                }
+                // Postgres cannot change the type of one side of a foreign key on its own.
+                let in_fk = t.foreign_keys.iter().any(|f| f.columns.contains(&c.name))
+                    || s.tables.iter().any(|o| {
+                        o.foreign_keys
+                            .iter()
+                            .any(|f| f.ref_table == t.name && f.ref_columns.contains(&c.name))
+                    });
+                if in_fk {
+                    self.error(
+                        "E_RETYPE_FK",
+                        format!("{cp}/retypedFrom"),
+                        format!(
+                            "`{}` is part of a foreign key: its type cannot change alone (both sides would have to change at once)",
+                            c.name
+                        ),
+                    );
+                }
+            }
+            if let Some(was) = c.nullable_from
+                && was
+                && !c.nullable
+                && c.default.as_deref().is_none_or(|d| d.trim().is_empty())
+            {
+                self.warn(
+                    "W_REQUIRED_NO_DEFAULT",
+                    format!("{cp}/nullableFrom"),
+                    format!(
+                        "`{}` becomes required with no default: the start-up stops if a row still holds a null",
+                        c.name
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Names of the tables dropped from a service: not kept, not ambiguous.
+    fn dropped_tables(&mut self, s: &Service, base: &str) {
+        for (k, name) in s.dropped_tables.iter().enumerate() {
+            let problem = if !is_snake_ident(name) {
+                Some("must be snake_case")
+            } else if s.tables.iter().any(|t| t.name == *name) {
+                Some("is still a table of the service: remove it from the tables first")
+            } else if s.dropped_tables[..k].contains(name) {
+                Some("is listed twice")
+            } else {
+                None
+            };
+            if let Some(problem) = problem {
+                self.error(
+                    "E_DROPPED_NAME",
+                    format!("{base}/droppedTables/{k}"),
+                    format!("dropped table `{name}` {problem}"),
+                );
+            }
+        }
+    }
+
     fn tables(&mut self, s: &Service, base: &str) {
+        self.dropped_tables(s, base);
         let mut names = HashSet::new();
         for (i, t) in s.tables.iter().enumerate() {
             let tp = format!("{base}/tables/{i}");
@@ -1566,6 +1725,7 @@ impl<'a> Checker<'a> {
                 );
             }
             self.tenant_and_soft_delete(t, &tp);
+            self.table_journal(s, t, &tp);
             if t.columns.is_empty() {
                 self.error(
                     "E_TABLE_EMPTY",

@@ -269,7 +269,9 @@ pub(crate) fn group_id(service: &Service, consumer: &sb_model::Consumer) -> Stri
 /// Whether the service creates tables at start-up: those of its design, and the one of the events its
 /// idempotent consumers have handled.
 fn has_schema(service: &Service) -> bool {
-    !service.tables.is_empty() || service.has_idempotent_consumers()
+    !service.tables.is_empty()
+        || !service.dropped_tables.is_empty()
+        || service.has_idempotent_consumers()
 }
 
 fn main_rs(service: &Service, has_topics: bool, publishes: bool) -> String {
@@ -530,6 +532,20 @@ fn schema_rs(service: &Service) -> String {
         d
     };
     let mut statements: Vec<String> = Vec::new();
+    // The journal first: a renamed table or column must be found under its new name by what follows, or it would be
+    // created empty next to the old one.
+    for t in &service.tables {
+        for (from, to) in rename_steps(&t.renamed_from, &t.name) {
+            statements.push(rename_table(from, to));
+        }
+    }
+    for t in &service.tables {
+        for c in &t.columns {
+            for (from, to) in rename_steps(&c.renamed_from, &c.name) {
+                statements.push(rename_column(&t.name, from, to));
+            }
+        }
+    }
     for t in &service.tables {
         let mut parts: Vec<String> = t.columns.iter().map(&definition).collect();
         let pk = column_list(&t.primary_key());
@@ -548,6 +564,28 @@ fn schema_rs(service: &Service) -> String {
                 definition(col)
             ));
         }
+    }
+    // Conversions and drops come before the constraints: a dropped column takes the indexes and constraints on it along,
+    // and an index of the same name that the design now defines on other columns must be created afresh, not skipped.
+    for t in &service.tables {
+        for c in &t.columns {
+            if c.retyped_from.is_some_and(|from| from.converts_to(c.ty)) {
+                statements.push(retype_column(&t.name, c));
+            }
+            if c.nullable_from.is_some_and(|was| was != c.nullable) {
+                statements.push(set_nullability(&t.name, c));
+            }
+        }
+        for name in &t.dropped_columns {
+            statements.push(format!(
+                "ALTER TABLE {} DROP COLUMN IF EXISTS {} CASCADE",
+                quoted(&t.name),
+                quoted(name)
+            ));
+        }
+    }
+    for name in &service.dropped_tables {
+        statements.push(format!("DROP TABLE IF EXISTS {} CASCADE", quoted(name)));
     }
     for t in &service.tables {
         for u in &t.uniques {
@@ -617,6 +655,91 @@ fn schema_rs(service: &Service) -> String {
     c.line("eda_runtime::db::apply_schema(db, STATEMENTS).await");
     c.close();
     c.finish()
+}
+
+/// The renames to replay, oldest first: the names a thing had, then the one it has: `[a, b]` and `c` give a -> b, b -> c.
+/// Each step only runs where its old name exists and its new one does not, so any earlier state reaches the current one.
+fn rename_steps<'a>(history: &'a [String], current: &'a str) -> Vec<(&'a str, &'a str)> {
+    let names: Vec<&str> = history
+        .iter()
+        .map(String::as_str)
+        .chain([current])
+        .collect();
+    names.windows(2).map(|w| (w[0], w[1])).collect()
+}
+
+fn column_exists(table: &str, column: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = '{table}' AND column_name = '{column}')"
+    )
+}
+
+fn rename_table(from: &str, to: &str) -> String {
+    let exists = |name: &str| {
+        format!(
+            "EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = '{name}')"
+        )
+    };
+    format!(
+        "DO $$ BEGIN IF {} AND NOT {} THEN ALTER TABLE {} RENAME TO {}; END IF; END $$",
+        exists(from),
+        exists(to),
+        quoted(from),
+        quoted(to)
+    )
+}
+
+fn rename_column(table: &str, from: &str, to: &str) -> String {
+    format!(
+        "DO $$ BEGIN IF {} AND NOT {} THEN ALTER TABLE {} RENAME COLUMN {} TO {}; END IF; END $$",
+        column_exists(table, from),
+        column_exists(table, to),
+        quoted(table),
+        quoted(from),
+        quoted(to)
+    )
+}
+
+/// Converts the column when the database does not hold the current type yet. The default goes first and comes back
+/// after: Postgres cannot cast an old default to the new type by itself.
+fn retype_column(table: &str, col: &Column) -> String {
+    let (t, c, ty) = (quoted(table), quoted(&col.name), col.ty.sql());
+    let mut body = format!(
+        "ALTER TABLE {t} ALTER COLUMN {c} DROP DEFAULT; ALTER TABLE {t} ALTER COLUMN {c} TYPE {ty} USING {c}::{ty};"
+    );
+    if let Some(default) = col.default.as_deref().filter(|d| !d.trim().is_empty()) {
+        body.push_str(&format!(
+            " ALTER TABLE {t} ALTER COLUMN {c} SET DEFAULT {};",
+            default.trim()
+        ));
+    }
+    format!(
+        "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = '{t}'::regclass AND attname = '{}' AND NOT attisdropped AND atttypid <> '{ty}'::regtype) THEN {body} END IF; END $$",
+        col.name
+    )
+}
+
+/// Applies a recorded change of nullability when the database is not there yet. Making a column required first gives
+/// its nulls the default, if there is one: with none, a null makes `SET NOT NULL` fail and the start-up stops.
+fn set_nullability(table: &str, col: &Column) -> String {
+    let (t, c) = (quoted(table), quoted(&col.name));
+    let body = if col.nullable {
+        format!("ALTER TABLE {t} ALTER COLUMN {c} DROP NOT NULL;")
+    } else {
+        let mut body = String::new();
+        if let Some(default) = col.default.as_deref().filter(|d| !d.trim().is_empty()) {
+            body.push_str(&format!(
+                "UPDATE {t} SET {c} = {} WHERE {c} IS NULL; ",
+                default.trim()
+            ));
+        }
+        body.push_str(&format!("ALTER TABLE {t} ALTER COLUMN {c} SET NOT NULL;"));
+        body
+    };
+    format!(
+        "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = '{t}'::regclass AND attname = '{}' AND NOT attisdropped AND attnotnull = {}) THEN {body} END IF; END $$",
+        col.name, col.nullable
+    )
 }
 
 fn column_list(columns: &[impl AsRef<str>]) -> String {
