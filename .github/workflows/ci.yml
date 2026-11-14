@@ -111,7 +111,8 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
       # What the generated code does without any infrastructure: the JSON forms of bytes and timestamps, the checks of the
       # required fields, the response headers of the runtime.
-      - run: cargo test -p contracts -p orders && cargo test -p eda-runtime --lib http::
+      # Quoted: a line that ends with a colon would be read as a key.
+      - run: "cargo test -p contracts -p orders && cargo test -p eda-runtime --lib http::"
         working-directory: ${{ runner.temp }}/generated
         env:
           CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
