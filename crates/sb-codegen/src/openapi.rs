@@ -210,6 +210,21 @@ fn step_statuses(route: &Route) -> Vec<(u16, String, bool)> {
                 Step::PasskeyRegisterStart { .. } | Step::PasskeyRegisterFinish { .. } => {
                     Some((400, "The passkey is refused".into(), false))
                 }
+                // An outbound call that fails ends the route with its own status; one that goes on answers nothing.
+                Step::HttpCall {
+                    on_error: sb_model::HttpOnError::Fail,
+                    error_status,
+                    error_message,
+                    ..
+                } => Some(if *error_status >= 500 {
+                    (
+                        *error_status,
+                        "The call to another service failed".into(),
+                        false,
+                    )
+                } else {
+                    (*error_status, error_message.clone(), false)
+                }),
                 Step::Sql {
                     op: sb_model::SqlOp::Select,
                     many: false,
@@ -501,6 +516,37 @@ mod tests {
             doc["paths"]["/orders/{order_id}"]["get"]["responses"]["404"]["description"],
             "No row matches"
         );
+    }
+
+    #[test]
+    fn the_routes_of_sql_logic_and_http_calls_are_described() {
+        let doc = orders_doc();
+        // An outbound call that fails ends the route with its own status.
+        let intent = &doc["paths"]["/payments/intents"]["post"]["responses"];
+        assert!(intent["502"].is_object(), "{intent}");
+        // A paged read: its inputs are query parameters, its answer a list with the page cursor.
+        let posts = &doc["paths"]["/tenant/posts"]["get"];
+        let names: Vec<&str> = posts["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap())
+            .collect();
+        for wanted in ["search", "page_size", "after_title", "after_id"] {
+            assert!(names.contains(&wanted), "{wanted} in {names:?}");
+        }
+        let page = &doc["components"]["schemas"]["PostsPage"]["properties"];
+        assert_eq!(page["items"]["type"], "array");
+        assert_eq!(page["total"]["type"], "integer");
+        // A route that loops over a list: the list is an array of the line schema.
+        let lines = &doc["paths"]["/orders/{order_id}/lines"]["post"];
+        let body = &lines["requestBody"]["content"]["application/json"]["schema"];
+        assert_eq!(body["properties"]["lines"]["type"], "array");
+        // `fail` inside the loop is a status of the route.
+        assert!(lines["responses"]["400"].is_object());
+        // `lenient` fields are left out of `required`.
+        let required = body["required"].as_array().cloned().unwrap_or_default();
+        assert!(!required.contains(&json!("lines")));
     }
 
     #[test]
