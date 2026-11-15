@@ -1098,6 +1098,25 @@ pub enum Step {
     /// Routes only, in a service that serves a challenge.
     #[serde(rename_all = "camelCase")]
     VerifyChallenge { id: String, payload: Expr },
+    /// The next number of a sequence **without gaps**, for what the law asks to be numbered one after the other (invoices, credit
+    /// notes): 1, 2, 3... In the table `number_sequences` of the service's database, in the transaction of the handler: the row of
+    /// the sequence is locked until the transaction ends, so two runs cannot get the same number, and a run that fails gives its
+    /// number back (the next one gets it), which a database sequence (`SERIAL`) never does. The price: runs that number the same
+    /// sequence and scope wait for one another, so number at the **end** of the run, right before the write. `scope` makes one
+    /// sequence per value (a company, a year: `2026`): each counts from `start`. `bind` receives the number (an `int64`).
+    #[serde(rename_all = "camelCase")]
+    NextNumber {
+        id: String,
+        /// The sequence: `invoices`, `credit_notes`.
+        sequence: String,
+        /// What the numbering is kept apart by (a text: the company, the year); left out, one for the whole service.
+        #[serde(default)]
+        scope: Option<Expr>,
+        /// The first number of a sequence (1 by default).
+        #[serde(default = "default_sequence_start")]
+        start: i64,
+        bind: String,
+    },
     /// Records a use of a meter for a tenant: `amount` units of `key` (API calls, seats, megabytes) in the table
     /// `usage_events` of the service's database, in the transaction of the handler, so that the use and what it pays for commit
     /// together. A negative amount gives units back (a seat released). With `idempotency_key`, a second use with the same text
@@ -2018,6 +2037,7 @@ impl Step {
             | Step::Sql { id, .. }
             | Step::Fail { id, .. }
             | Step::RateLimit { id, .. }
+            | Step::NextNumber { id, .. }
             | Step::Meter { id, .. }
             | Step::CheckQuota { id, .. }
             | Step::VerifyChallenge { id, .. }
@@ -2118,6 +2138,13 @@ impl Default for CircuitConfig {
             open_secs: DEFAULT_CIRCUIT_OPEN_SECS,
         }
     }
+}
+
+/// The first number of a sequence.
+pub const DEFAULT_SEQUENCE_START: i64 = 1;
+
+fn default_sequence_start() -> i64 {
+    DEFAULT_SEQUENCE_START
 }
 
 /// The score under which `passwordStrength` refuses a password: "safely unguessable".
@@ -2266,6 +2293,18 @@ pub enum Func {
     Default,
     /// A new random UUID (v4), as a uuid.
     NewUuid,
+    /// A new UUID version 7, as a uuid: the first 48 bits are the time in milliseconds, so the identifiers **sort in the order
+    /// they were made**. A primary key that is a v7 fills the index of its table from its end, not at random places: inserts stay
+    /// fast on a large table, and a listing by identifier is a listing by date.
+    NewUuidV7,
+    /// `shortId(number)`: a whole number (an int64, zero or more) as a short text of letters and digits (`UkLWZg`, at least six
+    /// characters), for an address a person reads or pastes: `/invoices/UkLWZg`. Sqids: the same number is always the same text,
+    /// and `fromShortId` gives the number back. **It hides the order of the numbers from the eye, not from a person who wants to
+    /// find it**: it is not a secret and protects nothing, access still has to be checked.
+    ShortId,
+    /// `fromShortId(text)`: the number a text made by `shortId` stands for, absent when the text is not one (anything else, even
+    /// something that looks like one, is absent: only the exact text `shortId` makes is read).
+    FromShortId,
     /// Number of elements of a list (int64).
     ListLength,
 }
@@ -2599,6 +2638,22 @@ impl Service {
             });
         }
         used
+    }
+
+    /// Whether a step of the service takes a number from a sequence: its database then holds `number_sequences`.
+    pub fn uses_sequences(&self) -> bool {
+        let mut used = false;
+        for step in self.handler_steps() {
+            step.walk(&mut |s| used |= matches!(s, Step::NextNumber { .. }));
+        }
+        used
+    }
+
+    /// Whether an expression of the service makes or reads a short identifier: the runtime then brings Sqids in (`short-id`).
+    pub fn uses_short_ids(&self) -> bool {
+        serde_json::to_string(self).is_ok_and(|json| {
+            json.contains("\"func\":\"shortId\"") || json.contains("\"func\":\"fromShortId\"")
+        })
     }
 
     /// Whether an expression of the service cleans an HTML text: the runtime then brings the sanitizer in (`html`). Looked for in

@@ -139,8 +139,8 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
           DRAGONFLY_URL: redis://localhost:6379
       # The meters and quotas against a real PostgreSQL: the periods, the view, the idempotency keys and the lock that keeps two
-      # requests from taking the last unit. The proof-of-work challenges: a solution is worth one form, for every replica. The API keys: only the hash is stored, one 401 whatever is wrong.
-      - run: "cargo test -p eda-runtime --lib -- --include-ignored usage:: challenge:: api_key::"
+      # requests from taking the last unit. The proof-of-work challenges: a solution is worth one form, for every replica. The API keys: only the hash is stored, one 401 whatever is wrong. The numbers without a gap: a failed run gives its number back.
+      - run: "cargo test -p eda-runtime --lib -- --include-ignored usage:: challenge:: api_key:: sequence::"
         working-directory: ${{ runner.temp }}/generated
         env:
           CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
@@ -151,6 +151,11 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
       # The circuit breaker and the bulkhead of the outbound calls (and the client itself), against a fake API on a local port.
+      - run: "cargo test -p eda-runtime --features short-id --lib -- short_id:: logic::"
+        working-directory: ${{ runner.temp }}/generated
+        env:
+          CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
+      # The short identifiers (Sqids) and the UUIDs that sort by time.
       - run: "cargo test -p eda-runtime --features html --lib html::"
         working-directory: ${{ runner.temp }}/generated
         env:

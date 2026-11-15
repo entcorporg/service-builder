@@ -51,7 +51,7 @@ vérité : le canvas, l'inspecteur et le code généré en sont des vues.
   Un producteur sans étape *Publier* donne un avertissement. Les projets enregistrés avant (`schemaVersion` 1) sont
   migrés à l'ouverture : tout service qui publiait sur un topic en devient producteur.
 - **Services** : des RPC (gRPC), des routes HTTP, des consumers (Kafka) et des tâches planifiées. Chacun contient une **liste d'étapes**.
-- **Étapes** : `log`, `let`, `publish`, `publishLive`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `rateLimit`, `checkQuota`, `verifyChallenge`, `passwordStrength`, `apiKeyVerify`, `apiKeyRevoke` et `verifyHmac` (routes HTTP), `meter`, `apiKeyCreate`, `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
+- **Étapes** : `log`, `let`, `publish`, `publishLive`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `rateLimit`, `checkQuota`, `verifyChallenge`, `passwordStrength`, `apiKeyVerify`, `apiKeyRevoke` et `verifyHmac` (routes HTTP), `meter`, `nextNumber`, `apiKeyCreate`, `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
   Une liste d'étapes est un arbre (pas un graphe arbitraire) : cela se génère en Rust structuré et s'édite comme
   une pile de blocs, comme dans un page builder.
 
@@ -400,6 +400,28 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
   lettres, chiffres et `_`. Absent d'un projet sans topic. Le YAML est écrit par un petit émetteur (chaque texte entre guillemets,
   chaque clé ambiguë aussi : `y`, `no`, `true`…) ; la CI le valide avec le parseur officiel (`@asyncapi/parser`). Limite : le
   document décrit les champs, pas l'encodage protobuf (numéros de champs) : le `.proto` de `contracts/` fait foi.
+- **Identifiants** : trois outils, aucun ne change une table à votre place.
+  - `newUuidV7()` (opération d'expression, sans argument, un `uuid`) : un UUID **version 7**, dont les 48 premiers bits sont le temps en
+    millisecondes : les identifiants se **trient dans l'ordre où ils ont été faits**. Une clé primaire en v7 remplit l'index de sa
+    table par la fin et non au hasard (les insertions restent rapides sur une grande table) et un tri par identifiant est un tri
+    par date. `newUuid()` (v4, au hasard) reste.
+  - `shortId(nombre)` et `fromShortId(texte)` : un entier (`int64`, 0 ou plus) en **texte court** (`UkLWZg`, six caractères ou plus,
+    lettres et chiffres) pour une adresse qu'on lit ou qu'on colle (`/factures/UkLWZg`), avec [Sqids](https://sqids.org) (MIT) ; le
+    même nombre donne toujours le même texte. `fromShortId` rend `optionnel` : seul **le texte exact** que fait `shortId` est lu (Sqids
+    lit beaucoup de textes comme des nombres : deux adresses ne doivent pas nommer la même chose). **Ce n'est pas un secret** :
+    Sqids cache l'ordre à l'œil, pas à qui veut le retrouver ; le droit de lire ce qu'un identifiant nomme se vérifie comme pour
+    n'importe quel autre, et ce qui ne doit pas se deviner (un jeton) n'est pas un nombre. Seul le service qui les emploie compile
+    Sqids (feature `short-id`).
+  - `nextNumber { sequence, scope?, start, bind }` : le numéro suivant d'une suite **sans trou**, pour ce que la loi veut numéroté
+    un par un (factures, avoirs). Une séquence de base de données (`SERIAL`) ne le fait jamais : elle ne rend pas le numéro d'une
+    transaction qui échoue, donc un flux raté laisse un trou. Ici la suite est une ligne de `number_sequences` (créée avec le
+    schéma, nom réservé : `E_TABLE_RESERVED`), prise et augmentée d'un en une instruction **dans la transaction du handler** : la
+    ligne est verrouillée jusqu'à sa fin, donc deux flux n'ont jamais le même numéro, et un flux qui échoue **rend** son numéro
+    (le suivant le reçoit). `scope` (un texte : la société, l'année) fait une suite par valeur, chacune à partir de `start` (1 par
+    défaut, 0 ou plus : `E_SEQUENCE_START`) ; `sequence` : minuscules, chiffres, `_.-` (`E_SEQUENCE_NAME`). `bind` reçoit un `int64`.
+    **Le prix** : les flux qui numérotent la même suite et le même `scope` s'attendent l'un l'autre ; il faut donc numéroter **le
+    plus tard possible**, juste avant ce qu'on écrit avec, et garder court ce qui suit. Limites : pas de numéro formaté (le préfixe, l'année,
+    le remplissage de zéros se font avec une expression), pas de choix du type d'identifiant dans l'éditeur de table.
 - **Règles de champ** : un champ texte (`string`, `uuid`) d'un schéma API peut porter des règles (`rules`), vérifiées par le
   handler généré **avant toute étape**, dans l'ordre des champs ; la première qui échoue répond `400 { "error": "champ : … " }`.
   - `length` (`min`, `max`) : entre `min` et `max` **caractères** (pas octets), texte rogné avant d'être compté ; la borne

@@ -29,6 +29,11 @@ pub fn new_uuid() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// A UUID version 7: the time in milliseconds first, then random bits, so the identifiers sort in the order they were made.
+pub fn new_uuid_v7() -> String {
+    uuid::Uuid::now_v7().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,5 +63,21 @@ mod tests {
         let (a, b) = (new_uuid(), new_uuid());
         assert_ne!(a, b);
         assert_eq!(a.len(), 36);
+    }
+
+    #[test]
+    fn version_7_uuids_are_well_formed_and_sort_by_the_time_they_were_made() {
+        let first = new_uuid_v7();
+        assert_eq!(first.len(), 36);
+        assert_eq!(&first[14..15], "7", "the version is in the third group");
+        // A later millisecond is a greater identifier, as text and as a UUID.
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        let later = new_uuid_v7();
+        assert!(first < later, "{first} {later}");
+        let mut many: Vec<String> = (0..50).map(|_| new_uuid_v7()).collect();
+        let unique: std::collections::HashSet<_> = many.iter().collect();
+        assert_eq!(unique.len(), 50);
+        many.sort();
+        assert!(later < many[0]);
     }
 }

@@ -302,6 +302,12 @@ fn call_code(
             )
         }
         NewUuid => "eda_runtime::logic::new_uuid()".to_string(),
+        NewUuidV7 => "eda_runtime::logic::new_uuid_v7()".to_string(),
+        ShortId => format!(
+            "eda_runtime::short_id::encode({})?",
+            arg(0, &TypeRef::scalar(FieldType::Int64))?
+        ),
+        FromShortId => format!("eda_runtime::short_id::decode(&({}))", arg(0, &text)?),
         ListLength => {
             let from = typed(project, scope, &args[0])?;
             format!("({}).len() as i64", arg(0, &from)?)

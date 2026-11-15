@@ -184,6 +184,8 @@ mod tests {
                 "runtime/src/rate_limit.rs",
                 "runtime/src/resilience.rs",
                 "runtime/src/s3.rs",
+                "runtime/src/sequence.rs",
+                "runtime/src/short_id.rs",
                 "runtime/src/totp.rs",
                 "runtime/src/usage.rs",
                 "runtime/src/validation.rs",
@@ -1556,6 +1558,47 @@ mod tests {
             "{consumers}"
         );
         assert!(!file(&plain, "services/orders/src/flows/api.rs").contains("resilience: "));
+    }
+
+    #[test]
+    fn numbers_without_a_gap_ids_that_sort_and_short_ids_are_written_where_they_are_asked() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_invoices(&mut p);
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs").replace('\n', " ");
+        let api = api.split_whitespace().collect::<Vec<_>>().join(" ");
+        for expected in [
+            "let invoice_id: String = eda_runtime::logic::new_uuid_v7();",
+            "let number: i64 = eda_runtime::sequence::next(&mut tx, \"invoices\", &(format!(\"{}-2026\", claims.tid.clone())), 1_i64).await?;",
+            "let reference: String = eda_runtime::short_id::encode(number.clone())?;",
+        ] {
+            assert!(api.contains(expected), "{expected}\n{api}");
+        }
+        // The number is taken after the identifier and before the reference that is made of it.
+        let at = |needle: &str| api.find(needle).unwrap();
+        assert!(
+            at("new_uuid_v7") < at("sequence::next")
+                && at("sequence::next") < at("short_id::encode")
+        );
+        // The table is created with the schema, Sqids only built by the service that asks.
+        assert!(
+            file(&files, "services/orders/src/app/schema.rs")
+                .contains("eda_runtime::sequence::CREATE_TABLE,")
+        );
+        assert!(file(&files, "services/orders/Cargo.toml").contains("\"short-id\""));
+        assert!(file(&files, "runtime/Cargo.toml").contains("short-id = [\"dep:sqids\"]"));
+        assert!(
+            file(&files, "runtime/src/lib.rs")
+                .contains("#[cfg(feature = \"short-id\")]\npub mod short_id;")
+        );
+        assert!(
+            file(&files, "Cargo.toml").contains("sqids = \"0.4\"")
+                && file(&files, "Cargo.toml").contains("\"v7\"")
+        );
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/Cargo.toml").contains("short-id"));
+        assert!(!file(&plain, "services/orders/src/app/schema.rs").contains("sequence"));
     }
 
     #[test]

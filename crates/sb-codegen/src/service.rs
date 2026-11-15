@@ -209,6 +209,9 @@ fn cargo_toml(service: &Service) -> String {
     if service.uses_html_sanitizer() {
         features.push("\"html\"");
     }
+    if service.uses_short_ids() {
+        features.push("\"short-id\"");
+    }
     let passkeys = if features.is_empty() {
         String::new()
     } else {
@@ -695,6 +698,10 @@ fn schema_rs(service: &Service) -> String {
         c.line("eda_runtime::webauthn::ADD_STATES_ORIGIN,");
         c.line("eda_runtime::webauthn::CREATE_CREDENTIALS_TABLE,");
         c.line("eda_runtime::webauthn::CREATE_CREDENTIALS_INDEX,");
+    }
+    if service.uses_sequences() {
+        // The numbers given without gaps: the last one of each sequence.
+        c.line("eda_runtime::sequence::CREATE_TABLE,");
     }
     if service.uses_api_keys() {
         // The keys issued to the clients that are machines: only the hash of each secret.
@@ -2534,6 +2541,22 @@ fn steps(
                     "eda_runtime::api_key::revoke(&mut tx, &({key_id}), {owner}).await?;"
                 ));
             }
+            Step::NextNumber {
+                sequence,
+                scope: kept_apart,
+                start,
+                bind,
+                ..
+            } => {
+                let kept_apart = match kept_apart {
+                    Some(by) => lower(project, scope, by, &TypeRef::scalar(FieldType::String))?,
+                    None => "String::new()".to_string(),
+                };
+                c.line(format!(
+                    "let {bind}: i64 = eda_runtime::sequence::next(&mut tx, {sequence:?}, &({kept_apart}), {start}_i64).await?;"
+                ));
+                scope.bind(bind.clone(), TypeRef::scalar(FieldType::Int64));
+            }
             Step::PasswordStrength {
                 password,
                 min_score,
@@ -3668,6 +3691,7 @@ fn describe(step: &Step) -> String {
         ),
         Step::VerifyChallenge { .. } => "verify the challenge".into(),
         Step::PasswordStrength { .. } => "judge the password".into(),
+        Step::NextNumber { sequence, bind, .. } => format!("next number of {sequence} into {bind}"),
         Step::ApiKeyCreate { bind, .. } => format!("issue an API key into {bind}"),
         Step::ApiKeyVerify { bind, .. } => format!("check the API key, its owner into {bind}"),
         Step::ApiKeyRevoke { .. } => "revoke an API key".into(),

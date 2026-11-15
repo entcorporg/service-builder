@@ -116,6 +116,11 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                     expr(owner, &format!("{path}/owner"), out);
                 }
             }
+            Step::NextNumber { scope, .. } => {
+                if let Some(by) = scope {
+                    expr(by, &format!("{path}/scope"), out);
+                }
+            }
             Step::PasswordStrength {
                 password, inputs, ..
             } => {

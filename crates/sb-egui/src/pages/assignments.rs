@@ -339,6 +339,9 @@ fn func_label(f: Func) -> &'static str {
         Func::ParseDouble => "Lire un décimal dans un texte",
         Func::Default => "Valeur par défaut si absente",
         Func::NewUuid => "Nouvel identifiant (UUID)",
+        Func::NewUuidV7 => "Nouvel identifiant triable (UUID v7)",
+        Func::ShortId => "Nombre en identifiant court (UkLWZg)",
+        Func::FromShortId => "Identifiant court en nombre",
         Func::ListLength => "Nombre d’éléments d’une liste",
     }
 }
@@ -381,7 +384,12 @@ fn arg_spec(f: Func, i: usize) -> (String, Option<Field>) {
             ["Valeur (peut être absente)", "Sinon"][i.min(1)].into(),
             None,
         ),
-        Func::NewUuid => (String::new(), None),
+        Func::NewUuid | Func::NewUuidV7 => (String::new(), None),
+        Func::ShortId => (
+            "Nombre (entier 64 bits, 0 ou plus)".into(),
+            Some(Field::new("", FieldType::Int64)),
+        ),
+        Func::FromShortId => ("Identifiant court".into(), text()),
         Func::ListLength => (
             "Liste".into(),
             list(FieldType::Message { name: "*".into() }),

@@ -58,6 +58,7 @@ pub fn path(name: &str) -> &'static str {
         "decrypt" => "M7 11V8a5 5 0 019.6-2M5 11h14v10H5zM12 14v4",
         "verifyHmac" => "M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6zM9 11h6M12 11v5",
         "rateLimit" => "M12 22a10 10 0 100-20 10 10 0 000 20zM12 6v6l4 2",
+        "nextNumber" => "M5 8h14M5 16h14M9 4L7 20M17 4l-2 16",
         "meter" => "M4 20V10M10 20V4M16 20v-7M22 20H2",
         "verifyChallenge" => "M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6zM9 12l2 2 4-4",
         "checkQuota" => "M12 22a10 10 0 100-20 10 10 0 000 20zM12 7v5M12 16h.01",

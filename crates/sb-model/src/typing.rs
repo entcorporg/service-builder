@@ -312,7 +312,7 @@ pub fn parse_template(template: &str) -> Result<Vec<TemplatePart>, String> {
 
 impl Func {
     /// Every operation, in the order the editors list them.
-    pub const ALL: [Func; 31] = [
+    pub const ALL: [Func; 34] = [
         Func::Concat,
         Func::Lower,
         Func::Upper,
@@ -343,6 +343,9 @@ impl Func {
         Func::ParseDouble,
         Func::Default,
         Func::NewUuid,
+        Func::NewUuidV7,
+        Func::ShortId,
+        Func::FromShortId,
         Func::ListLength,
     ];
 
@@ -362,10 +365,11 @@ impl Func {
     pub fn arity(self) -> (usize, Option<usize>) {
         use Func::*;
         match self {
-            NewUuid => (0, Some(0)),
+            NewUuid | NewUuidV7 => (0, Some(0)),
             Concat => (1, None),
             Lower | Upper | Trim | SanitizeHtml | Length | Round | Floor | Ceil | ToInt32
-            | ToInt64 | ToDouble | ToText | ParseInt64 | ParseDouble | ListLength => (1, Some(1)),
+            | ToInt64 | ToDouble | ToText | ParseInt64 | ParseDouble | ShortId | FromShortId
+            | ListLength => (1, Some(1)),
             Replace => (3, Some(3)),
             _ => (2, Some(2)),
         }
@@ -549,7 +553,19 @@ fn call_type(
             check(1, &plain)?;
             Ok(Some(plain))
         }
-        NewUuid => result(FieldType::Uuid),
+        NewUuid | NewUuidV7 => result(FieldType::Uuid),
+        ShortId => {
+            check(0, &TypeRef::scalar(FieldType::Int64))?;
+            result(FieldType::String)
+        }
+        FromShortId => {
+            check(0, &text)?;
+            Ok(Some(TypeRef {
+                optional: true,
+                ty: FieldType::Int64,
+                repeated: false,
+            }))
+        }
         ListLength => {
             if let Some(t) = expr_type(project, scope, &args[0], None)?
                 && !t.repeated

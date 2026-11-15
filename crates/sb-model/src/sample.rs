@@ -952,6 +952,7 @@ pub fn showcase() -> Project {
     add_notes(&mut p);
     add_usage(&mut p);
     add_api_keys(&mut p);
+    add_invoices(&mut p);
     add_sql_reads(&mut p);
     add_mailer(&mut p);
     add_mail_design(&mut p);
@@ -1929,6 +1930,83 @@ pub fn add_api_keys(p: &mut Project) {
             Step::Respond {
                 id: "k8".into(),
                 fields: vec![set("owner", path("owner"))],
+                status: None,
+                cookies: vec![],
+                headers: vec![],
+            },
+        ],
+    });
+}
+
+/// An invoice route: the number is taken **last**, right before it is written with, from a sequence of the company and the year
+/// (`2026`), so the numbers of a year follow one another without a hole even when a run fails; the reference a person reads out
+/// is the short text of the number, and the identifier is a UUID that sorts by date. Needs [`add_jwt`], whose `AccessClaims` and
+/// signing key it uses.
+pub fn add_invoices(p: &mut Project) {
+    let mut token = field("token", FieldType::String);
+    token.lenient = true; // the flow answers 401 itself
+    token.source = Some(RequestSource::Header {
+        name: "Authorization".into(),
+    });
+    p.messages.push(api("InvoiceRequest", vec![token]));
+    p.messages.push(api(
+        "InvoiceIssued",
+        vec![
+            field("number", FieldType::Int64),
+            field("reference", FieldType::String),
+            field("invoice_id", FieldType::Uuid),
+        ],
+    ));
+    p.services[0].routes.push(Route {
+        name: "issue_invoice".into(),
+        method: HttpMethod::Post,
+        path: "/tenant/invoices".into(),
+        request: "InvoiceRequest".into(),
+        response: "InvoiceIssued".into(),
+        status: 201,
+        steps: vec![
+            Step::VerifyJwt {
+                id: "v1".into(),
+                token: path("input.token"),
+                bearer: true,
+                source: JwksSource::Keys {
+                    key_envs: vec!["JWT_SIGNING_KEY".into()],
+                },
+                issuer: "orders".into(),
+                schema: "AccessClaims".into(),
+                bind: "claims".into(),
+            },
+            Step::Let {
+                id: "v2".into(),
+                name: "invoice_id".into(),
+                value_type: FieldType::Uuid,
+                optional: false,
+                repeated: false,
+                value: call(Func::NewUuidV7, vec![]),
+            },
+            // Last before the write: the runs of this company and year wait for one another from here.
+            Step::NextNumber {
+                id: "v3".into(),
+                sequence: "invoices".into(),
+                scope: Some(template("{claims.tid}-2026")),
+                start: DEFAULT_SEQUENCE_START,
+                bind: "number".into(),
+            },
+            Step::Let {
+                id: "v4".into(),
+                name: "reference".into(),
+                value_type: FieldType::String,
+                optional: false,
+                repeated: false,
+                value: call(Func::ShortId, vec![path("number")]),
+            },
+            Step::Respond {
+                id: "v5".into(),
+                fields: vec![
+                    set("number", path("number")),
+                    set("reference", path("reference")),
+                    set("invoice_id", path("invoice_id")),
+                ],
                 status: None,
                 cookies: vec![],
                 headers: vec![],

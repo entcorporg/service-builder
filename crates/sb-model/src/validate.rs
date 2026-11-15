@@ -87,6 +87,9 @@ pub const USAGE_TABLES: [&str; 2] = ["usage_events", "usage_daily"];
 /// What the API key steps keep in the database of the service: the keys.
 pub const API_KEYS_TABLE: &str = "api_keys";
 
+/// What `nextNumber` keeps in the database of the service: the last number of each sequence.
+pub const SEQUENCES_TABLE: &str = "number_sequences";
+
 /// What `verifyChallenge` keeps in the database of the service: the solutions already accepted.
 pub const CHALLENGE_TABLE: &str = "challenge_uses";
 
@@ -1781,12 +1784,13 @@ impl<'a> Checker<'a> {
             if (s.uses_usage() && USAGE_TABLES.contains(&t.name.as_str()))
                 || (s.uses_challenge_check() && t.name == CHALLENGE_TABLE)
                 || (s.uses_api_keys() && t.name == API_KEYS_TABLE)
+                || (s.uses_sequences() && t.name == SEQUENCES_TABLE)
             {
                 self.error(
                     "E_TABLE_RESERVED",
                     format!("{tp}/name"),
                     format!(
-                        "`{}` is kept by the meter, quota, challenge or API key steps of this service, pick another name",
+                        "`{}` is kept by the meter, quota, challenge, API key or numbering steps of this service, pick another name",
                         t.name
                     ),
                 );
@@ -3759,6 +3763,29 @@ impl<'a> Checker<'a> {
                 }
                 false
             }
+            Step::NextNumber {
+                sequence,
+                scope: kept_apart,
+                start,
+                bind,
+                ..
+            } => {
+                self.check_sequence_name(sequence, &format!("{path}/sequence"));
+                if let Some(by) = kept_apart {
+                    let text = TypeRef::scalar(FieldType::String);
+                    self.check_expr(scope, by, Some(&text), &format!("{path}/scope"));
+                }
+                if *start < 0 {
+                    self.error(
+                        "E_SEQUENCE_START",
+                        format!("{path}/start"),
+                        "a sequence starts at 0 or more",
+                    );
+                }
+                self.check_var_name(bind, &format!("{path}/bind"));
+                scope.bind(bind.clone(), TypeRef::scalar(FieldType::Int64));
+                false
+            }
             Step::PasswordStrength {
                 password,
                 min_score,
@@ -4006,6 +4033,21 @@ impl<'a> Checker<'a> {
 
     /// The name of a meter: what the uses are added up under, so it is spelled the same everywhere.
     fn check_meter_name(&mut self, key: &str, path: &str) {
+        self.check_name_of(key, "E_METER_NAME", "a meter", "api_calls`, `seats", path);
+    }
+
+    /// The name of a sequence: spelled the same everywhere it is used.
+    fn check_sequence_name(&mut self, key: &str, path: &str) {
+        self.check_name_of(
+            key,
+            "E_SEQUENCE_NAME",
+            "a sequence",
+            "invoices`, `credit_notes",
+            path,
+        );
+    }
+
+    fn check_name_of(&mut self, key: &str, code: &str, what: &str, examples: &str, path: &str) {
         let ok = !key.is_empty()
             && key.len() <= 64
             && key.starts_with(|c: char| c.is_ascii_lowercase())
@@ -4014,9 +4056,11 @@ impl<'a> Checker<'a> {
             });
         if !ok {
             self.error(
-                "E_METER_NAME",
+                code,
                 path,
-                "a meter is named with lowercase letters, digits, `_`, `.` and `-`, starting with a letter (64 characters at most): `api_calls`, `seats`",
+                format!(
+                    "{what} is named with lowercase letters, digits, `_`, `.` and `-`, starting with a letter (64 characters at most): `{examples}`"
+                ),
             );
         }
     }
@@ -7063,6 +7107,152 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_sequence_is_numbered_in_a_transaction_and_its_table_is_the_generator_s() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_invoices(&mut p);
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        fn route(p: &Project) -> usize {
+            p.services[0]
+                .routes
+                .iter()
+                .position(|r| r.name == "issue_invoice")
+                .unwrap()
+        }
+        fn next(p: &mut Project) -> &mut Step {
+            let r = route(p);
+            &mut p.services[0].routes[r].steps[2]
+        }
+        // The name is spelled the same everywhere; the first number is zero or more; the scope is text.
+        for bad in ["", "Invoices", "credit notes", "1a", &"x".repeat(65)] {
+            let mut q = p.clone();
+            if let Step::NextNumber { sequence, .. } = next(&mut q) {
+                *sequence = bad.into();
+            }
+            assert!(
+                errors(&q).contains(&"E_SEQUENCE_NAME".to_string()),
+                "{bad:?}: {:?}",
+                errors(&q)
+            );
+        }
+        for good in ["invoices", "credit_notes", "a.b-c"] {
+            let mut q = p.clone();
+            if let Step::NextNumber { sequence, .. } = next(&mut q) {
+                *sequence = good.into();
+            }
+            assert!(errors(&q).is_empty(), "{good:?}: {:?}", errors(&q));
+        }
+        let mut q = p.clone();
+        if let Step::NextNumber { start, .. } = next(&mut q) {
+            *start = -1;
+        }
+        assert!(
+            errors(&q).contains(&"E_SEQUENCE_START".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        let mut q = p.clone();
+        if let Step::NextNumber { scope, .. } = next(&mut q) {
+            *scope = Some(Expr::Literal { value: 5.into() });
+        }
+        assert!(
+            errors(&q).contains(&"E_TYPE_MISMATCH".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        // The number is an int64 the steps after it can read, not before.
+        let mut q = p.clone();
+        let r = route(&q);
+        q.services[0].routes[r].steps.swap(2, 3);
+        assert!(
+            errors(&q).contains(&"E_UNKNOWN_PATH".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        // `number_sequences` is the generator's.
+        let mut q = p.clone();
+        let mut table = Table::new(SEQUENCES_TABLE, vec![Column::new("id", ColumnType::String)]);
+        table.columns[0].primary_key = true;
+        q.services[0].tables.push(table);
+        assert!(
+            errors(&q).contains(&"E_TABLE_RESERVED".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+    }
+
+    #[test]
+    fn the_identifier_functions_take_and_give_the_types_they_say() {
+        let mut p = sample::orders();
+        let mut check = |value_type: FieldType, optional: bool, value: Expr, ok: bool| {
+            route_of(&mut p).steps.insert(
+                0,
+                Step::Let {
+                    id: "i".into(),
+                    name: "made".into(),
+                    value_type,
+                    optional,
+                    repeated: false,
+                    value,
+                },
+            );
+            let found = errors(&p);
+            route_of(&mut p).steps.remove(0);
+            assert_eq!(found.is_empty(), ok, "{found:?}");
+        };
+        let int = |n: i64| Expr::Literal { value: n.into() };
+        let text = |t: &str| Expr::Literal { value: t.into() };
+        check(FieldType::Uuid, false, call(Func::NewUuidV7, vec![]), true);
+        check(
+            FieldType::Uuid,
+            false,
+            call(Func::NewUuidV7, vec![int(1)]),
+            false,
+        );
+        check(
+            FieldType::String,
+            false,
+            call(Func::ShortId, vec![int(5)]),
+            true,
+        );
+        check(
+            FieldType::String,
+            false,
+            call(Func::ShortId, vec![text("5")]),
+            false,
+        );
+        check(
+            FieldType::Int64,
+            true,
+            call(Func::FromShortId, vec![text("UkLWZg")]),
+            true,
+        );
+        // A short text may be nothing, so the number is optional; it cannot fill a required one.
+        check(
+            FieldType::Int64,
+            false,
+            call(Func::FromShortId, vec![text("UkLWZg")]),
+            false,
+        );
+        check(
+            FieldType::Int64,
+            true,
+            call(Func::FromShortId, vec![int(1)]),
+            false,
+        );
+        // Their names are the ones the compact syntax and the JSON use.
+        for (func, name) in [
+            (Func::NewUuidV7, "newUuidV7"),
+            (Func::ShortId, "shortId"),
+            (Func::FromShortId, "fromShortId"),
+        ] {
+            assert_eq!(func.name(), name);
+            assert_eq!(Func::from_name(name), Some(func));
+        }
+        assert!(!sample::orders().services[0].uses_short_ids());
     }
 
     #[test]

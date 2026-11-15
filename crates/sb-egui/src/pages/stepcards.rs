@@ -51,6 +51,7 @@ pub fn title(kind: &str) -> &'static str {
         "verifyHmac" => "Vérifier une signature",
         "rateLimit" => "Limiter le débit",
         "meter" => "Compter une consommation",
+        "nextNumber" => "Numéro suivant (sans trou)",
         "checkQuota" => "Vérifier un quota",
         "verifyChallenge" => "Vérifier un défi anti-robots",
         "passwordStrength" => "Juger un mot de passe",
@@ -81,6 +82,7 @@ fn tone(kind: &str) -> (Color32, u8, Color32) {
         "respond" => (0x3ecf8e, 43, 0x3ecf8e),
         "fail" => (0xff6678, 38, 0xff6678),
         "rateLimit" | "meter" | "checkQuota" | "verifyChallenge" => (0xff8c5a, 41, 0xff9c6e),
+        "nextNumber" => (0x3ecf8e, 43, 0x3ecf8e),
         "code" => (0x78dcff, 38, 0x7fdcff),
         "imageSniff" | "objectPut" | "objectGet" | "objectDelete" | "objectPresignGet"
         | "objectPresignPut" => (0x4ecdc4, 38, 0x4ecdc4),
@@ -122,6 +124,7 @@ fn summary(step: &Step, kind: &str) -> String {
             }
         ),
         "meter" => format!("{} × {}", get("amount"), get("key")),
+        "nextNumber" => format!("{} dans {}", get("sequence"), get("bind")),
         "checkQuota" => format!("{} : {} par {}", get("key"), get("limit"), get("period")),
         "rateLimit" => format!(
             "{} par {} s{}",
@@ -184,6 +187,8 @@ fn field_name(key: &str) -> String {
         "period" => "Période (UTC)",
         "wanted" => "Quantité demandée (1 par défaut)",
         "minScore" => "Score minimum (0 à 4)",
+        "sequence" => "Suite de numéros (ex. invoices)",
+        "start" => "Premier numéro",
         "circuit" => "Disjoncteur (échecs, fenêtre en s, ouverture en s)",
         "maxConcurrent" => "Appels simultanés au plus (cloison)",
         "owner" => "Propriétaire (société, compte)",
@@ -551,7 +556,7 @@ fn form(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, index: usize) {
 }
 
 /// The blocks that can be added, in the order of the web version.
-const ORDER: [&str; 44] = [
+const ORDER: [&str; 45] = [
     "publish",
     "publishLive",
     "sql",
@@ -566,6 +571,7 @@ const ORDER: [&str; 44] = [
     "rateLimit",
     "checkQuota",
     "meter",
+    "nextNumber",
     "verifyChallenge",
     "verifyHmac",
     "signJwt",
@@ -665,6 +671,9 @@ fn hint(kind: &str) -> &'static str {
         }
         "verifyChallenge" => {
             "Preuve de travail (ALTCHA) : refuse en 400 sans solution valide. Première étape d’un formulaire public ; le service doit servir un défi"
+        }
+        "nextNumber" => {
+            "Numéros qui se suivent sans trou (factures) : repris si le flux échoue. À placer juste avant l’écriture : les flux de la même suite s’attendent"
         }
         "meter" => {
             "Ajoute une consommation (appels, sièges, Mo) pour un locataire, dans la transaction. Une clé d’idempotence évite le double compte"
