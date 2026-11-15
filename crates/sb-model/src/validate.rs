@@ -81,6 +81,9 @@ struct Env<'a> {
     handler: Handler<'a>,
 }
 
+/// The most attempts a `rateLimit` counted in the shared store can allow: the store keeps one entry per attempt of the window.
+pub const SHARED_RATE_LIMIT_MAX: u32 = 10_000;
+
 fn kind_label(kind: MessageKind) -> &'static str {
     match kind {
         MessageKind::Event => "an event schema",
@@ -3593,6 +3596,7 @@ impl<'a> Checker<'a> {
                 key,
                 max,
                 window_secs,
+                shared,
                 ..
             } => {
                 if !matches!(env.handler, Handler::Route { .. }) {
@@ -3607,6 +3611,15 @@ impl<'a> Checker<'a> {
                         "E_RATE_LIMIT_MAX",
                         format!("{path}/max"),
                         "at least one attempt must be allowed",
+                    );
+                }
+                if *shared && *max > SHARED_RATE_LIMIT_MAX {
+                    self.error(
+                        "E_RATE_LIMIT_SHARED_MAX",
+                        format!("{path}/max"),
+                        format!(
+                            "a limit counted in the shared store keeps one entry per attempt of the window: {SHARED_RATE_LIMIT_MAX} attempts at most"
+                        ),
                     );
                 }
                 if !(1..=86_400).contains(window_secs) {
@@ -5989,6 +6002,34 @@ mod tests {
     }
 
     #[test]
+    fn a_shared_rate_limit_keeps_to_what_the_store_can_count() {
+        let mut p = sample::orders();
+        let limit = |max: u32, shared: bool| Step::RateLimit {
+            id: "rl".into(),
+            key: Expr::Literal { value: "k".into() },
+            max,
+            window_secs: 60,
+            shared,
+        };
+        let mut check = |step: Step, code: Option<&str>| {
+            route_of(&mut p).steps.insert(0, step);
+            let found = errors(&p);
+            route_of(&mut p).steps.remove(0);
+            match code {
+                None => assert!(found.is_empty(), "{found:?}"),
+                Some(c) => assert!(found.contains(&c.to_string()), "{c}: {found:?}"),
+            }
+        };
+        check(limit(SHARED_RATE_LIMIT_MAX, true), None);
+        check(
+            limit(SHARED_RATE_LIMIT_MAX + 1, true),
+            Some("E_RATE_LIMIT_SHARED_MAX"),
+        );
+        // In memory the entries are cheap: no such ceiling.
+        check(limit(SHARED_RATE_LIMIT_MAX + 1, false), None);
+    }
+
+    #[test]
     fn a_rate_limit_is_checked() {
         let mut p = sample::orders();
         let limit = |max: u32, window_secs: u32, key: Expr| Step::RateLimit {
@@ -5996,6 +6037,7 @@ mod tests {
             key,
             max,
             window_secs,
+            shared: false,
         };
         let lit = |v: &str| Expr::Literal { value: v.into() };
         let mut check = |step: Step, code: Option<&str>| {
@@ -6247,6 +6289,7 @@ mod tests {
                 key: Expr::Literal { value: "k".into() },
                 max: 1,
                 window_secs: 60,
+                shared: false,
             },
         ] {
             p.services[0].jobs[0].steps.push(step);

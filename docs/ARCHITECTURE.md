@@ -253,8 +253,18 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
 - **Limiter le débit** : l'étape `rateLimit` compte chaque essai sous une **clé** (un texte : l'e-mail, une adresse, ou un
   littéral pour tout le monde) et, au-delà de `max` essais dans les `windowSecs` dernières secondes (1 à 86 400), répond
   `429` avec `Retry-After` (secondes à attendre). Fenêtre glissante, une par étape et par clé ; un essai refusé n'est pas
-  compté. Le compte vit **en mémoire de chaque instance** : avec plusieurs réplicas la limite réelle est multipliée d'autant
-  (un magasin partagé, Valkey par exemple, est un prochain pas). Les clés inactives sont oubliées toutes les minutes.
+  compté. Par défaut le compte vit **en mémoire de chaque instance** : avec plusieurs réplicas la limite réelle est multipliée
+  d'autant. Les clés inactives sont oubliées toutes les minutes.
+  Avec l'option **`shared`**, le compte vit dans le magasin clé-valeur du projet (DragonflyDB, Valkey ou Redis 5+ :
+  `DRAGONFLY_URL`, celui de `publishLive`) et la limite est la même quel que soit le nombre de réplicas. C'est la même fenêtre
+  glissante, comptée par un script Lua que le serveur exécute sans interruption (oublier les essais sortis de la fenêtre,
+  refuser sans compter quand `max` y sont, sinon compter celui-ci) ; l'horloge est celle du serveur, donc les réplicas
+  ne peuvent pas être en désaccord. Une entrée par essai de la fenêtre : `max` ne dépasse pas 10 000 (`E_RATE_LIMIT_SHARED_MAX`).
+  Le magasin est un confort, pas une dépendance : s'il est injoignable ou ne répond pas en 250 ms, l'étape compte en mémoire
+  comme sans l'option, l'écrit dans le journal et ne l'interroge plus pendant 5 s ; une requête n'est jamais refusée parce que
+  le magasin est tombé (pendant ce temps, la limite redevient « par instance »). Le service ne démarre pas en production sans
+  `DRAGONFLY_URL`. Le générateur ajoute DragonflyDB à la pile (`docker-compose.yml`, Pods) pour tout projet qui a une étape
+  partagée, même sans service temps réel.
   Routes seulement (`E_RATE_LIMIT_OUTSIDE_ROUTE`), `E_RATE_LIMIT_MAX`, `E_RATE_LIMIT_WINDOW`.
 - **Règles de champ** : un champ texte (`string`, `uuid`) d'un schéma API peut porter des règles (`rules`), vérifiées par le
   handler généré **avant toute étape**, dans l'ordre des champs ; la première qui échoue répond `400 { "error": "champ : … " }`.

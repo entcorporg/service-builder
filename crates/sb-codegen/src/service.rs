@@ -191,6 +191,9 @@ fn cargo_toml(service: &Service) -> String {
     if uses_live(service) {
         features.push("\"live\"");
     }
+    if service.uses_shared_limit() {
+        features.push("\"shared-limit\"");
+    }
     let passkeys = if features.is_empty() {
         String::new()
     } else {
@@ -393,6 +396,10 @@ fn config_rs(project: &Project, service: &Service, publishes: bool) -> String {
     if uses_live(service) {
         c.line("// The events for the browsers go through DragonflyDB: in production the service must know where it is.");
         c.line("eda_runtime::live::check_config()?;");
+    }
+    if service.uses_shared_limit() {
+        c.line("// The rate limits counted for all the replicas go through DragonflyDB: in production the service must know where it is.");
+        c.line("eda_runtime::rate_limit::check_config()?;");
     }
     let buckets = bucket_envs(service);
     if !buckets.is_empty() {
@@ -2344,12 +2351,19 @@ fn steps(
                 key,
                 max,
                 window_secs,
-                ..
+                shared,
             } => {
                 let key = lower(project, scope, key, &TypeRef::scalar(FieldType::String))?;
-                c.line(format!(
-                    "eda_runtime::rate_limit::check({id:?}, &({key}), {max}, {window_secs})?;"
-                ));
+                if *shared {
+                    // Counted in the key-value server, so that every replica sees the same attempts; in memory if it is down.
+                    c.line(format!(
+                        "eda_runtime::rate_limit::check_shared({id:?}, &({key}), {max}, {window_secs}).await?;"
+                    ));
+                } else {
+                    c.line(format!(
+                        "eda_runtime::rate_limit::check({id:?}, &({key}), {max}, {window_secs})?;"
+                    ));
+                }
             }
             Step::Sql { .. } => sql_step(c, project, service, scope, step)?,
             Step::HttpCall { .. } => crate::http_call::http_call_step(c, project, scope, step)?,
@@ -3346,8 +3360,14 @@ fn describe(step: &Step) -> String {
         Step::Fail { status, .. } => format!("fail {status}"),
         Step::VerifyHmac { header, .. } => format!("verify the signature in {header}"),
         Step::RateLimit {
-            max, window_secs, ..
-        } => format!("rate limit {max} per {window_secs}s"),
+            max,
+            window_secs,
+            shared,
+            ..
+        } => format!(
+            "rate limit {max} per {window_secs}s{}",
+            if *shared { " (shared)" } else { "" }
+        ),
         Step::HashPassword { bind, .. } => format!("hash password into {bind}"),
         Step::VerifyPassword { bind, .. } => format!("verify password into {bind}"),
         Step::RandomToken { bind, .. } => format!("random token into {bind}"),

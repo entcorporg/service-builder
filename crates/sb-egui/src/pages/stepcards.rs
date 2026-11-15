@@ -93,7 +93,16 @@ fn summary(step: &Step, kind: &str) -> String {
             .unwrap_or_default()
     };
     match kind {
-        "rateLimit" => format!("{} par {} s", get("max"), get("windowSecs")),
+        "rateLimit" => format!(
+            "{} par {} s{}",
+            get("max"),
+            get("windowSecs"),
+            if get("shared") == "true" {
+                ", partagé entre les instances"
+            } else {
+                ""
+            }
+        ),
         "branch" => {
             let c = get("condition");
             let c = c
@@ -138,6 +147,7 @@ fn field_name(key: &str) -> String {
         "key" => "Clé",
         "max" => "Maximum",
         "windowSecs" => "Fenêtre (s)",
+        "shared" => "Partagé entre les instances (DragonflyDB)",
         "topic" => "Topic",
         "payload" => "Contenu",
         "table" => "Table",
@@ -597,7 +607,9 @@ fn hint(kind: &str) -> &'static str {
         "verifyHmac" => {
             "Webhook signé (HMAC-SHA256 du corps brut), sans session : toujours la première étape"
         }
-        "rateLimit" => "Au-delà de N essais par fenêtre : 429 et Retry-After",
+        "rateLimit" => {
+            "Au-delà de N essais par fenêtre : 429 et Retry-After. Option : compte partagé entre les réplicas"
+        }
         "hashPassword" => "argon2id, hors du runtime async : le texte à stocker",
         "verifyPassword" => "Vrai ou faux ; un compte inconnu coûte le même temps",
         "randomToken" => "256 bits en hexadécimal : session, e-mail, réinitialisation",

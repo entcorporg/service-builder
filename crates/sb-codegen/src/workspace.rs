@@ -332,11 +332,7 @@ fn docker_compose(project: &Project) -> String {
     }
     // A real-time service reads the channel its events come on, and the traces of the sessions, from DragonflyDB (any server
     // that speaks the Redis protocol would do: Valkey, Redis).
-    if project
-        .services
-        .iter()
-        .any(|s| s.kind == sb_model::ServiceKind::Realtime)
-    {
+    if project.uses_store() {
         compose = compose.replacen(
             "\nvolumes:\n",
             "\n\x20 dragonfly:\n\
@@ -386,7 +382,7 @@ fn readme(project: &Project) -> String {
          a flow picks the status with `return Err(eda_runtime::http::HttpError::not_found(\"...\").into());`, any other error is a 500 \
          whose details only go to the logs. Browsers may call the API from the origins of `CORS_ORIGINS` (`*` by default, set it in production).\n\
          - Environment: `KAFKA_BROKERS`, `<SERVICE>_PORT` (gRPC), `<SERVICE>_HTTP_PORT`, `CORS_ORIGINS`, `<SERVICE>_URL` (address used to call \
-         another service), `<SERVICE>_DATABASE_URL`, `OUTBOX_MAX_ATTEMPTS`, and `DRAGONFLY_URL` for a service that pushes events to the browsers \
+         another service), `<SERVICE>_DATABASE_URL`, `OUTBOX_MAX_ATTEMPTS`, and `DRAGONFLY_URL` for a service that pushes events to the browsers or counts a shared rate limit \
          (a `publishLive` step: sent right after the commit, best effort).\n\
          - Everything here is regenerated on export: edit the project in Service Builder, not these files.\n",
     );

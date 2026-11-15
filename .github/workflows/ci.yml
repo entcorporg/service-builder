@@ -90,6 +90,13 @@ jobs:
   generated-workspace:
     # The code we generate must compile, not just look right.
     runs-on: ubuntu-24.04
+    services:
+      # For the rate limit counted in a shared store (`rateLimit` with `shared`).
+      dragonfly:
+        image: docker.dragonflydb.io/dragonflydb/dragonfly
+        ports:
+          - 6379:6379
+        options: --ulimit memlock=-1
     steps:
       - uses: actions/checkout@v4
         with:
@@ -116,6 +123,12 @@ jobs:
         working-directory: ${{ runner.temp }}/generated
         env:
           CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
+      # The shared rate limit: its own tests, then against the DragonflyDB above (the attempts must be counted in the server).
+      - run: "cargo test -p eda-runtime --features shared-limit --lib rate_limit && cargo test -p eda-runtime --features shared-limit --lib rate_limit -- --ignored"
+        working-directory: ${{ runner.temp }}/generated
+        env:
+          CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
+          DRAGONFLY_URL: redis://localhost:6379
       # The OpenAPI document of each service, against the OpenAPI 3.1 specification.
       - name: Validate the OpenAPI documents
         run: |

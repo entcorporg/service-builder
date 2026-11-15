@@ -1003,13 +1003,18 @@ pub enum Step {
         headers: Vec<ResponseHeader>,
     },
     /// Counts this attempt under `key` and, past `max` attempts in the last `window_secs`, ends the route
-    /// with a 429 and a `Retry-After`. A sliding window per key, kept in the memory of the process.
+    /// with a 429 and a `Retry-After`. A sliding window per key, kept in the memory of the process, or, with
+    /// `shared`, in the key-value server of the project, so that the limit is the same whatever the number of replicas.
     #[serde(rename_all = "camelCase")]
     RateLimit {
         id: String,
         key: Expr,
         max: u32,
         window_secs: u32,
+        /// Count in DragonflyDB (or Valkey, Redis: `DRAGONFLY_URL`) instead of in the memory of each instance. When the server
+        /// cannot be reached the step counts in memory, as it would without this option: it never refuses a request for that.
+        #[serde(default)]
+        shared: bool,
     },
     /// A query on a table of the service's database, in the transaction of the handler. A
     /// `Select` binds `bind`, typed after the ticked columns: that is what the next steps read.
@@ -2065,6 +2070,14 @@ impl Project {
         }
     }
 
+    /// Whether the stack holds a key-value server (DragonflyDB): there is a real-time service, or a service counts its rate
+    /// limits in it.
+    pub fn uses_store(&self) -> bool {
+        self.services
+            .iter()
+            .any(|s| s.kind == ServiceKind::Realtime || s.uses_shared_limit())
+    }
+
     /// Whether the stack of the Pods page holds Garage: it is asked for, and a service has an object step.
     pub fn uses_garage(&self) -> bool {
         self.pods.garage && self.services.iter().any(|s| !s.bucket_envs().is_empty())
@@ -2285,6 +2298,15 @@ impl Service {
             .chain(self.routes.iter().flat_map(|r| &r.steps))
             .chain(self.consumers.iter().flat_map(|c| &c.steps))
             .chain(self.jobs.iter().flat_map(|j| &j.steps))
+    }
+
+    /// Whether a `rateLimit` of the service counts in the key-value server (`shared`): it then needs `DRAGONFLY_URL`.
+    pub fn uses_shared_limit(&self) -> bool {
+        let mut used = false;
+        for step in self.handler_steps() {
+            step.walk(&mut |s| used |= matches!(s, Step::RateLimit { shared: true, .. }));
+        }
+        used
     }
 
     /// The environment variables that name the buckets the object steps of the service use, once each.

@@ -282,6 +282,7 @@ pub fn orders() -> Project {
                         key: lit("place_order"),
                         max: 100,
                         window_secs: 60,
+                        shared: false,
                     },
                     Step::Branch {
                         id: "h0".into(),
@@ -955,11 +956,13 @@ pub fn add_login(p: &mut Project) {
         response: "LoginAck".into(),
         status: 200,
         steps: vec![
+            // The attempts are counted for all the replicas: a guesser must not get five tries per instance.
             Step::RateLimit {
                 id: "g1".into(),
                 key: path("input.email"),
                 max: 5,
                 window_secs: 900,
+                shared: true,
             },
             // None for an unknown account: the check below then runs against a dummy hash.
             Step::Let {
@@ -1323,6 +1326,7 @@ pub fn add_totp(p: &mut Project) {
                 key: path("input.account"),
                 max: 5,
                 window_secs: 900,
+                shared: false,
             },
             // An account that never enrolled gets the answer of a wrong code.
             sql("f6", SqlOp::Select, &["secret_sealed"], vec![], refused()),
@@ -1347,6 +1351,7 @@ pub fn add_totp(p: &mut Project) {
                 key: path("input.account"),
                 max: 5,
                 window_secs: 900,
+                shared: false,
             },
             Step::RecoveryCodeUse {
                 id: "f10".into(),
@@ -1486,6 +1491,7 @@ pub fn add_passkeys(p: &mut Project) {
                 key: path("input.account"),
                 max: 10,
                 window_secs: 900,
+                shared: false,
             },
             Step::PasskeyLoginStart {
                 id: "p8".into(),
@@ -1541,6 +1547,7 @@ pub fn add_passkeys(p: &mut Project) {
                 key: path("input.client"),
                 max: 30,
                 window_secs: 900,
+                shared: false,
             },
             Step::PasskeyLoginStart {
                 id: "p14".into(),

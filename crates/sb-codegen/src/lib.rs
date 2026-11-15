@@ -1225,6 +1225,49 @@ mod tests {
     }
 
     #[test]
+    fn a_shared_rate_limit_counts_in_the_store_and_only_its_service_brings_the_client_in() {
+        let mut p = sample::orders();
+        let mut found = 0;
+        for step in &mut p.services[0].routes[0].steps {
+            if let sb_model::Step::RateLimit { shared, .. } = step {
+                *shared = true;
+                found += 1;
+            }
+        }
+        assert_eq!(found, 1, "the sample has one rate limit on its first route");
+        let files = generate(&p).unwrap();
+        let flat = file(&files, "services/orders/src/flows/api.rs");
+        assert!(
+            flat.contains(
+                "eda_runtime::rate_limit::check_shared(\"h8\", &(\"place_order\".to_string()), 100, 60).await?;"
+            ),
+            "{flat}"
+        );
+        assert!(!flat.contains("rate_limit::check(\"h8\""), "{flat}");
+        assert!(
+            file(&files, "services/orders/Cargo.toml").contains("features = [\"shared-limit\"]")
+        );
+        assert!(
+            file(&files, "services/orders/src/app/config.rs")
+                .contains("eda_runtime::rate_limit::check_config()?;")
+        );
+        assert!(file(&files, "runtime/Cargo.toml").contains("shared-limit = [\"dep:redis\"]"));
+        // The store is in the stack even though the project has no real-time service, and the service waits for it.
+        let compose = file(&files, "docker-compose.yml");
+        assert!(
+            compose.contains("dragonfly:") && compose.contains("6379:6379"),
+            "{compose}"
+        );
+        // Without the option: none of it.
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/Cargo.toml").contains("shared-limit"));
+        assert!(
+            !file(&plain, "services/orders/src/app/config.rs").contains("rate_limit::check_config")
+        );
+        assert!(!file(&plain, "docker-compose.yml").contains("dragonfly"));
+    }
+
+    #[test]
     fn objects_are_stored_in_a_bucket_of_the_environment_and_images_get_room_in_the_body() {
         let mut p = sample::orders();
         sample::add_jwt(&mut p);
