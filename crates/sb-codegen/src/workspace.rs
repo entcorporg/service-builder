@@ -25,6 +25,7 @@ const RUNTIME_WEBAUTHN: &str = include_str!("../templates/runtime/webauthn.rs");
 const RUNTIME_WEBHOOK: &str = include_str!("../templates/runtime/webhook.rs");
 const RUNTIME_CHALLENGE: &str = include_str!("../templates/runtime/challenge.rs");
 const RUNTIME_API_KEY: &str = include_str!("../templates/runtime/api_key.rs");
+const RUNTIME_HTML: &str = include_str!("../templates/runtime/html.rs");
 const RUNTIME_PASSWORD: &str = include_str!("../templates/runtime/password.rs");
 const RUNTIME_USAGE: &str = include_str!("../templates/runtime/usage.rs");
 const RUNTIME_RATE_LIMIT: &str = include_str!("../templates/runtime/rate_limit.rs");
@@ -62,6 +63,7 @@ pub fn files(project: &Project) -> Vec<GeneratedFile> {
         GeneratedFile::new("runtime/src/usage.rs", RUNTIME_USAGE),
         GeneratedFile::new("runtime/src/password.rs", RUNTIME_PASSWORD),
         GeneratedFile::new("runtime/src/api_key.rs", RUNTIME_API_KEY),
+        GeneratedFile::new("runtime/src/html.rs", RUNTIME_HTML),
         GeneratedFile::new("runtime/src/challenge.rs", RUNTIME_CHALLENGE),
         GeneratedFile::new("runtime/src/validation.rs", RUNTIME_VALIDATION),
         GeneratedFile::new("runtime/src/webauthn.rs", RUNTIME_WEBAUTHN),
@@ -169,6 +171,7 @@ hex = "0.4"
 hmac = "0.13"
 sha1 = "0.11"
 zxcvbn = "3"
+ammonia = "4"
 aws-config = "1"
 aws-sdk-s3 = "1"
 async-trait = "0.1"

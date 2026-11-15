@@ -206,6 +206,9 @@ fn cargo_toml(service: &Service) -> String {
     if service.uses_password_strength() {
         features.push("\"password-strength\"");
     }
+    if service.uses_html_sanitizer() {
+        features.push("\"html\"");
+    }
     let passkeys = if features.is_empty() {
         String::new()
     } else {

@@ -355,6 +355,16 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
   restent sur la réponse compressée. Seul le service qui la demande compile les codecs (`compression-full`, dont zstd, qui
   compile du C). Sans effet, avec un avertissement (`W_COMPRESSION_UNUSED`), pour un service sans route ou prêt à l'emploi (mail,
   temps réel). Le flux du service temps réel n'est jamais compressé.
+- **Nettoyage de HTML** : l'opération d'expression `sanitizeHtml(texte)` rend le HTML saisi par un utilisateur sûr à stocker et à
+  réafficher (ou à mettre dans un mail), avec [Ammonia](https://github.com/rust-ammonia/ammonia) (MIT ou Apache-2.0) et ses
+  règles par défaut : une **liste blanche**, pas une liste de ce qui est interdit, donc une balise inconnue disparaît. Les
+  scripts, styles, cadres, formulaires, objets et `svg` sont retirés, ainsi que tout attribut qui exécute du code (`onclick`,
+  `onerror`…) ou qui n'est pas sur la liste ; les liens et les images ne gardent qu'une adresse `http`, `https`, `mailto`… (jamais
+  `javascript:` ni `data:`) ; chaque lien reçoit `rel="noopener noreferrer"` et perd son `target`. Reste la mise en forme d'un
+  éditeur de texte : paragraphes, emphases, listes, titres, citations, code, tableaux, liens, images. Idempotent (nettoyer du
+  HTML propre ne change rien). Un texte en entrée, un texte en sortie (`int64` ou nombre refusé : `E_TYPE_MISMATCH`). **Il rend le
+  HTML sûr comme contenu d'un élément** : placé dans un attribut, un script ou un style d'une autre page, il ne l'est pas. Seul
+  le service qui l'utilise compile l'analyseur HTML (feature `html`). Pas de liste blanche réglable pour l'instant.
 - **Règles de champ** : un champ texte (`string`, `uuid`) d'un schéma API peut porter des règles (`rules`), vérifiées par le
   handler généré **avant toute étape**, dans l'ordre des champs ; la première qui échoue répond `400 { "error": "champ : … " }`.
   - `length` (`min`, `max`) : entre `min` et `max` **caractères** (pas octets), texte rogné avant d'être compté ; la borne

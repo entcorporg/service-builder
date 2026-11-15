@@ -192,6 +192,7 @@ fn call_code(
         Lower => format!("({}).to_lowercase()", arg(0, &text)?),
         Upper => format!("({}).to_uppercase()", arg(0, &text)?),
         Trim => format!("({}).trim().to_string()", arg(0, &text)?),
+        SanitizeHtml => format!("eda_runtime::html::sanitize(&({}))", arg(0, &text)?),
         Length => format!("({}).chars().count() as i64", arg(0, &text)?),
         Contains | StartsWith | EndsWith => {
             let method = match func {

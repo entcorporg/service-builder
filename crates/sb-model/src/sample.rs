@@ -2137,6 +2137,7 @@ pub fn add_notes(p: &mut Project) {
             repeated: false,
             value: new_uuid(),
         },
+        // The body is rich text: what is stored (and answered) has lost its scripts and its event attributes.
         sql(
             "n5",
             SqlOp::Insert,
@@ -2144,7 +2145,7 @@ pub fn add_notes(p: &mut Project) {
             vec![],
             vec![
                 set("note_id", path("note_id")),
-                set("body", path("input.body")),
+                set("body", call(Func::SanitizeHtml, vec![path("input.body")])),
             ],
             None,
         ),
@@ -2152,7 +2153,7 @@ pub fn add_notes(p: &mut Project) {
             id: "n6".into(),
             fields: vec![
                 set("note_id", path("note_id")),
-                set("body", path("input.body")),
+                set("body", call(Func::SanitizeHtml, vec![path("input.body")])),
             ],
             status: None,
             cookies: vec![],

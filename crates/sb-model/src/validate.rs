@@ -6837,6 +6837,52 @@ mod tests {
     }
 
     #[test]
+    fn cleaning_html_takes_one_text_and_gives_one() {
+        let clean = |arg: Expr| call(Func::SanitizeHtml, vec![arg]);
+        let mut p = sample::orders();
+        let mut check = |value: Expr, ok: bool| {
+            route_of(&mut p).steps.insert(
+                0,
+                Step::Let {
+                    id: "h".into(),
+                    name: "cleaned".into(),
+                    value_type: FieldType::String,
+                    optional: false,
+                    repeated: false,
+                    value,
+                },
+            );
+            let found = errors(&p);
+            route_of(&mut p).steps.remove(0);
+            assert_eq!(found.is_empty(), ok, "{found:?}");
+        };
+        check(
+            clean(Expr::Literal {
+                value: "<b>x</b>".into(),
+            }),
+            true,
+        );
+        // A number is not text; two texts are one too many; none is one too few.
+        check(clean(Expr::Literal { value: 5.into() }), false);
+        check(call(Func::SanitizeHtml, vec![]), false);
+        check(
+            call(
+                Func::SanitizeHtml,
+                vec![
+                    Expr::Literal { value: "a".into() },
+                    Expr::Literal { value: "b".into() },
+                ],
+            ),
+            false,
+        );
+        // Its name is the one the compact syntax and the JSON use.
+        assert_eq!(Func::SanitizeHtml.name(), "sanitizeHtml");
+        assert_eq!(Func::from_name("sanitizeHtml"), Some(Func::SanitizeHtml));
+        // A project that does not clean HTML says nothing of it.
+        assert!(!sample::orders().services[0].uses_html_sanitizer());
+    }
+
+    #[test]
     fn a_shared_rate_limit_keeps_to_what_the_store_can_count() {
         let mut p = sample::orders();
         let limit = |max: u32, shared: bool| Step::RateLimit {

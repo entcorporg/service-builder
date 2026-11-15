@@ -170,6 +170,7 @@ mod tests {
                 "runtime/src/crypto.rs",
                 "runtime/src/db.rs",
                 "runtime/src/dedup.rs",
+                "runtime/src/html.rs",
                 "runtime/src/http_client.rs",
                 "runtime/src/jobs.rs",
                 "runtime/src/jwt.rs",
@@ -1473,6 +1474,30 @@ mod tests {
     }
 
     #[test]
+    fn an_html_text_is_cleaned_by_the_runtime_and_only_the_service_that_does_it_builds_the_parser()
+    {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_notes(&mut p);
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        assert!(
+            api.contains("eda_runtime::html::sanitize(&(input.body.clone()))"),
+            "{api}"
+        );
+        assert!(file(&files, "services/orders/Cargo.toml").contains("\"html\""));
+        assert!(file(&files, "runtime/Cargo.toml").contains("html = [\"dep:ammonia\"]"));
+        assert!(
+            file(&files, "runtime/src/lib.rs")
+                .contains("#[cfg(feature = \"html\")]\npub mod html;")
+        );
+        assert!(file(&files, "Cargo.toml").contains("ammonia = \"4\""));
+        assert!(!file(&files, "services/payments/Cargo.toml").contains("html"));
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/Cargo.toml").contains("\"html\""));
+    }
+
+    #[test]
     fn objects_are_stored_in_a_bucket_of_the_environment_and_images_get_room_in_the_body() {
         let mut p = sample::orders();
         sample::add_jwt(&mut p);
@@ -1628,7 +1653,7 @@ mod tests {
         // Insert: the tenant is written with the row, from the variable the handler bound. Nothing in the steps says so.
         assert!(
             flat.contains("INSERT INTO \\\"notes\\\" (\\\"note_id\\\", \\\"body\\\", \\\"tenant_id\\\") VALUES ($1, $2, $3)")
-                && flat.contains(".bind(note_id.clone()).bind(input.body.clone()).bind(tenant_id.clone())"),
+                && flat.contains(".bind(note_id.clone()).bind(eda_runtime::html::sanitize(&(input.body.clone()))).bind(tenant_id.clone())"),
             "{flat}"
         );
         // Select: the tenant, and only the rows that were not deleted.

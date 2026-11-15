@@ -313,6 +313,7 @@ fn func_label(f: Func) -> &'static str {
         Func::Lower => "Minuscules",
         Func::Upper => "Majuscules",
         Func::Trim => "Retirer les espaces autour",
+        Func::SanitizeHtml => "Nettoyer un HTML (retirer scripts et attributs dangereux)",
         Func::Length => "Nombre de caractères",
         Func::Contains => "Contient (oui/non)",
         Func::StartsWith => "Commence par (oui/non)",
@@ -355,6 +356,7 @@ fn arg_spec(f: Func, i: usize) -> (String, Option<Field>) {
         Func::Lower
         | Func::Upper
         | Func::Trim
+        | Func::SanitizeHtml
         | Func::Length
         | Func::ParseInt64
         | Func::ParseDouble => ("Texte".into(), text()),

@@ -146,6 +146,11 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
           EDA_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
       # The judgment of a password: the estimator, and the range API for known breaches against a server of the test's own.
+      - run: "cargo test -p eda-runtime --features html --lib html::"
+        working-directory: ${{ runner.temp }}/generated
+        env:
+          CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
+      # The HTML sanitizer: scripts, event attributes and `javascript:` links go, the formatting stays.
       - run: "cargo test -p eda-runtime --features password-strength --lib password::"
         working-directory: ${{ runner.temp }}/generated
         env:

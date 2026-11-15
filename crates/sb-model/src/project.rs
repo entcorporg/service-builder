@@ -2150,6 +2150,11 @@ pub enum Func {
     Upper,
     /// A text without the spaces around it.
     Trim,
+    /// A user's HTML made safe to store and show again (or to put in a mail): the scripts, the styles, the frames, the event
+    /// attributes (`onclick`) and the links that run code (`javascript:`) are removed, what is left is the formatting (`p`, `b`,
+    /// `a`, lists, headings, tables, quotes, images...), and the links get `rel="noopener noreferrer"`. An allow-list (Ammonia),
+    /// not a list of what is forbidden: a tag it does not know is dropped. A text, as text.
+    SanitizeHtml,
     /// Number of characters of a text (int64).
     Length,
     /// Whether a text contains another one (bool).
@@ -2533,6 +2538,12 @@ impl Service {
             });
         }
         used
+    }
+
+    /// Whether an expression of the service cleans an HTML text: the runtime then brings the sanitizer in (`html`). Looked for in
+    /// the project's own JSON, which is where every expression of every step is, nested or not.
+    pub fn uses_html_sanitizer(&self) -> bool {
+        serde_json::to_string(self).is_ok_and(|json| json.contains("\"func\":\"sanitizeHtml\""))
     }
 
     /// Whether a step of the service judges a password: the runtime then brings the estimator in (`password-strength`).

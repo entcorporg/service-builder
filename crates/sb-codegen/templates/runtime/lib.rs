@@ -10,6 +10,8 @@ pub mod dedup;
 #[cfg(feature = "http-client")]
 pub mod http_client;
 pub mod jobs;
+#[cfg(feature = "html")]
+pub mod html;
 pub mod jwt;
 pub mod api_key;
 pub mod challenge;
