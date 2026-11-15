@@ -24,11 +24,11 @@ Dépendance d'un binaire de test généré dans le workspace.
 
 ## Intégration envisagée
 
-Dossier `loadtests/` dans l'export, scénarios déduits des routes et de leurs exemples.
+Dossier `loadtests/` dans l'export, scénarios déduits des routes et de leurs exemples. Variante à proposer en parallèle : générer des scripts k6 (un fichier JavaScript par scénario), pour les équipes qui ont déjà k6.
 
 ## Autres projets regardés
 
-- k6 — écarté comme source : AGPL-3.0.
+- k6 — AGPL-3.0, Go : on ne reprend pas son code, mais les scripts générés sont les nôtres et l'utilisateur lance k6 lui-même ; la licence ne s'applique donc pas à l'export.
 
 ## Vérification
 
