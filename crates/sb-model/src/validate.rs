@@ -3652,6 +3652,38 @@ impl<'a> Checker<'a> {
                 self.check_expr(scope, key, Some(&text), &format!("{path}/key"));
                 false
             }
+            Step::PasswordStrength {
+                password,
+                min_score,
+                inputs,
+                bind,
+                ..
+            } => {
+                if !matches!(env.handler, Handler::Route { .. }) {
+                    self.error(
+                        "E_PASSWORD_OUTSIDE_ROUTE",
+                        path,
+                        "a weak password is answered with a 400: it only makes sense in an HTTP route",
+                    );
+                }
+                if *min_score > 4 {
+                    self.error(
+                        "E_PASSWORD_SCORE",
+                        format!("{path}/minScore"),
+                        "the score goes from 0 to 4",
+                    );
+                }
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, password, Some(&text), &format!("{path}/password"));
+                for (i, input) in inputs.iter().enumerate() {
+                    self.check_expr(scope, input, Some(&text), &format!("{path}/inputs/{i}"));
+                }
+                if let Some(bind) = bind {
+                    self.check_var_name(bind, &format!("{path}/bind"));
+                    scope.bind(bind.clone(), TypeRef::scalar(FieldType::Int32));
+                }
+                false
+            }
             Step::VerifyChallenge { payload, .. } => {
                 if !matches!(env.handler, Handler::Route { .. }) {
                     self.error(
@@ -6432,6 +6464,60 @@ mod tests {
         q.services[1].challenge = Some(ChallengeConfig::default());
         assert!(
             errors(&q).contains(&"E_CHALLENGE_NO_HTTP".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+    }
+
+    #[test]
+    fn a_password_is_judged_in_a_route_on_a_text_with_a_score_from_0_to_4() {
+        let strength = |min_score: u8, password: Expr, bind: Option<&str>| Step::PasswordStrength {
+            id: "ps".into(),
+            password,
+            min_score,
+            inputs: vec![],
+            refuse_breached: false,
+            bind: bind.map(String::from),
+        };
+        let lit = |v: &str| Expr::Literal { value: v.into() };
+        let mut p = sample::orders();
+        let mut check = |step: Step, code: Option<&str>| {
+            route_of(&mut p).steps.insert(0, step);
+            let found = errors(&p);
+            route_of(&mut p).steps.remove(0);
+            match code {
+                None => assert!(found.is_empty(), "{found:?}"),
+                Some(c) => assert!(found.contains(&c.to_string()), "{c}: {found:?}"),
+            }
+        };
+        check(
+            strength(DEFAULT_MIN_PASSWORD_SCORE, lit("x"), Some("score")),
+            None,
+        );
+        check(strength(0, lit("x"), None), None);
+        check(strength(4, lit("x"), None), None);
+        check(strength(5, lit("x"), None), Some("E_PASSWORD_SCORE"));
+        check(
+            strength(3, Expr::Literal { value: 5.into() }, None),
+            Some("E_TYPE_MISMATCH"),
+        );
+        check(
+            strength(3, lit("x"), Some("input")),
+            Some("E_RESERVED_NAME"),
+        );
+        // The inputs are text too.
+        let mut with_input = strength(3, lit("x"), None);
+        if let Step::PasswordStrength { inputs, .. } = &mut with_input {
+            inputs.push(Expr::Literal { value: 1.into() });
+        }
+        check(with_input, Some("E_TYPE_MISMATCH"));
+        // Only a route answers 400 to a visitor.
+        let mut q = sample::orders();
+        q.services[0].jobs[0]
+            .steps
+            .push(strength(3, lit("x"), None));
+        assert!(
+            errors(&q).contains(&"E_PASSWORD_OUTSIDE_ROUTE".to_string()),
             "{:?}",
             errors(&q)
         );

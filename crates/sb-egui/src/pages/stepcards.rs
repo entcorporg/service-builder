@@ -53,6 +53,7 @@ pub fn title(kind: &str) -> &'static str {
         "meter" => "Compter une consommation",
         "checkQuota" => "Vérifier un quota",
         "verifyChallenge" => "Vérifier un défi anti-robots",
+        "passwordStrength" => "Juger un mot de passe",
         "hashPassword" => "Hacher un mot de passe",
         "verifyPassword" => "Vérifier un mot de passe",
         "randomToken" => "Jeton aléatoire",
@@ -97,6 +98,15 @@ fn summary(step: &Step, kind: &str) -> String {
     };
     match kind {
         "verifyChallenge" => "résolu par le navigateur, accepté une fois".into(),
+        "passwordStrength" => format!(
+            "score ≥ {}{}",
+            get("minScore"),
+            if get("refuseBreached") == "true" {
+                ", hors fuites connues"
+            } else {
+                ""
+            }
+        ),
         "meter" => format!("{} × {}", get("amount"), get("key")),
         "checkQuota" => format!("{} : {} par {}", get("key"), get("limit"), get("period")),
         "rateLimit" => format!(
@@ -159,6 +169,9 @@ fn field_name(key: &str) -> String {
         "limit" => "Plafond",
         "period" => "Période (UTC)",
         "wanted" => "Quantité demandée (1 par défaut)",
+        "minScore" => "Score minimum (0 à 4)",
+        "inputs" => "Textes du compte (e-mail, nom)",
+        "refuseBreached" => "Refuser les mots de passe des fuites connues",
         "topic" => "Topic",
         "payload" => "Contenu",
         "table" => "Table",
@@ -516,7 +529,7 @@ fn form(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, index: usize) {
 }
 
 /// The blocks that can be added, in the order of the web version.
-const ORDER: [&str; 40] = [
+const ORDER: [&str; 41] = [
     "publish",
     "publishLive",
     "sql",
@@ -552,6 +565,7 @@ const ORDER: [&str; 40] = [
     "objectDelete",
     "encrypt",
     "decrypt",
+    "passwordStrength",
     "hashPassword",
     "verifyPassword",
     "randomToken",
@@ -633,6 +647,9 @@ fn hint(kind: &str) -> &'static str {
         "checkQuota" => {
             "Au-delà du plafond de la période : 429 et Retry-After. À placer avant le bloc « Compter », dans la même route"
         }
+        "passwordStrength" => {
+            "Refuse en 400 un mot de passe trop facile à deviner (zxcvbn), et, en option, ceux des fuites connues. Avant « Hacher »"
+        }
         "hashPassword" => "argon2id, hors du runtime async : le texte à stocker",
         "verifyPassword" => "Vrai ou faux ; un compte inconnu coûte le même temps",
         "randomToken" => "256 bits en hexadécimal : session, e-mail, réinitialisation",
@@ -661,8 +678,8 @@ fn allowed(app: &App, list: &[Step], loc: &Loc) -> Vec<&'static str> {
         .filter(|t| match *t {
             "publishLive" => has_realtime,
             "respond" => has_response,
-            "fail" | "rateLimit" | "checkQuota" | "verifyChallenge" | "verifyJwt"
-            | "imageSniff" | "totpVerify" | "recoveryCodeUse" => http,
+            "fail" | "rateLimit" | "checkQuota" | "verifyChallenge" | "passwordStrength"
+            | "verifyJwt" | "imageSniff" | "totpVerify" | "recoveryCodeUse" => http,
             t if t.starts_with("passkey") => http,
             "verifyHmac" => allow_signature,
             _ => true,

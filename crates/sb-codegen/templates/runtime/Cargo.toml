@@ -24,6 +24,7 @@ rand.workspace = true
 hex.workspace = true
 hmac.workspace = true
 sha1.workspace = true
+zxcvbn = { workspace = true, optional = true }
 webauthn-rs = { workspace = true, optional = true }
 webauthn-authenticator-rs = { workspace = true, optional = true }
 redis = { workspace = true, optional = true }
@@ -37,6 +38,8 @@ reqwest = { workspace = true, optional = true }
 live = ["dep:redis"]
 # A `rateLimit` that counts in the key-value server (`shared`) brings the Redis client in too.
 shared-limit = ["dep:redis"]
+# Judging a password (`passwordStrength`) brings the estimator and, for the check against known breaches, the HTTP client in.
+password-strength = ["dep:zxcvbn", "dep:reqwest"]
 # Passkeys bring OpenSSL in: only the services that have a passkey step turn this on.
 webauthn = ["dep:webauthn-rs"]
 # The tests of the passkeys, against a software authenticator.

@@ -51,7 +51,7 @@ vérité : le canvas, l'inspecteur et le code généré en sont des vues.
   Un producteur sans étape *Publier* donne un avertissement. Les projets enregistrés avant (`schemaVersion` 1) sont
   migrés à l'ouverture : tout service qui publiait sur un topic en devient producteur.
 - **Services** : des RPC (gRPC), des routes HTTP, des consumers (Kafka) et des tâches planifiées. Chacun contient une **liste d'étapes**.
-- **Étapes** : `log`, `let`, `publish`, `publishLive`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `rateLimit`, `checkQuota`, `verifyChallenge` et `verifyHmac` (routes HTTP), `meter`, `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
+- **Étapes** : `log`, `let`, `publish`, `publishLive`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `rateLimit`, `checkQuota`, `verifyChallenge`, `passwordStrength` et `verifyHmac` (routes HTTP), `meter`, `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
   Une liste d'étapes est un arbre (pas un graphe arbitraire) : cela se génère en Rust structuré et s'édite comme
   une pile de blocs, comme dans un page builder.
 
@@ -315,6 +315,18 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
     accepté. Limites : une preuve de travail ralentit un robot, elle ne l'arrête pas ; elle n'est pas une preuve d'humanité (ni
     reconnaissance de comportement, ni réputation d'adresse) et se règle par `maxNumber` contre le temps passé par un visiteur sur
     un téléphone. Elle s'ajoute à `rateLimit` (par adresse, par compte), elle ne le remplace pas.
+- **Robustesse d'un mot de passe** : l'étape `passwordStrength { password, minScore, inputs, refuseBreached, bind }` juge un
+  mot de passe **avant** `hashPassword`. Elle estime la facilité à le deviner avec [zxcvbn](https://github.com/shssoichiro/zxcvbn-rs)
+  (MIT) : dictionnaires et mots de passe courants, prénoms, suites de touches, dates, répétitions, substitutions « l33t », et les
+  `inputs` du compte (l'e-mail, le nom : chacun compte, ainsi que chacun de ses mots de trois caractères ou plus, car
+  l'estimateur ne reconnaît un texte que comme mot entier). Le score va de 0 à 4 ; en dessous de `minScore` (3 par défaut,
+  `E_PASSWORD_SCORE` au-delà de 4) la route répond `400 { "error": "password: too easy to guess (<raison>)" }`. Seuls les 100
+  premiers caractères sont jugés (l'estimateur est quadratique). L'estimation tourne sur le pool bloquant, comme le hachage.
+  `bind` reçoit le score (`int32`). Avec `refuseBreached`, la présence dans une fuite connue est vérifiée **par plage**
+  (Pwned Passwords) : le SHA-1 est calculé sur place, **seuls cinq caractères** en sortent (`Add-Padding: true`, pas de
+  redirection), la comparaison se fait sur place ; l'adresse est `PWNED_PASSWORDS_URL` (un miroir peut être nommé). Si l'API ne
+  répond pas en 3 s, le mot de passe **passe** (et le journal le dit) : on n'arrête pas les inscriptions parce qu'un autre
+  service est tombé. Routes seulement (`E_PASSWORD_OUTSIDE_ROUTE`). Limite : la vérification de fuite sort du réseau du projet.
 - **Règles de champ** : un champ texte (`string`, `uuid`) d'un schéma API peut porter des règles (`rules`), vérifiées par le
   handler généré **avant toute étape**, dans l'ordre des champs ; la première qui échoue répond `400 { "error": "champ : … " }`.
   - `length` (`min`, `max`) : entre `min` et `max` **caractères** (pas octets), texte rogné avant d'être compté ; la borne

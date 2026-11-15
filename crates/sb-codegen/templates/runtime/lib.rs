@@ -16,6 +16,8 @@ pub mod logic;
 #[cfg(feature = "live")]
 pub mod live;
 pub mod outbox;
+#[cfg(feature = "password-strength")]
+pub mod password;
 pub mod rate_limit;
 #[cfg(feature = "s3")]
 pub mod s3;

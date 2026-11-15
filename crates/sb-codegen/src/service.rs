@@ -194,6 +194,9 @@ fn cargo_toml(service: &Service) -> String {
     if service.uses_shared_limit() {
         features.push("\"shared-limit\"");
     }
+    if service.uses_password_strength() {
+        features.push("\"password-strength\"");
+    }
     let passkeys = if features.is_empty() {
         String::new()
     } else {
@@ -2411,6 +2414,37 @@ fn steps(
                     ));
                 }
             }
+            Step::PasswordStrength {
+                password,
+                min_score,
+                inputs,
+                refuse_breached,
+                bind,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let password = lower(project, scope, password, &text)?;
+                let mut words = vec![];
+                for input in inputs {
+                    words.push(format!(
+                        "({}).as_str()",
+                        lower(project, scope, input, &text)?
+                    ));
+                }
+                let call = format!(
+                    "eda_runtime::password::check(&({password}), &[{}], {min_score}, {refuse_breached}).await?",
+                    words.join(", ")
+                );
+                match bind {
+                    Some(bind) => {
+                        c.line(format!("let {bind}: i32 = i32::from({call});"));
+                        scope.bind(bind.clone(), TypeRef::scalar(FieldType::Int32));
+                    }
+                    None => {
+                        c.line(format!("{call};"));
+                    }
+                }
+            }
             Step::VerifyChallenge { payload, .. } => {
                 let cfg = service.challenge.as_ref().ok_or_else(|| {
                     CodegenError::Internal(
@@ -3489,6 +3523,7 @@ fn describe(step: &Step) -> String {
             if *shared { " (shared)" } else { "" }
         ),
         Step::VerifyChallenge { .. } => "verify the challenge".into(),
+        Step::PasswordStrength { .. } => "judge the password".into(),
         Step::Meter { key, .. } => format!("meter {key}"),
         Step::CheckQuota { key, .. } => format!("check the quota of {key}"),
         Step::HashPassword { bind, .. } => format!("hash password into {bind}"),

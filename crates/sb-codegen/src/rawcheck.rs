@@ -97,6 +97,14 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                 }
             }
             Step::RateLimit { key, .. } => expr(key, &format!("{path}/key"), out),
+            Step::PasswordStrength {
+                password, inputs, ..
+            } => {
+                expr(password, &format!("{path}/password"), out);
+                for (i, input) in inputs.iter().enumerate() {
+                    expr(input, &format!("{path}/inputs/{i}"), out);
+                }
+            }
             Step::VerifyChallenge { payload, .. } => expr(payload, &format!("{path}/payload"), out),
             Step::Meter {
                 tenant,

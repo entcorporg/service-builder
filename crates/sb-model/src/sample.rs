@@ -813,6 +813,15 @@ pub fn add_signup(p: &mut Project) {
         response: "SignupAck".into(),
         status: 201,
         steps: vec![
+            // Before the hash: a password that a dictionary or a breach already knows is not worth hashing.
+            Step::PasswordStrength {
+                id: "s0".into(),
+                password: path("input.password"),
+                min_score: DEFAULT_MIN_PASSWORD_SCORE,
+                inputs: vec![path("input.email")],
+                refuse_breached: true,
+                bind: None,
+            },
             Step::HashPassword {
                 id: "s1".into(),
                 input: path("input.password"),

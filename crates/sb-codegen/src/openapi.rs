@@ -233,6 +233,11 @@ fn step_statuses(route: &Route) -> Vec<(u16, String, bool)> {
                     "The challenge is missing, wrong, expired or already used".into(),
                     false,
                 )),
+                Step::PasswordStrength { .. } => Some((
+                    400,
+                    "The password is too easy to guess, or is in a known breach".into(),
+                    false,
+                )),
                 Step::CheckQuota { .. } => {
                     Some((429, "The quota is used up for the period".into(), true))
                 }

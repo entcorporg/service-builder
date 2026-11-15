@@ -85,6 +85,8 @@ fn bind(project: &Project, scope: &mut BTreeMap<String, Ty>, step: &Step) {
         "verifyPassword" => scalar("bool"),
         // What is left of the quota after this request.
         "checkQuota" => scalar("int64"),
+        // The score of the password, 0 to 4.
+        "passwordStrength" => scalar("int32"),
         "hashPassword" | "randomToken" | "sha256" | "encrypt" | "decrypt" | "signJwt"
         | "passkeyLoginFinish" | "imageSniff" | "objectPresignGet" | "objectPresignPut" => {
             scalar("string")

@@ -1202,6 +1202,27 @@ pub enum Step {
         stored: Expr,
         bind: String,
     },
+    /// Judges a password before it is hashed: how easy it is to guess (zxcvbn: dictionaries, keyboard patterns, dates, repeats,
+    /// l33t, and the `inputs` of this account: the e-mail, the name) and, with `refuseBreached`, whether it is in a known data
+    /// breach (the first five characters of its SHA-1 are sent to the Pwned Passwords range API, never the password). Under
+    /// `minScore` (0 to 4, 3 by default) or breached, the route ends with a 400. `bind` receives the score (an `int32`). Routes only.
+    #[serde(rename_all = "camelCase")]
+    PasswordStrength {
+        id: String,
+        password: Expr,
+        /// The lowest score accepted: 0 too guessable, 1 very guessable, 2 somewhat, 3 safely unguessable, 4 very unguessable.
+        #[serde(default = "default_min_score")]
+        min_score: u8,
+        /// Texts the password must not be made of: the e-mail address, the name of the account.
+        #[serde(default)]
+        inputs: Vec<Expr>,
+        /// Refuse a password found in a known breach. If the range API cannot be reached the password is let through (and the
+        /// log says so): a service must not stop signing people up because another one is down.
+        #[serde(default)]
+        refuse_breached: bool,
+        #[serde(default)]
+        bind: Option<String>,
+    },
     /// 256 random bits as 64 hexadecimal characters: a session, e-mail or reset token.
     #[serde(rename_all = "camelCase")]
     RandomToken { id: String, bind: String },
@@ -1954,6 +1975,7 @@ impl Step {
             | Step::HashPassword { id, .. }
             | Step::VerifyPassword { id, .. }
             | Step::RandomToken { id, .. }
+            | Step::PasswordStrength { id, .. }
             | Step::Sha256 { id, .. }
             | Step::ForEach { id, .. }
             | Step::Code { id, .. } => id,
@@ -1977,6 +1999,13 @@ impl Step {
             }
         }
     }
+}
+
+/// The score under which `passwordStrength` refuses a password: "safely unguessable".
+pub const DEFAULT_MIN_PASSWORD_SCORE: u8 = 3;
+
+fn default_min_score() -> u8 {
+    DEFAULT_MIN_PASSWORD_SCORE
 }
 
 /// What a quota adds the use up over.
@@ -2430,6 +2459,15 @@ impl Service {
             .chain(self.routes.iter().flat_map(|r| &r.steps))
             .chain(self.consumers.iter().flat_map(|c| &c.steps))
             .chain(self.jobs.iter().flat_map(|j| &j.steps))
+    }
+
+    /// Whether a step of the service judges a password: the runtime then brings the estimator in (`password-strength`).
+    pub fn uses_password_strength(&self) -> bool {
+        let mut used = false;
+        for step in self.handler_steps() {
+            step.walk(&mut |s| used |= matches!(s, Step::PasswordStrength { .. }));
+        }
+        used
     }
 
     /// Whether a route of the service checks the solution of a challenge: its database then holds `challenge_uses`.

@@ -176,6 +176,7 @@ mod tests {
                 "runtime/src/live.rs",
                 "runtime/src/logic.rs",
                 "runtime/src/outbox.rs",
+                "runtime/src/password.rs",
                 "runtime/src/rate_limit.rs",
                 "runtime/src/s3.rs",
                 "runtime/src/totp.rs",
@@ -1372,6 +1373,37 @@ mod tests {
         assert!(!file(&plain, "services/orders/src/app/schema.rs").contains("challenge"));
         assert!(!file(&plain, "services/orders/src/app/config.rs").contains("challenge"));
         assert!(!file(&plain, "services/orders/openapi.json").contains("challenge"));
+    }
+
+    #[test]
+    fn a_password_is_judged_before_it_is_hashed_and_only_its_service_brings_the_estimator_in() {
+        let mut p = sample::orders();
+        sample::add_signup(&mut p);
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs").replace('\n', " ");
+        let api = api.split_whitespace().collect::<Vec<_>>().join(" ");
+        let judge = api
+            .find("eda_runtime::password::check(&(input.password.clone()), &[(input.email.clone()).as_str()], 3, true).await?;")
+            .unwrap_or_else(|| panic!("{api}"));
+        let hash = api.find("eda_runtime::crypto::hash_password").unwrap();
+        assert!(judge < hash, "the password is judged before it is hashed");
+        assert!(file(&files, "services/orders/Cargo.toml").contains("\"password-strength\""));
+        assert!(
+            file(&files, "runtime/Cargo.toml")
+                .contains("password-strength = [\"dep:zxcvbn\", \"dep:reqwest\"]")
+        );
+        assert!(
+            file(&files, "runtime/src/lib.rs")
+                .contains("#[cfg(feature = \"password-strength\")]\npub mod password;")
+        );
+        assert!(file(&files, "Cargo.toml").contains("zxcvbn = \"3\""));
+        let openapi = file(&files, "services/orders/openapi.json");
+        assert!(
+            openapi.contains("The password is too easy to guess"),
+            "{openapi}"
+        );
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/Cargo.toml").contains("password-strength"));
     }
 
     #[test]
