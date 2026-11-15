@@ -116,6 +116,14 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                     expr(owner, &format!("{path}/owner"), out);
                 }
             }
+            Step::Flag {
+                subject,
+                properties,
+                ..
+            } => {
+                expr(subject, &format!("{path}/subject"), out);
+                assignments(properties, &format!("{path}/properties"), out);
+            }
             Step::Audit {
                 target,
                 actor,

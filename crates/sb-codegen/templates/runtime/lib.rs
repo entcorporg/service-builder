@@ -12,6 +12,7 @@ pub mod http_client;
 pub mod jobs;
 #[cfg(feature = "html")]
 pub mod html;
+pub mod flags;
 pub mod jwt;
 pub mod api_key;
 pub mod audit;

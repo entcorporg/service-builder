@@ -1098,6 +1098,36 @@ pub enum Step {
     /// Routes only, in a service that serves a challenge.
     #[serde(rename_all = "camelCase")]
     VerifyChallenge { id: String, payload: Expr },
+    /// Asks whether a **feature flag** is on for a subject (an account, a company): the way to ship code dark, turn it on for a few
+    /// and then for all, and turn it off again, **without deploying**. The flag lives in the table `feature_flags` of the service's
+    /// database, which an operator changes with one statement (`UPDATE feature_flags SET rollout_percent = 25 WHERE key = 'x'`); the
+    /// step only says what it starts from when the table has no row for the key yet (`enabled`, `rollout`: the row is then
+    /// written, and never overwritten by a deployment). A flag is **on** for a subject when it is enabled, every one of its
+    /// `rules` matches the `properties` the step gives (`plan` in `pro`, `team`...), and the subject falls in the share of the
+    /// rollout: the subject and the key are hashed to a number from 0 to 99, so **the same subject always gets the same
+    /// answer**, and raising the percentage only adds subjects, it never takes one away. With `variants` in the row (`blue` 50,
+    /// `red` 50) the subjects that are on get one of them, as stably. `bind` receives the answer (a bool), `variantBind` the
+    /// variant (a text; empty when the flag is off or has none).
+    #[serde(rename_all = "camelCase")]
+    Flag {
+        id: String,
+        /// The flag: `new_checkout`, `beta.search`.
+        key: String,
+        /// Who is asked about (a text): what the rollout is stable for.
+        subject: Expr,
+        /// What the rules of the flag can look at: `plan = "pro"`, `country = "FR"`. Plain values, named.
+        #[serde(default)]
+        properties: Vec<Assignment>,
+        /// Whether the flag is on when the table has no row for it yet (it is written then, so it can be changed).
+        #[serde(default)]
+        enabled: bool,
+        /// The share of subjects it is on for when the table has no row yet: 0 to 100.
+        #[serde(default = "default_flag_rollout")]
+        rollout: u8,
+        bind: String,
+        #[serde(default)]
+        variant_bind: Option<String>,
+    },
     /// Writes what happened to the audit journal: who (`actor`) did what (`action`, `invoice.issued`) to what (`targetType` and
     /// `target`), for which company (`tenant`), with the values `before` and `after` the change. A row of the table
     /// `audit_events` of the service's database, written **in the transaction of the handler**: the change and its trace commit
@@ -2090,6 +2120,7 @@ impl Step {
             | Step::Fail { id, .. }
             | Step::RateLimit { id, .. }
             | Step::NextNumber { id, .. }
+            | Step::Flag { id, .. }
             | Step::Audit { id, .. }
             | Step::AuditRead { id, .. }
             | Step::Meter { id, .. }
@@ -2192,6 +2223,13 @@ impl Default for CircuitConfig {
             open_secs: DEFAULT_CIRCUIT_OPEN_SECS,
         }
     }
+}
+
+/// The share of subjects a flag is on for when nothing says otherwise: all of them (when it is enabled).
+pub const DEFAULT_FLAG_ROLLOUT: u8 = 100;
+
+fn default_flag_rollout() -> u8 {
+    DEFAULT_FLAG_ROLLOUT
 }
 
 /// Entries in a page of the audit journal, and the most.
@@ -2719,6 +2757,15 @@ impl Service {
                         | Step::ApiKeyRevoke { .. }
                 )
             });
+        }
+        used
+    }
+
+    /// Whether a step of the service asks about a feature flag: its database then holds `feature_flags`.
+    pub fn uses_flags(&self) -> bool {
+        let mut used = false;
+        for step in self.handler_steps() {
+            step.walk(&mut |s| used |= matches!(s, Step::Flag { .. }));
         }
         used
     }

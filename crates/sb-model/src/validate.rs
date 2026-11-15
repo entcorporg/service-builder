@@ -90,6 +90,9 @@ pub const API_KEYS_TABLE: &str = "api_keys";
 /// What the audit steps keep in the database of the service: the journal.
 pub const AUDIT_TABLE: &str = "audit_events";
 
+/// What the flag steps keep in the database of the service: the flags.
+pub const FLAGS_TABLE: &str = "feature_flags";
+
 /// What `nextNumber` keeps in the database of the service: the last number of each sequence.
 pub const SEQUENCES_TABLE: &str = "number_sequences";
 
@@ -1789,12 +1792,13 @@ impl<'a> Checker<'a> {
                 || (s.uses_api_keys() && t.name == API_KEYS_TABLE)
                 || (s.uses_sequences() && t.name == SEQUENCES_TABLE)
                 || (s.uses_audit() && t.name == AUDIT_TABLE)
+                || (s.uses_flags() && t.name == FLAGS_TABLE)
             {
                 self.error(
                     "E_TABLE_RESERVED",
                     format!("{tp}/name"),
                     format!(
-                        "`{}` is kept by the meter, quota, challenge, API key, numbering or audit steps of this service, pick another name",
+                        "`{}` is kept by the meter, quota, challenge, API key, numbering, audit or flag steps of this service, pick another name",
                         t.name
                     ),
                 );
@@ -3767,6 +3771,52 @@ impl<'a> Checker<'a> {
                 }
                 false
             }
+            Step::Flag {
+                key,
+                subject,
+                properties,
+                rollout,
+                bind,
+                variant_bind,
+                ..
+            } => {
+                self.check_name_of(
+                    key,
+                    "E_FLAG_NAME",
+                    "a flag",
+                    "new_checkout`, `beta.search",
+                    &format!("{path}/key"),
+                );
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, subject, Some(&text), &format!("{path}/subject"));
+                self.plain_values(
+                    scope,
+                    properties,
+                    &format!("{path}/properties"),
+                    "properties",
+                );
+                if *rollout > 100 {
+                    self.error(
+                        "E_FLAG_ROLLOUT",
+                        format!("{path}/rollout"),
+                        "the share of subjects a flag is on for is 0 to 100 (percent)",
+                    );
+                }
+                self.check_var_name(bind, &format!("{path}/bind"));
+                scope.bind(bind.clone(), TypeRef::scalar(FieldType::Bool));
+                if let Some(variant) = variant_bind {
+                    self.check_var_name(variant, &format!("{path}/variantBind"));
+                    if variant == bind {
+                        self.error(
+                            "E_FLAG_BIND",
+                            format!("{path}/variantBind"),
+                            "the answer and the variant are two variables",
+                        );
+                    }
+                    scope.bind(variant.clone(), text);
+                }
+                false
+            }
             Step::Audit {
                 action,
                 target_type,
@@ -3797,43 +3847,8 @@ impl<'a> Checker<'a> {
                 if let Some(tenant) = tenant {
                     self.check_expr(scope, tenant, Some(&text), &format!("{path}/tenant"));
                 }
-                for (list, name) in [(before, "before"), (after, "after")] {
-                    let mut seen = HashSet::new();
-                    for (i, a) in list.iter().enumerate() {
-                        let ap = format!("{path}/{name}/{i}");
-                        if !crate::names::is_snake_ident(&a.field) || a.field.len() > 64 {
-                            self.error(
-                                "E_AUDIT_FIELD",
-                                format!("{ap}/field"),
-                                "a value of the journal is named in snake_case (64 characters at most): `status`, `total_cents`",
-                            );
-                        } else if !seen.insert(a.field.as_str()) {
-                            self.error(
-                                "E_AUDIT_FIELD",
-                                format!("{ap}/field"),
-                                format!("`{}` is given twice in `{name}`", a.field),
-                            );
-                        }
-                        self.check_expr(scope, &a.value, None, &format!("{ap}/value"));
-                        // A plain value, which is written as JSON: not a message, a list, bytes or a timestamp.
-                        if let Ok(Some(ty)) =
-                            crate::typing::expr_type(self.project, scope, &a.value, None)
-                            && (ty.repeated
-                                || matches!(
-                                    ty.ty,
-                                    FieldType::Message { .. }
-                                        | FieldType::Bytes
-                                        | FieldType::Timestamp
-                                ))
-                        {
-                            self.error(
-                                "E_AUDIT_VALUE",
-                                format!("{ap}/value"),
-                                format!("the journal keeps plain values (text, number, yes/no, uuid), and `{}` is a {ty}", a.field),
-                            );
-                        }
-                    }
-                }
+                self.plain_values(scope, before, &format!("{path}/before"), "before");
+                self.plain_values(scope, after, &format!("{path}/after"), "after");
                 false
             }
             Step::AuditRead {
@@ -4271,6 +4286,42 @@ impl<'a> Checker<'a> {
                 path,
                 "starting a passkey step needs the API schema `PasskeyChallenge` (`state_id`, `options`: texts)",
             );
+        }
+    }
+
+    /// Named plain values (the values of an audit entry, the properties of a flag): snake_case names, once each, and values that are
+    /// text, numbers, yes/no or uuids, never a message, a list, bytes or a timestamp.
+    fn plain_values(&mut self, scope: &Scope, list: &[Assignment], path: &str, what: &str) {
+        let mut seen = HashSet::new();
+        for (i, a) in list.iter().enumerate() {
+            let ap = format!("{path}/{i}");
+            if !crate::names::is_snake_ident(&a.field) || a.field.len() > 64 {
+                self.error(
+                    "E_PLAIN_FIELD",
+                    format!("{ap}/field"),
+                    "a value is named in snake_case (64 characters at most): `status`, `total_cents`",
+                );
+            } else if !seen.insert(a.field.as_str()) {
+                self.error(
+                    "E_PLAIN_FIELD",
+                    format!("{ap}/field"),
+                    format!("`{}` is given twice in `{what}`", a.field),
+                );
+            }
+            self.check_expr(scope, &a.value, None, &format!("{ap}/value"));
+            if let Ok(Some(ty)) = crate::typing::expr_type(self.project, scope, &a.value, None)
+                && (ty.repeated
+                    || matches!(
+                        ty.ty,
+                        FieldType::Message { .. } | FieldType::Bytes | FieldType::Timestamp
+                    ))
+            {
+                self.error(
+                    "E_PLAIN_VALUE",
+                    format!("{ap}/value"),
+                    format!("`{what}` keeps plain values (text, number, yes/no, uuid), and `{}` is a {ty}", a.field),
+                );
+            }
         }
     }
 
@@ -7631,7 +7682,7 @@ mod tests {
             });
         }
         assert_eq!(
-            errors(&q).iter().filter(|c| *c == "E_AUDIT_FIELD").count(),
+            errors(&q).iter().filter(|c| *c == "E_PLAIN_FIELD").count(),
             2,
             "{:?}",
             errors(&q)
@@ -7653,7 +7704,7 @@ mod tests {
             });
         }
         assert_eq!(
-            errors(&q).iter().filter(|c| *c == "E_AUDIT_VALUE").count(),
+            errors(&q).iter().filter(|c| *c == "E_PLAIN_VALUE").count(),
             2,
             "{:?}",
             errors(&q)
@@ -7745,6 +7796,126 @@ mod tests {
         assert!(!errors(&q).is_empty());
         let mut q = p.clone();
         let mut table = Table::new(AUDIT_TABLE, vec![Column::new("id", ColumnType::String)]);
+        table.columns[0].primary_key = true;
+        q.services[0].tables.push(table);
+        assert!(
+            errors(&q).contains(&"E_TABLE_RESERVED".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+    }
+
+    #[test]
+    fn a_flag_names_its_subject_its_properties_and_what_it_starts_from() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_flags(&mut p);
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        fn flag(p: &mut Project) -> &mut Step {
+            let r = p.services[0]
+                .routes
+                .iter_mut()
+                .find(|r| r.name == "checkout_flag")
+                .unwrap();
+            &mut r.steps[1]
+        }
+        for bad in ["", "New Checkout", "1a", &"x".repeat(65)] {
+            let mut q = p.clone();
+            if let Step::Flag { key, .. } = flag(&mut q) {
+                *key = bad.into();
+            }
+            assert!(
+                errors(&q).contains(&"E_FLAG_NAME".to_string()),
+                "{bad:?}: {:?}",
+                errors(&q)
+            );
+        }
+        for good in ["new_checkout", "beta.search", "a-b"] {
+            let mut q = p.clone();
+            if let Step::Flag { key, .. } = flag(&mut q) {
+                *key = good.into();
+            }
+            assert!(errors(&q).is_empty(), "{good:?}: {:?}", errors(&q));
+        }
+        let mut q = p.clone();
+        if let Step::Flag { rollout, .. } = flag(&mut q) {
+            *rollout = 101;
+        }
+        assert!(
+            errors(&q).contains(&"E_FLAG_ROLLOUT".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        for edge in [0u8, 100] {
+            let mut q = p.clone();
+            if let Step::Flag { rollout, .. } = flag(&mut q) {
+                *rollout = edge;
+            }
+            assert!(errors(&q).is_empty(), "{edge}: {:?}", errors(&q));
+        }
+        // The subject is text; the properties are named plain values, once each.
+        let mut q = p.clone();
+        if let Step::Flag {
+            subject,
+            properties,
+            ..
+        } = flag(&mut q)
+        {
+            *subject = Expr::Literal { value: 1.into() };
+            properties.push(Assignment {
+                field: "Bad Name".into(),
+                value: Expr::Literal { value: "x".into() },
+            });
+            properties.push(Assignment {
+                field: "tenant".into(),
+                value: Expr::Literal {
+                    value: "again".into(),
+                },
+            });
+            properties.push(Assignment {
+                field: "roles".into(),
+                value: Expr::Path {
+                    path: "claims.roles".into(),
+                },
+            });
+        }
+        let found = errors(&q);
+        assert!(found.contains(&"E_TYPE_MISMATCH".to_string()), "{found:?}");
+        assert_eq!(
+            found.iter().filter(|c| *c == "E_PLAIN_FIELD").count(),
+            2,
+            "{found:?}"
+        );
+        assert_eq!(
+            found.iter().filter(|c| *c == "E_PLAIN_VALUE").count(),
+            1,
+            "{found:?}"
+        );
+        // The answer is a yes/no and the variant a text, two variables that the steps after can read, not before.
+        let mut q = p.clone();
+        if let Step::Flag {
+            variant_bind, bind, ..
+        } = flag(&mut q)
+        {
+            *variant_bind = Some(bind.clone());
+        }
+        assert!(
+            errors(&q).contains(&"E_FLAG_BIND".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        let mut q = p.clone();
+        q.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == "checkout_flag")
+            .unwrap()
+            .steps
+            .swap(1, 2);
+        assert!(!errors(&q).is_empty());
+        // The table of the flags is the generator's.
+        let mut q = p.clone();
+        let mut table = Table::new(FLAGS_TABLE, vec![Column::new("id", ColumnType::String)]);
         table.columns[0].primary_key = true;
         q.services[0].tables.push(table);
         assert!(

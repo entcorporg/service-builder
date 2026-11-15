@@ -702,6 +702,10 @@ fn schema_rs(service: &Service) -> String {
         c.line("eda_runtime::webauthn::CREATE_CREDENTIALS_TABLE,");
         c.line("eda_runtime::webauthn::CREATE_CREDENTIALS_INDEX,");
     }
+    if service.uses_flags() {
+        // The feature flags: one row each, changed by an operator without a deployment.
+        c.line("eda_runtime::flags::CREATE_TABLE,");
+    }
     if service.uses_audit() {
         // The journal: what was done, by whom, to what, and a trigger that keeps it append-only.
         for statement in [
@@ -2556,6 +2560,41 @@ fn steps(
                     "eda_runtime::api_key::revoke(&mut tx, &({key_id}), {owner}).await?;"
                 ));
             }
+            Step::Flag {
+                key,
+                subject,
+                properties,
+                enabled,
+                rollout,
+                bind,
+                variant_bind,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let subject = lower(project, scope, subject, &text)?;
+                let mut props = String::from("eda_runtime::flags::Properties::new()");
+                for a in properties {
+                    let ty = sb_model::typing::expr_type(project, scope, &a.value, None)
+                        .map_err(CodegenError::Internal)?
+                        .ok_or_else(|| {
+                            CodegenError::Internal(format!("`{}` of the flag has no type", a.field))
+                        })?;
+                    props.push_str(&format!(
+                        ".set({:?}, {})",
+                        a.field,
+                        lower(project, scope, &a.value, &ty)?
+                    ));
+                }
+                c.line(format!(
+                    "let __decision = eda_runtime::flags::evaluate(&mut tx, {key:?}, &({subject}), &{props}, eda_runtime::flags::Start {{ enabled: {enabled}, rollout: {rollout} }}).await?;"
+                ));
+                c.line(format!("let {bind}: bool = __decision.on;"));
+                scope.bind(bind.clone(), TypeRef::scalar(FieldType::Bool));
+                if let Some(variant) = variant_bind {
+                    c.line(format!("let {variant}: String = __decision.variant;"));
+                    scope.bind(variant.clone(), text);
+                }
+            }
             Step::Audit {
                 action,
                 target_type,
@@ -3812,6 +3851,7 @@ fn describe(step: &Step) -> String {
         ),
         Step::VerifyChallenge { .. } => "verify the challenge".into(),
         Step::PasswordStrength { .. } => "judge the password".into(),
+        Step::Flag { key, bind, .. } => format!("flag {key} into {bind}"),
         Step::Audit { action, .. } => format!("audit {action}"),
         Step::AuditRead { bind, .. } => format!("read the audit journal into {bind}"),
         Step::NextNumber { sequence, bind, .. } => format!("next number of {sequence} into {bind}"),

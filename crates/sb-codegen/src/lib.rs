@@ -173,6 +173,7 @@ mod tests {
                 "runtime/src/crypto.rs",
                 "runtime/src/db.rs",
                 "runtime/src/dedup.rs",
+                "runtime/src/flags.rs",
                 "runtime/src/html.rs",
                 "runtime/src/http_client.rs",
                 "runtime/src/jobs.rs",
@@ -1672,6 +1673,31 @@ mod tests {
         assert!(file(&files, "runtime/src/lib.rs").contains("pub mod audit;"));
         let plain = generate(&sample::orders()).unwrap();
         assert!(!file(&plain, "services/orders/src/app/schema.rs").contains("audit"));
+    }
+
+    #[test]
+    fn a_flag_is_asked_in_the_transaction_with_what_it_starts_from_and_its_table_is_created() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_flags(&mut p);
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs").replace('\n', " ");
+        let api = api.split_whitespace().collect::<Vec<_>>().join(" ");
+        for expected in [
+            "let __decision = eda_runtime::flags::evaluate(&mut tx, \"new_checkout\", &(claims.sub.clone()), &eda_runtime::flags::Properties::new().set(\"tenant\", claims.tid.clone()), eda_runtime::flags::Start { enabled: true, rollout: 25 }).await?;",
+            "let new_checkout: bool = __decision.on;",
+            "let variant: String = __decision.variant;",
+        ] {
+            assert!(api.contains(expected), "{expected}\n{api}");
+        }
+        assert!(
+            file(&files, "services/orders/src/app/schema.rs")
+                .contains("eda_runtime::flags::CREATE_TABLE,")
+        );
+        assert!(!file(&files, "services/payments/src/app/schema.rs").contains("flags"));
+        assert!(file(&files, "runtime/src/lib.rs").contains("pub mod flags;"));
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/src/app/schema.rs").contains("flags"));
     }
 
     #[test]

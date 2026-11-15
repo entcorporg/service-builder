@@ -51,7 +51,7 @@ vérité : le canvas, l'inspecteur et le code généré en sont des vues.
   Un producteur sans étape *Publier* donne un avertissement. Les projets enregistrés avant (`schemaVersion` 1) sont
   migrés à l'ouverture : tout service qui publiait sur un topic en devient producteur.
 - **Services** : des RPC (gRPC), des routes HTTP, des consumers (Kafka) et des tâches planifiées. Chacun contient une **liste d'étapes**.
-- **Étapes** : `log`, `let`, `publish`, `publishLive`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `rateLimit`, `checkQuota`, `verifyChallenge`, `passwordStrength`, `apiKeyVerify`, `apiKeyRevoke` et `verifyHmac` (routes HTTP), `meter`, `nextNumber`, `audit`, `auditRead`, `apiKeyCreate`, `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
+- **Étapes** : `log`, `let`, `publish`, `publishLive`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `rateLimit`, `checkQuota`, `verifyChallenge`, `passwordStrength`, `apiKeyVerify`, `apiKeyRevoke` et `verifyHmac` (routes HTTP), `meter`, `nextNumber`, `audit`, `auditRead`, `flag`, `apiKeyCreate`, `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
   Une liste d'étapes est un arbre (pas un graphe arbitraire) : cela se génère en Rust structuré et s'édite comme
   une pile de blocs, comme dans un page builder.
 
@@ -449,8 +449,8 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
     tâche) a fait **quoi** (`action` : `invoice.sent`, minuscules, chiffres, `_.-`, `E_AUDIT_ACTION`) à **quoi** (`targetType`,
     `E_AUDIT_TARGET_TYPE`, et `target`, l'identifiant), pour **quelle société** (`tenant`, vide quand l'entrée n'est celle d'aucune),
     **quand** (l'horloge de la base), avec les **valeurs avant et après**, nommées (`status = "draft"`), une fois chacune
-    (`E_AUDIT_FIELD`) et **simples** : texte, nombre, oui/non, uuid ; ni message, ni liste, ni octets, ni `timestamp`
-    (`E_AUDIT_VALUE`). Les noms dont la valeur diffère entre l'avant et l'après sont gardés à part (`changed`) pour qu'un écran
+    (`E_PLAIN_FIELD`) et **simples** : texte, nombre, oui/non, uuid ; ni message, ni liste, ni octets, ni `timestamp`
+    (`E_PLAIN_VALUE`). Les noms dont la valeur diffère entre l'avant et l'après sont gardés à part (`changed`) pour qu'un écran
     montre ce qui a bougé sans comparer. Les valeurs ne dépassent pas 64 Kio de JSON (413 au-delà).
   - **En ajout seul** : un déclencheur refuse la modification et la suppression d'une entrée (`audit_events is append-only`). Il
     protège le journal de l'application, flux compris, **pas du propriétaire de la base**, qui peut désactiver un déclencheur : si
@@ -464,6 +464,23 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
     suivante (un `int64` optionnel, absent à la dernière), à redonner en `cursor`.
   - Limites : pas de route de lecture générée (le flux qui lit pose ses droits : qui voit le journal), pas de rétention ni de purge,
     pas de signature des entrées, pas de diff champ par champ au-delà de la liste `changed`.
+- **Drapeaux de fonctionnalité** : l'étape `flag { key, subject, properties, enabled, rollout, bind, variantBind? }` répond (un booléen
+  dans `bind`, la variante dans `variantBind`) à « ce drapeau est-il allumé pour ce sujet ? » : livrer du code éteint, l'allumer pour
+  quelques-uns puis pour tous, le rééteindre, **sans déployer**. Le drapeau est une ligne de `feature_flags` (créée avec le
+  schéma, nom réservé : `E_TABLE_RESERVED`) qu'un opérateur change **en une instruction SQL** : `UPDATE feature_flags SET
+  rollout_percent = 25 WHERE key = 'new_checkout'`, ou `SET enabled = false` pour l'éteindre. L'étape dit seulement **d'où le drapeau
+  part** quand la table n'a pas encore de ligne pour la clé (`enabled`, éteint par défaut ; `rollout`, 0 à 100, `E_FLAG_ROLLOUT`) : la
+  ligne est alors écrite, et **jamais écrasée par un déploiement**. Un drapeau est **allumé** pour un sujet quand : il est activé ;
+  **toutes** ses `rules` (liste JSON de `{"property": "plan", "in": ["pro", "team"]}`, `{"property": "country", "equals": "FR"}` ou
+  `{"property": "plan", "not_in": ["free"]}`) s'appliquent aux `properties` de l'étape (valeurs simples nommées ; une propriété non
+  donnée ne satisfait aucune règle, une règle illisible n'allume rien) ; et le sujet tombe dans la part du déploiement : la clé et le
+  sujet sont hachés (SHA-256) en un nombre de 0 à 99, allumé s'il est sous `rollout_percent`. **Un même sujet a toujours la même
+  réponse**, **augmenter le pourcentage n'ajoute que des sujets et n'en retire jamais** (personne ne clignote pendant qu'un
+  déploiement s'élargit), et deux drapeaux ne choisissent pas les mêmes sujets (la clé est dans le hachage). Avec `variants` (liste JSON
+  de `{"name": "blue", "weight": 50}`), les sujets allumés reçoivent une variante, par un second hachage, en proportion des poids,
+  aussi de façon stable. La ligne est lue dans la transaction du handler, par sa clé primaire. Nom du drapeau : minuscules,
+  chiffres, `_.-` (`E_FLAG_NAME`). Limites : pas de cache (une lecture indexée par question), pas d'interface pour éditer les drapeaux
+  (SQL), pas de ciblage en pourcentage par propriété, pas d'historique des changements (l'étape `audit` peut le tenir).
 - **Règles de champ** : un champ texte (`string`, `uuid`) d'un schéma API peut porter des règles (`rules`), vérifiées par le
   handler généré **avant toute étape**, dans l'ordre des champs ; la première qui échoue répond `400 { "error": "champ : … " }`.
   - `length` (`min`, `max`) : entre `min` et `max` **caractères** (pas octets), texte rogné avant d'être compté ; la borne

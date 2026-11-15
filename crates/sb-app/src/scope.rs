@@ -80,6 +80,12 @@ fn bind(project: &Project, scope: &mut BTreeMap<String, Ty>, step: &Step) {
         }
         return;
     }
+    // The variant of a flag comes apart from the yes/no that `bind` holds.
+    if kind == "flag"
+        && let Some(var) = text("variantBind")
+    {
+        scope.insert(var.into(), scalar("string"));
+    }
     // An API key's id comes apart from what `bind` holds (the key, or its owner).
     if matches!(kind, "apiKeyCreate" | "apiKeyVerify")
         && let Some(var) = text("keyIdBind")
@@ -100,7 +106,7 @@ fn bind(project: &Project, scope: &mut BTreeMap<String, Ty>, step: &Step) {
     }
     let Some(var) = text("bind") else { return };
     let ty = match kind {
-        "verifyPassword" => scalar("bool"),
+        "verifyPassword" | "flag" => scalar("bool"),
         // What is left of the quota after this request.
         "checkQuota" => scalar("int64"),
         // The number given, one after the other.

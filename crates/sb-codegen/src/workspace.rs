@@ -30,6 +30,7 @@ const RUNTIME_SEQUENCE: &str = include_str!("../templates/runtime/sequence.rs");
 const RUNTIME_SHORT_ID: &str = include_str!("../templates/runtime/short_id.rs");
 const RUNTIME_TIME_ZONE: &str = include_str!("../templates/runtime/time_zone.rs");
 const RUNTIME_AUDIT: &str = include_str!("../templates/runtime/audit.rs");
+const RUNTIME_FLAGS: &str = include_str!("../templates/runtime/flags.rs");
 const RUNTIME_HTML: &str = include_str!("../templates/runtime/html.rs");
 const RUNTIME_PASSWORD: &str = include_str!("../templates/runtime/password.rs");
 const RUNTIME_USAGE: &str = include_str!("../templates/runtime/usage.rs");
@@ -69,6 +70,7 @@ pub fn files(project: &Project) -> Vec<GeneratedFile> {
         GeneratedFile::new("runtime/src/password.rs", RUNTIME_PASSWORD),
         GeneratedFile::new("runtime/src/api_key.rs", RUNTIME_API_KEY),
         GeneratedFile::new("runtime/src/html.rs", RUNTIME_HTML),
+        GeneratedFile::new("runtime/src/flags.rs", RUNTIME_FLAGS),
         GeneratedFile::new("runtime/src/audit.rs", RUNTIME_AUDIT),
         GeneratedFile::new("runtime/src/time_zone.rs", RUNTIME_TIME_ZONE),
         GeneratedFile::new("runtime/src/sequence.rs", RUNTIME_SEQUENCE),

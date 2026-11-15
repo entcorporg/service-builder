@@ -955,6 +955,7 @@ pub fn showcase() -> Project {
     add_invoices(&mut p);
     add_calendar(&mut p);
     add_audit(&mut p);
+    add_flags(&mut p);
     add_sql_reads(&mut p);
     add_mailer(&mut p);
     add_mail_design(&mut p);
@@ -2124,6 +2125,66 @@ pub fn add_audit(p: &mut Project) {
                 fields: vec![
                     set("entries", path("entries")),
                     set("next_cursor", path("next_cursor")),
+                ],
+                status: None,
+                cookies: vec![],
+                headers: vec![],
+            },
+        ],
+    });
+}
+
+/// A feature flag: the new checkout is shipped dark and starts at a quarter of the accounts; an operator widens or narrows it with one
+/// statement on `feature_flags`, with no deployment. The account is the subject (so it always gets the same answer), its company a
+/// property a rule can look at. Needs [`add_jwt`], whose `AccessClaims` and signing key it uses.
+pub fn add_flags(p: &mut Project) {
+    let mut token = field("token", FieldType::String);
+    token.lenient = true; // the flow answers 401 itself
+    token.source = Some(RequestSource::Header {
+        name: "Authorization".into(),
+    });
+    p.messages.push(api("FlagRequest", vec![token]));
+    p.messages.push(api(
+        "FlagAnswer",
+        vec![
+            field("new_checkout", FieldType::Bool),
+            field("variant", FieldType::String),
+        ],
+    ));
+    p.services[0].routes.push(Route {
+        name: "checkout_flag".into(),
+        method: HttpMethod::Get,
+        path: "/checkout/flag".into(),
+        request: "FlagRequest".into(),
+        response: "FlagAnswer".into(),
+        status: 200,
+        steps: vec![
+            Step::VerifyJwt {
+                id: "f1".into(),
+                token: path("input.token"),
+                bearer: true,
+                source: JwksSource::Keys {
+                    key_envs: vec!["JWT_SIGNING_KEY".into()],
+                },
+                issuer: "orders".into(),
+                schema: "AccessClaims".into(),
+                bind: "claims".into(),
+            },
+            Step::Flag {
+                id: "f2".into(),
+                key: "new_checkout".into(),
+                subject: path("claims.sub"),
+                properties: vec![set("tenant", path("claims.tid"))],
+                enabled: true,
+                rollout: 25,
+                bind: "new_checkout".into(),
+                variant_bind: Some("variant".into()),
+            },
+            Step::Respond {
+                id: "f3".into(),
+                fields: vec![
+                    set("new_checkout", path("new_checkout")),
+                    set("variant", path("variant")),
                 ],
                 status: None,
                 cookies: vec![],
