@@ -11,6 +11,7 @@ pub mod dedup;
 pub mod http_client;
 pub mod jobs;
 pub mod jwt;
+pub mod challenge;
 pub mod logic;
 #[cfg(feature = "live")]
 pub mod live;

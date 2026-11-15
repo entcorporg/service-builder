@@ -25,6 +25,9 @@ pub fn openapi(project: &Project, service: &Service) -> Option<Value> {
             .or_insert_with(|| Value::Object(Map::new()));
         item[route.method.as_str().to_lowercase()] = operation;
     }
+    if let Some(challenge) = &service.challenge {
+        paths.insert(challenge.path.clone(), challenge_path());
+    }
     let mut components = Map::new();
     let mut all = schemas.used(project);
     all.insert(
@@ -55,6 +58,37 @@ pub fn openapi(project: &Project, service: &Service) -> Option<Value> {
             json!([{ "url": format!("http://localhost:{port}"), "description": "Local" }]);
     }
     Some(doc)
+}
+
+/// The path that hands out a proof-of-work challenge (`eda_runtime::challenge`): what the ALTCHA widget reads.
+fn challenge_path() -> Value {
+    json!({
+        "get": {
+            "operationId": "challenge",
+            "summary": "A new proof-of-work challenge",
+            "description": "Solved by the visitor's browser (ALTCHA widget) and sent back with the form, where a `verifyChallenge` step checks it. Each challenge is accepted once and expires.",
+            "responses": {
+                "200": {
+                    "description": "A challenge",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "algorithm": { "type": "string", "const": "SHA-256" },
+                                    "challenge": { "type": "string", "description": "SHA-256 of the salt and the secret number, in hexadecimal." },
+                                    "maxnumber": { "type": "integer", "description": "The secret number is between 0 and this." },
+                                    "salt": { "type": "string" },
+                                    "signature": { "type": "string", "description": "HMAC-SHA256 of the challenge, in hexadecimal." }
+                                },
+                                "required": ["algorithm", "challenge", "maxnumber", "salt", "signature"]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
 }
 
 /// The document as the file written with the export.
@@ -194,6 +228,11 @@ fn step_statuses(route: &Route) -> Vec<(u16, String, bool)> {
                     ..
                 } => Some((*status, message.clone(), retry_after.is_some())),
                 Step::RateLimit { .. } => Some((429, "Too many attempts".into(), true)),
+                Step::VerifyChallenge { .. } => Some((
+                    400,
+                    "The challenge is missing, wrong, expired or already used".into(),
+                    false,
+                )),
                 Step::CheckQuota { .. } => {
                     Some((429, "The quota is used up for the period".into(), true))
                 }

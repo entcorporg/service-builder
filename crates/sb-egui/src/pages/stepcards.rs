@@ -52,6 +52,7 @@ pub fn title(kind: &str) -> &'static str {
         "rateLimit" => "Limiter le débit",
         "meter" => "Compter une consommation",
         "checkQuota" => "Vérifier un quota",
+        "verifyChallenge" => "Vérifier un défi anti-robots",
         "hashPassword" => "Hacher un mot de passe",
         "verifyPassword" => "Vérifier un mot de passe",
         "randomToken" => "Jeton aléatoire",
@@ -75,7 +76,7 @@ fn tone(kind: &str) -> (Color32, u8, Color32) {
         "forEach" => (0xa78bfa, 43, 0xbfa8ff),
         "respond" => (0x3ecf8e, 43, 0x3ecf8e),
         "fail" => (0xff6678, 38, 0xff6678),
-        "rateLimit" | "meter" | "checkQuota" => (0xff8c5a, 41, 0xff9c6e),
+        "rateLimit" | "meter" | "checkQuota" | "verifyChallenge" => (0xff8c5a, 41, 0xff9c6e),
         "code" => (0x78dcff, 38, 0x7fdcff),
         "imageSniff" | "objectPut" | "objectGet" | "objectDelete" | "objectPresignGet"
         | "objectPresignPut" => (0x4ecdc4, 38, 0x4ecdc4),
@@ -95,6 +96,7 @@ fn summary(step: &Step, kind: &str) -> String {
             .unwrap_or_default()
     };
     match kind {
+        "verifyChallenge" => "résolu par le navigateur, accepté une fois".into(),
         "meter" => format!("{} × {}", get("amount"), get("key")),
         "checkQuota" => format!("{} : {} par {}", get("key"), get("limit"), get("period")),
         "rateLimit" => format!(
@@ -514,7 +516,7 @@ fn form(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, index: usize) {
 }
 
 /// The blocks that can be added, in the order of the web version.
-const ORDER: [&str; 39] = [
+const ORDER: [&str; 40] = [
     "publish",
     "publishLive",
     "sql",
@@ -529,6 +531,7 @@ const ORDER: [&str; 39] = [
     "rateLimit",
     "checkQuota",
     "meter",
+    "verifyChallenge",
     "verifyHmac",
     "signJwt",
     "verifyJwt",
@@ -621,6 +624,9 @@ fn hint(kind: &str) -> &'static str {
         "rateLimit" => {
             "Au-delà de N essais par fenêtre : 429 et Retry-After. Option : compte partagé entre les réplicas"
         }
+        "verifyChallenge" => {
+            "Preuve de travail (ALTCHA) : refuse en 400 sans solution valide. Première étape d’un formulaire public ; le service doit servir un défi"
+        }
         "meter" => {
             "Ajoute une consommation (appels, sièges, Mo) pour un locataire, dans la transaction. Une clé d’idempotence évite le double compte"
         }
@@ -655,8 +661,8 @@ fn allowed(app: &App, list: &[Step], loc: &Loc) -> Vec<&'static str> {
         .filter(|t| match *t {
             "publishLive" => has_realtime,
             "respond" => has_response,
-            "fail" | "rateLimit" | "checkQuota" | "verifyJwt" | "imageSniff" | "totpVerify"
-            | "recoveryCodeUse" => http,
+            "fail" | "rateLimit" | "checkQuota" | "verifyChallenge" | "verifyJwt"
+            | "imageSniff" | "totpVerify" | "recoveryCodeUse" => http,
             t if t.starts_with("passkey") => http,
             "verifyHmac" => allow_signature,
             _ => true,

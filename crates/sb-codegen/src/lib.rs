@@ -165,6 +165,7 @@ mod tests {
                 "contracts/src/lib.rs",
                 "docker-compose.yml",
                 "runtime/Cargo.toml",
+                "runtime/src/challenge.rs",
                 "runtime/src/crypto.rs",
                 "runtime/src/db.rs",
                 "runtime/src/dedup.rs",
@@ -1312,6 +1313,65 @@ mod tests {
             openapi.contains("The quota is used up for the period"),
             "{openapi}"
         );
+    }
+
+    #[test]
+    fn a_challenge_is_handed_out_on_its_path_and_checked_first_by_the_route_that_asks_for_it() {
+        let mut p = sample::orders();
+        sample::add_challenge(&mut p);
+        let files = generate(&p).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        assert!(
+            http.contains(".route(\"/challenge\", get(challenge_document))"),
+            "{http}"
+        );
+        assert!(
+            http.contains("eda_runtime::challenge::issue(\"CHALLENGE_HMAC_KEY\", 1000000, 300)"),
+            "{http}"
+        );
+        // Never cached: each visitor gets their own.
+        assert!(
+            http.contains("(axum::http::header::CACHE_CONTROL, \"no-store\")"),
+            "{http}"
+        );
+        // The key is checked when the service starts; the solutions already accepted live in the database of the service.
+        assert!(
+            file(&files, "services/orders/src/app/config.rs")
+                .contains("eda_runtime::challenge::check_config(\"CHALLENGE_HMAC_KEY\")?;")
+        );
+        assert!(
+            file(&files, "services/orders/src/app/schema.rs")
+                .contains("eda_runtime::challenge::CREATE_USES_TABLE,")
+        );
+        // The route checks it before anything else.
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        let check = api
+            .find("eda_runtime::challenge::verify(&mut tx, \"CHALLENGE_HMAC_KEY\", 1000000, &(input.challenge.clone())).await?;")
+            .unwrap_or_else(|| panic!("{api}"));
+        let fn_start = api.find("pub async fn contact(").unwrap();
+        let first_step = api[fn_start..].find("eda_runtime::").unwrap() + fn_start;
+        assert!(
+            first_step <= check,
+            "nothing but the transaction comes before the check"
+        );
+        // The document of the service tells the front where the challenge is, and the proxy sends the path to the service.
+        let openapi = file(&files, "services/orders/openapi.json");
+        assert!(
+            openapi.contains("\"/challenge\"") && openapi.contains("\"maxnumber\""),
+            "{openapi}"
+        );
+        assert!(
+            openapi.contains("The challenge is missing, wrong, expired or already used"),
+            "{openapi}"
+        );
+        assert!(file(&files, "runtime/src/lib.rs").contains("pub mod challenge;"));
+        // A service that has none: none of it.
+        let plain = generate(&sample::orders()).unwrap();
+        let http = file(&plain, "services/orders/src/transport/http.rs");
+        assert!(!http.contains("challenge"), "{http}");
+        assert!(!file(&plain, "services/orders/src/app/schema.rs").contains("challenge"));
+        assert!(!file(&plain, "services/orders/src/app/config.rs").contains("challenge"));
+        assert!(!file(&plain, "services/orders/openapi.json").contains("challenge"));
     }
 
     #[test]

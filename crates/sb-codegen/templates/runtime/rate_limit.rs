@@ -324,9 +324,14 @@ mod tests {
 
     #[cfg(feature = "shared-limit")]
     #[tokio::test]
-    async fn the_shared_step_answers_a_429_with_or_without_a_server() {
-        // With a server it counts there, without one it counts in memory: either way the third attempt of two is refused, with
-        // the same answer as the step in memory.
+    async fn the_shared_step_answers_a_429_without_a_server() {
+        // With a server named, the test against it (below) is the one that runs: the connection of the store is made once for
+        // the process, in the runtime of whichever test asks first, and the tests each have a runtime of their own.
+        if std::env::var_os("DRAGONFLY_URL").is_some() {
+            return;
+        }
+        // Nothing to count in: the step counts in memory, and the third attempt of two is refused, with the same answer as the
+        // step without the option.
         let (scope, key) = (unique("shared-step"), unique("someone"));
         for _ in 0..2 {
             check_shared(&scope, &key, 2, 900).await.unwrap();

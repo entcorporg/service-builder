@@ -23,6 +23,7 @@ const RUNTIME_HTTP_CLIENT: &str = include_str!("../templates/runtime/http_client
 const RUNTIME_S3: &str = include_str!("../templates/runtime/s3.rs");
 const RUNTIME_WEBAUTHN: &str = include_str!("../templates/runtime/webauthn.rs");
 const RUNTIME_WEBHOOK: &str = include_str!("../templates/runtime/webhook.rs");
+const RUNTIME_CHALLENGE: &str = include_str!("../templates/runtime/challenge.rs");
 const RUNTIME_USAGE: &str = include_str!("../templates/runtime/usage.rs");
 const RUNTIME_RATE_LIMIT: &str = include_str!("../templates/runtime/rate_limit.rs");
 const CONTRACTS_JSON: &str = include_str!("../templates/contracts/json.rs");
@@ -57,6 +58,7 @@ pub fn files(project: &Project) -> Vec<GeneratedFile> {
         GeneratedFile::new("runtime/src/http_client.rs", RUNTIME_HTTP_CLIENT),
         GeneratedFile::new("runtime/src/totp.rs", RUNTIME_TOTP),
         GeneratedFile::new("runtime/src/usage.rs", RUNTIME_USAGE),
+        GeneratedFile::new("runtime/src/challenge.rs", RUNTIME_CHALLENGE),
         GeneratedFile::new("runtime/src/validation.rs", RUNTIME_VALIDATION),
         GeneratedFile::new("runtime/src/webauthn.rs", RUNTIME_WEBAUTHN),
         GeneratedFile::new("runtime/src/webhook.rs", RUNTIME_WEBHOOK),
@@ -385,7 +387,8 @@ fn readme(project: &Project) -> String {
          whose details only go to the logs. Browsers may call the API from the origins of `CORS_ORIGINS` (`*` by default, set it in production).\n\
          - Environment: `KAFKA_BROKERS`, `<SERVICE>_PORT` (gRPC), `<SERVICE>_HTTP_PORT`, `CORS_ORIGINS`, `<SERVICE>_URL` (address used to call \
          another service), `<SERVICE>_DATABASE_URL`, `OUTBOX_MAX_ATTEMPTS`, and `DRAGONFLY_URL` for a service that pushes events to the browsers or counts a shared rate limit \
-         (a `publishLive` step: sent right after the commit, best effort).\n\
+         (a `publishLive` step: sent right after the commit, best effort), and the key a service signs its proof-of-work challenges with \
+         (`CHALLENGE_HMAC_KEY` by default, the same on every replica, required in production).\n\
          - Everything here is regenerated on export: edit the project in Service Builder, not these files.\n",
     );
     s

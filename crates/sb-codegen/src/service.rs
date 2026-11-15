@@ -397,6 +397,13 @@ fn config_rs(project: &Project, service: &Service, publishes: bool) -> String {
         c.line("// The events for the browsers go through DragonflyDB: in production the service must know where it is.");
         c.line("eda_runtime::live::check_config()?;");
     }
+    if let Some(cfg) = &service.challenge {
+        c.line("// The challenges are signed with a key every replica shares: in production the service must have it.");
+        c.line(format!(
+            "eda_runtime::challenge::check_config({:?})?;",
+            cfg.key_env
+        ));
+    }
     if service.uses_shared_limit() {
         c.line("// The rate limits counted for all the replicas go through DragonflyDB: in production the service must know where it is.");
         c.line("eda_runtime::rate_limit::check_config()?;");
@@ -673,6 +680,10 @@ fn schema_rs(service: &Service) -> String {
         c.line("eda_runtime::webauthn::ADD_STATES_ORIGIN,");
         c.line("eda_runtime::webauthn::CREATE_CREDENTIALS_TABLE,");
         c.line("eda_runtime::webauthn::CREATE_CREDENTIALS_INDEX,");
+    }
+    if service.uses_challenge_check() {
+        // The solutions already accepted: a solution is worth one form, for every replica.
+        c.line("eda_runtime::challenge::CREATE_USES_TABLE,");
     }
     if service.uses_usage() {
         // The uses metered and checked against quotas, and the view that adds them up per day.
@@ -1019,7 +1030,7 @@ fn http_rs(project: &Project, service: &Service) -> String {
     // Only the first method of a path is a free function; the others chain on the `MethodRouter`.
     let mut verbs: Vec<String> = paths.iter().map(|(_, rs)| verb(rs[0].method)).collect();
     let serves_openapi = project.openapi.serve;
-    if serves_openapi {
+    if serves_openapi || service.challenge.is_some() {
         verbs.push("get".into());
     }
     verbs.sort();
@@ -1121,6 +1132,12 @@ fn http_rs(project: &Project, service: &Service) -> String {
             project.openapi.path
         ));
     }
+    if let Some(cfg) = &service.challenge {
+        c.line(format!(
+            "    .route({:?}, get(challenge_document))",
+            cfg.path
+        ));
+    }
     c.line("    .layer(cors(config))");
     c.line("    .with_state(ctx);");
     c.line("let listener = tokio::net::TcpListener::bind((\"0.0.0.0\", config.http_port)).await?;");
@@ -1154,6 +1171,24 @@ fn http_rs(project: &Project, service: &Service) -> String {
         c.blank();
         c.open("async fn openapi_document() -> impl IntoResponse");
         c.line("([(axum::http::header::CONTENT_TYPE, \"application/json\")], OPENAPI)");
+        c.close();
+    }
+
+    if let Some(cfg) = &service.challenge {
+        c.blank();
+        c.line("/// A new proof-of-work challenge for the form that comes next (see `eda_runtime::challenge`). Never cached: each visitor gets");
+        c.line("/// their own, and one is accepted once.");
+        c.open("async fn challenge_document() -> Response");
+        c.line(format!(
+            "match eda_runtime::challenge::issue({:?}, {}, {}) {{",
+            cfg.key_env, cfg.max_number, cfg.ttl_secs
+        ));
+        c.line("    Ok(challenge) => ([(axum::http::header::CACHE_CONTROL, \"no-store\")], Json(challenge)).into_response(),");
+        c.line("    Err(error) => {");
+        c.line("        tracing::error!(%error, \"cannot make a challenge\");");
+        c.line("        StatusCode::INTERNAL_SERVER_ERROR.into_response()");
+        c.line("    }");
+        c.line("}");
         c.close();
     }
 
@@ -2376,6 +2411,18 @@ fn steps(
                     ));
                 }
             }
+            Step::VerifyChallenge { payload, .. } => {
+                let cfg = service.challenge.as_ref().ok_or_else(|| {
+                    CodegenError::Internal(
+                        "`verifyChallenge` in a service with no challenge".into(),
+                    )
+                })?;
+                let payload = lower(project, scope, payload, &TypeRef::scalar(FieldType::String))?;
+                c.line(format!(
+                    "eda_runtime::challenge::verify(&mut tx, {:?}, {}, &({payload})).await?;",
+                    cfg.key_env, cfg.max_number
+                ));
+            }
             Step::Meter {
                 key,
                 tenant,
@@ -3441,6 +3488,7 @@ fn describe(step: &Step) -> String {
             "rate limit {max} per {window_secs}s{}",
             if *shared { " (shared)" } else { "" }
         ),
+        Step::VerifyChallenge { .. } => "verify the challenge".into(),
         Step::Meter { key, .. } => format!("meter {key}"),
         Step::CheckQuota { key, .. } => format!("check the quota of {key}"),
         Step::HashPassword { bind, .. } => format!("hash password into {bind}"),

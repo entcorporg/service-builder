@@ -44,6 +44,61 @@ pub struct Project {
     pub openapi: OpenApiConfig,
 }
 
+/// A challenge in the manner of [ALTCHA](https://altcha.org): a proof of work, with no third-party service and no tracking. The
+/// service answers `GET <path>` with a new challenge (`algorithm`, `challenge`, `maxnumber`, `salt`, `signature`: what the ALTCHA
+/// widget reads); the widget finds the secret number whose SHA-256 with the salt is the challenge, which costs the visitor a moment
+/// of computing and a robot the same moment, at the scale of its volume; the form is sent with the solution, and a
+/// `verifyChallenge` step of the route checks it before anything else runs. A challenge is signed (HMAC-SHA256, key in the
+/// environment variable `key_env`, the same on every replica), expires, and is accepted once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChallengeConfig {
+    /// Where the challenge is served: a path of the HTTP API that no route uses.
+    #[serde(default = "default_challenge_path")]
+    pub path: String,
+    /// The environment variable that holds the key the challenges are signed with (at least 16 characters; in production the
+    /// service does not start without it).
+    #[serde(default = "default_challenge_key_env")]
+    pub key_env: String,
+    /// The secret number is drawn in `0..=max_number`: the work asked of the visitor is about `max_number / 2` hashes.
+    #[serde(default = "default_challenge_max_number")]
+    pub max_number: u32,
+    /// How long a challenge can be solved and sent, in seconds.
+    #[serde(default = "default_challenge_ttl")]
+    pub ttl_secs: u32,
+}
+
+pub const DEFAULT_CHALLENGE_PATH: &str = "/challenge";
+pub const DEFAULT_CHALLENGE_KEY_ENV: &str = "CHALLENGE_HMAC_KEY";
+pub const DEFAULT_CHALLENGE_MAX_NUMBER: u32 = 1_000_000;
+pub const DEFAULT_CHALLENGE_TTL_SECS: u32 = 300;
+/// The most work a challenge can ask for: a few seconds in a browser, more on a phone.
+pub const MAX_CHALLENGE_NUMBER: u32 = 10_000_000;
+
+fn default_challenge_path() -> String {
+    DEFAULT_CHALLENGE_PATH.to_string()
+}
+fn default_challenge_key_env() -> String {
+    DEFAULT_CHALLENGE_KEY_ENV.to_string()
+}
+fn default_challenge_max_number() -> u32 {
+    DEFAULT_CHALLENGE_MAX_NUMBER
+}
+fn default_challenge_ttl() -> u32 {
+    DEFAULT_CHALLENGE_TTL_SECS
+}
+
+impl Default for ChallengeConfig {
+    fn default() -> Self {
+        Self {
+            path: default_challenge_path(),
+            key_env: default_challenge_key_env(),
+            max_number: default_challenge_max_number(),
+            ttl_secs: default_challenge_ttl(),
+        }
+    }
+}
+
 /// The OpenAPI 3.1 document of each service is always written with the export; this decides whether the service
 /// also serves it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -334,6 +389,10 @@ pub struct Service {
     /// token is read. Required for that kind, refused for the others.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub realtime: Option<RealtimeConfig>,
+    /// A proof-of-work challenge the service hands out (`GET <path>`) for its `verifyChallenge` steps to check, against the
+    /// robots that fill in a form: see [`ChallengeConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub challenge: Option<ChallengeConfig>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1016,6 +1075,13 @@ pub enum Step {
         #[serde(default)]
         shared: bool,
     },
+    /// Checks the solution of a proof-of-work challenge (see [`ChallengeConfig`]) before the rest of the route runs: the form
+    /// the visitor filled in is read for what it is only once a browser has spent a moment computing. `payload` is what the
+    /// ALTCHA widget sends (a text: base64 of a JSON). A solution that is missing, malformed, wrong, expired or already used
+    /// ends the route with a 400. A solution is accepted once, for all the replicas, in the transaction of the handler.
+    /// Routes only, in a service that serves a challenge.
+    #[serde(rename_all = "camelCase")]
+    VerifyChallenge { id: String, payload: Expr },
     /// Records a use of a meter for a tenant: `amount` units of `key` (API calls, seats, megabytes) in the table
     /// `usage_events` of the service's database, in the transaction of the handler, so that the use and what it pays for commit
     /// together. A negative amount gives units back (a seat released). With `idempotency_key`, a second use with the same text
@@ -1863,6 +1929,7 @@ impl Step {
             | Step::RateLimit { id, .. }
             | Step::Meter { id, .. }
             | Step::CheckQuota { id, .. }
+            | Step::VerifyChallenge { id, .. }
             | Step::VerifyHmac { id, .. }
             | Step::HttpCall { id, .. }
             | Step::Encrypt { id, .. }
@@ -2363,6 +2430,15 @@ impl Service {
             .chain(self.routes.iter().flat_map(|r| &r.steps))
             .chain(self.consumers.iter().flat_map(|c| &c.steps))
             .chain(self.jobs.iter().flat_map(|j| &j.steps))
+    }
+
+    /// Whether a route of the service checks the solution of a challenge: its database then holds `challenge_uses`.
+    pub fn uses_challenge_check(&self) -> bool {
+        let mut used = false;
+        for step in self.handler_steps() {
+            step.walk(&mut |s| used |= matches!(s, Step::VerifyChallenge { .. }));
+        }
+        used
     }
 
     /// Whether a step of the service meters a use or checks a quota: its database then holds `usage_events`.

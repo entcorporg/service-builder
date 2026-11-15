@@ -159,7 +159,12 @@ fn grpc_port(service: &Service) -> Option<u16> {
 /// nothing for a browser.
 fn public_paths(service: &Service) -> Vec<String> {
     match service.kind {
-        ServiceKind::Standard => service.routes.iter().map(|r| r.path.clone()).collect(),
+        ServiceKind::Standard => service
+            .routes
+            .iter()
+            .map(|r| r.path.clone())
+            .chain(service.challenge.iter().map(|c| c.path.clone()))
+            .collect(),
         ServiceKind::Realtime => service.realtime.iter().map(|r| r.path.clone()).collect(),
         ServiceKind::Mta => vec![],
     }
@@ -1640,6 +1645,16 @@ mod tests {
             routers.contains("(PathPrefix(`/auth/login`) || PathPrefix(`/auth/sessions`))"),
             "{routers}"
         );
+    }
+
+    #[test]
+    fn the_proxy_sends_the_path_of_a_challenge_to_the_service_that_hands_it_out() {
+        let mut p = sample::orders();
+        sample::add_challenge(&mut p);
+        assert!(public_paths(&p.services[0]).contains(&"/challenge".to_string()));
+        p.pods.traefik.enabled = true;
+        let routers = file(&files(&p), "traefik/dynamic/routers.yaml");
+        assert!(routers.contains("PathPrefix(`/challenge`)"), "{routers}");
     }
 
     #[test]

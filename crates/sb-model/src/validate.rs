@@ -84,6 +84,9 @@ struct Env<'a> {
 /// What the meter and quota steps keep in the database of the service: the table of the uses and the view that adds them up.
 pub const USAGE_TABLES: [&str; 2] = ["usage_events", "usage_daily"];
 
+/// What `verifyChallenge` keeps in the database of the service: the solutions already accepted.
+pub const CHALLENGE_TABLE: &str = "challenge_uses";
+
 /// The most attempts a `rateLimit` counted in the shared store can allow: the store keeps one entry per attempt of the window.
 pub const SHARED_RATE_LIMIT_MAX: u32 = 10_000;
 
@@ -770,6 +773,7 @@ impl<'a> Checker<'a> {
             self.table_constraints(s, &base);
             self.mta_service(s, &base);
             self.realtime_service(s, &base);
+            self.challenge_service(s, &base);
 
             let mut rpc_names = HashSet::new();
             for (j, r) in s.rpcs.iter().enumerate() {
@@ -1759,12 +1763,14 @@ impl<'a> Checker<'a> {
                     "`outbox` is the table of the published events, pick another name",
                 );
             }
-            if s.uses_usage() && USAGE_TABLES.contains(&t.name.as_str()) {
+            if (s.uses_usage() && USAGE_TABLES.contains(&t.name.as_str()))
+                || (s.uses_challenge_check() && t.name == CHALLENGE_TABLE)
+            {
                 self.error(
                     "E_TABLE_RESERVED",
                     format!("{tp}/name"),
                     format!(
-                        "`{}` is kept by the meter and quota steps of this service, pick another name",
+                        "`{}` is kept by the meter, quota or challenge steps of this service, pick another name",
                         t.name
                     ),
                 );
@@ -3646,6 +3652,25 @@ impl<'a> Checker<'a> {
                 self.check_expr(scope, key, Some(&text), &format!("{path}/key"));
                 false
             }
+            Step::VerifyChallenge { payload, .. } => {
+                if !matches!(env.handler, Handler::Route { .. }) {
+                    self.error(
+                        "E_CHALLENGE_OUTSIDE_ROUTE",
+                        path,
+                        "a challenge answers 400 to the visitor: it only makes sense in an HTTP route",
+                    );
+                }
+                if env.service.challenge.is_none() {
+                    self.error(
+                        "E_CHALLENGE_NOT_SERVED",
+                        path,
+                        "this service hands out no challenge: turn it on in the service (`challenge`), with the key and the path",
+                    );
+                }
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, payload, Some(&text), &format!("{path}/payload"));
+                false
+            }
             Step::Meter {
                 key,
                 tenant,
@@ -4030,6 +4055,75 @@ impl<'a> Checker<'a> {
                 );
             }
             self.check_expr(scope, &c.value, Some(&text), &format!("{cp}/value"));
+        }
+    }
+
+    /// The challenge a service hands out: where, with which key, how much work and for how long. Checked wherever it is set,
+    /// served or not.
+    fn challenge_service(&mut self, s: &Service, base: &str) {
+        let Some(cfg) = &s.challenge else {
+            return;
+        };
+        let path = cfg.path.as_str();
+        let plain = path.starts_with('/')
+            && path.len() > 1
+            && path.len() <= 100
+            && path
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"/-_.".contains(&b))
+            && !path.contains("//");
+        if !plain {
+            self.error(
+                "E_CHALLENGE_PATH",
+                format!("{base}/challenge/path"),
+                "the path of the challenge starts with `/` and holds letters, digits, `/`, `-`, `_` and `.` only (e.g. `/challenge`)",
+            );
+        } else if let Some(r) = s
+            .routes
+            .iter()
+            .find(|r| r.method == HttpMethod::Get && r.path == path)
+        {
+            self.error(
+                "E_CHALLENGE_PATH",
+                format!("{base}/challenge/path"),
+                format!("`{path}` is already the route `{}` of `{}`", r.name, s.name),
+            );
+        } else if self.project.openapi.serve && self.project.openapi.path == path {
+            self.error(
+                "E_CHALLENGE_PATH",
+                format!("{base}/challenge/path"),
+                format!("`{path}` is where the OpenAPI document is served"),
+            );
+        }
+        if !is_env_name(&cfg.key_env) {
+            self.error(
+                "E_CHALLENGE_KEY_ENV",
+                format!("{base}/challenge/keyEnv"),
+                "the key of the challenge is read from an environment variable: capital letters, digits and `_`, not starting with a digit",
+            );
+        }
+        if !(1..=MAX_CHALLENGE_NUMBER).contains(&cfg.max_number) {
+            self.error(
+                "E_CHALLENGE_WORK",
+                format!("{base}/challenge/maxNumber"),
+                format!(
+                    "the work asked of the visitor is between 1 and {MAX_CHALLENGE_NUMBER} (about half of it in hashes: a second or two in a browser at the top)"
+                ),
+            );
+        }
+        if !(10..=86_400).contains(&cfg.ttl_secs) {
+            self.error(
+                "E_CHALLENGE_TTL",
+                format!("{base}/challenge/ttlSecs"),
+                "a challenge stays valid for 10 seconds to 24 hours (86400)",
+            );
+        }
+        if s.routes.is_empty() {
+            self.error(
+                "E_CHALLENGE_NO_HTTP",
+                format!("{base}/challenge"),
+                "a challenge is served by the HTTP API of the service, and this service has no route",
+            );
         }
     }
 
@@ -6214,6 +6308,133 @@ mod tests {
         table.columns[0].primary_key = true;
         p.services[0].tables.push(table);
         assert!(!errors(&p).contains(&"E_TABLE_RESERVED".to_string()));
+    }
+
+    #[test]
+    fn a_challenge_is_served_by_a_service_and_checked_by_a_route_of_it() {
+        let mut p = sample::orders();
+        sample::add_challenge(&mut p);
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        // A route that checks a challenge in a service that hands none out.
+        let verify = Step::VerifyChallenge {
+            id: "v".into(),
+            payload: Expr::Literal { value: "x".into() },
+        };
+        let mut q = sample::orders();
+        route_of(&mut q).steps.insert(0, verify.clone());
+        assert!(
+            errors(&q).contains(&"E_CHALLENGE_NOT_SERVED".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        // The solution is text.
+        let mut q = p.clone();
+        if let Step::VerifyChallenge { payload, .. } =
+            &mut q.services[0].routes.last_mut().unwrap().steps[0]
+        {
+            *payload = Expr::Literal { value: 5.into() };
+        }
+        assert!(
+            errors(&q).contains(&"E_TYPE_MISMATCH".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        // Only a route answers 400 to a visitor.
+        let mut q = p.clone();
+        q.services[0].jobs[0].steps.push(verify);
+        assert!(
+            errors(&q).contains(&"E_CHALLENGE_OUTSIDE_ROUTE".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        // The table of the solutions already accepted is the generator's.
+        let mut q = p.clone();
+        let mut table = Table::new(CHALLENGE_TABLE, vec![Column::new("id", ColumnType::String)]);
+        table.columns[0].primary_key = true;
+        q.services[0].tables.push(table);
+        assert!(
+            errors(&q).contains(&"E_TABLE_RESERVED".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+    }
+
+    #[test]
+    fn the_settings_of_a_challenge_are_checked() {
+        let mut p = sample::orders();
+        sample::add_challenge(&mut p);
+        let existing_route = p.services[0].routes[0].path.clone();
+        let existing_method = p.services[0].routes[0].method;
+        type Change = Box<dyn Fn(&mut ChallengeConfig)>;
+        let cases: Vec<(&str, Change)> = vec![
+            (
+                "E_CHALLENGE_PATH",
+                Box::new(|c| c.path = "challenge".into()),
+            ),
+            ("E_CHALLENGE_PATH", Box::new(|c| c.path = "/".into())),
+            ("E_CHALLENGE_PATH", Box::new(|c| c.path = "/a b".into())),
+            ("E_CHALLENGE_PATH", Box::new(|c| c.path = "/a//b".into())),
+            (
+                "E_CHALLENGE_KEY_ENV",
+                Box::new(|c| c.key_env = "lower".into()),
+            ),
+            (
+                "E_CHALLENGE_KEY_ENV",
+                Box::new(|c| c.key_env = "1KEY".into()),
+            ),
+            ("E_CHALLENGE_WORK", Box::new(|c| c.max_number = 0)),
+            (
+                "E_CHALLENGE_WORK",
+                Box::new(|c| c.max_number = MAX_CHALLENGE_NUMBER + 1),
+            ),
+            ("E_CHALLENGE_TTL", Box::new(|c| c.ttl_secs = 9)),
+            ("E_CHALLENGE_TTL", Box::new(|c| c.ttl_secs = 86_401)),
+        ];
+        for (code, change) in cases {
+            let mut q = p.clone();
+            change(q.services[0].challenge.as_mut().unwrap());
+            assert!(
+                errors(&q).contains(&code.to_string()),
+                "{code}: {:?}",
+                errors(&q)
+            );
+        }
+        // The edges are fine.
+        for change in [
+            (|c: &mut ChallengeConfig| c.max_number = MAX_CHALLENGE_NUMBER)
+                as fn(&mut ChallengeConfig),
+            |c| c.max_number = 1,
+            |c| c.ttl_secs = 10,
+            |c| c.ttl_secs = 86_400,
+            |c| c.path = "/api/v1/altcha.json".into(),
+        ] {
+            let mut q = p.clone();
+            change(q.services[0].challenge.as_mut().unwrap());
+            assert!(errors(&q).is_empty(), "{:?}", errors(&q));
+        }
+        // A path a route already answers (a `GET`: a `POST` of the same path is another thing).
+        if existing_method == HttpMethod::Get {
+            let mut q = p.clone();
+            q.services[0].challenge.as_mut().unwrap().path = existing_route;
+            assert!(errors(&q).contains(&"E_CHALLENGE_PATH".to_string()));
+        }
+        let mut q = p.clone();
+        q.openapi.serve = true;
+        q.openapi.path = "/challenge".into();
+        assert!(
+            errors(&q).contains(&"E_CHALLENGE_PATH".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        // A service with no route serves no HTTP: the challenge would never be handed out.
+        let mut q = sample::orders();
+        q.services[1].routes.clear();
+        q.services[1].challenge = Some(ChallengeConfig::default());
+        assert!(
+            errors(&q).contains(&"E_CHALLENGE_NO_HTTP".to_string()),
+            "{:?}",
+            errors(&q)
+        );
     }
 
     #[test]

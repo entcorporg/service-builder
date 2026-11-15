@@ -51,7 +51,7 @@ vérité : le canvas, l'inspecteur et le code généré en sont des vues.
   Un producteur sans étape *Publier* donne un avertissement. Les projets enregistrés avant (`schemaVersion` 1) sont
   migrés à l'ouverture : tout service qui publiait sur un topic en devient producteur.
 - **Services** : des RPC (gRPC), des routes HTTP, des consumers (Kafka) et des tâches planifiées. Chacun contient une **liste d'étapes**.
-- **Étapes** : `log`, `let`, `publish`, `publishLive`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `rateLimit`, `checkQuota` et `verifyHmac` (routes HTTP), `meter`, `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
+- **Étapes** : `log`, `let`, `publish`, `publishLive`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `rateLimit`, `checkQuota`, `verifyChallenge` et `verifyHmac` (routes HTTP), `meter`, `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
   Une liste d'étapes est un arbre (pas un graphe arbitraire) : cela se génère en Rust structuré et s'édite comme
   une pile de blocs, comme dans un page builder.
 
@@ -288,6 +288,33 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
   - Limites : OpenMeter (la référence) agrège dans ClickHouse ; ici PostgreSQL, ce qui tient la facturation d'un produit, pas
     des milliards d'événements. Pas d'archivage ni de purge des lignes, pas de remise à zéro anticipée d'un compteur (poser un
     `meter` négatif), pas de droit « par fonctionnalité » (`entitlements`) autre que le plafond.
+- **Défi anti-robots** : un défi de **preuve de travail** à la manière d'[ALTCHA](https://altcha.org), sans service tiers ni
+  suivi, contre l'inscription et les formulaires automatisés que `rateLimit` ne suffit pas à arrêter. Deux morceaux :
+  - **Le service remet un défi** : `challenge { path, keyEnv, maxNumber, ttlSecs }` sur le service (par défaut `/challenge`,
+    `CHALLENGE_HMAC_KEY`, 1 000 000, 300 s). Le service répond `GET <path>` (sans authentification, `Cache-Control: no-store`) avec
+    `{ algorithm: "SHA-256", challenge, maxnumber, salt, signature }`, ce que lit le widget ALTCHA : `salt` est un aléa suivi de
+    `?expires=<unix>&`, `challenge` le SHA-256 du sel suivi d'un nombre secret tiré dans `0..=maxnumber` (que le widget retrouve
+    en les essayant tous), `signature` le HMAC-SHA256 du `challenge` sous la clé. Le chemin est servi par l'API HTTP du service
+    (le proxy des Pods l'y envoie), décrit dans son document OpenAPI. Validé : `E_CHALLENGE_PATH` (forme, pas celui d'une route
+    `GET` ni du document OpenAPI), `E_CHALLENGE_KEY_ENV`, `E_CHALLENGE_WORK` (1 à 10 000 000), `E_CHALLENGE_TTL` (10 s à 24 h),
+    `E_CHALLENGE_NO_HTTP` (un service sans route ne sert pas d'HTTP). Au démarrage le service ne tourne pas sans clé en
+    production (16 caractères au moins) ; hors production, une clé de développement, dite dans le journal.
+  - **La route vérifie** : `verifyChallenge { payload }`, **première étape** du formulaire, lit ce que le widget envoie (un texte :
+    le base64 d'un JSON `{ algorithm, challenge, number, salt, signature }`) et refuse en `400` (« le défi est absent, faux,
+    expiré ou déjà utilisé » ; la raison exacte reste dans le journal). Dans l'ordre : l'algorithme est `SHA-256` et le nombre dans
+    l'intervalle demandé ; la signature est celle du `challenge` (un défi que **ce** service a fait, n'importe quel réplica : la clé
+    est partagée ; comparaison à temps constant) ; le hash du sel et du nombre est le `challenge` (le travail est fait) ;
+    l'expiration, portée par le sel donc couverte par le hash, n'est pas passée ; la solution n'a pas servi. Une solution **vaut un
+    formulaire** : sa signature est inscrite dans `challenge_uses` (créée avec le schéma, nom réservé : `E_TABLE_RESERVED`) **dans
+    la transaction du handler**, donc pour tous les réplicas à la fois, et si le handler échoue après, l'inscription est annulée
+    avec le reste et le visiteur peut renvoyer la même solution. Les lignes des défis expirés sont balayées au passage (quelques
+    requêtes sur cent), sans tâche planifiée. Routes seulement (`E_CHALLENGE_OUTSIDE_ROUTE`), service qui sert un défi
+    (`E_CHALLENGE_NOT_SERVED`).
+  - Interopérable avec ALTCHA dans les deux sens (vérifié contre la bibliothèque `altcha-lib-rs`, Apache-2.0 d'après son `Cargo.toml` : elle accepte
+    nos défis et nous acceptons les siens) ; le code est écrit d'après le protocole et ne reprend rien d'elle. Seul `SHA-256` est
+    accepté. Limites : une preuve de travail ralentit un robot, elle ne l'arrête pas ; elle n'est pas une preuve d'humanité (ni
+    reconnaissance de comportement, ni réputation d'adresse) et se règle par `maxNumber` contre le temps passé par un visiteur sur
+    un téléphone. Elle s'ajoute à `rateLimit` (par adresse, par compte), elle ne le remplace pas.
 - **Règles de champ** : un champ texte (`string`, `uuid`) d'un schéma API peut porter des règles (`rules`), vérifiées par le
   handler généré **avant toute étape**, dans l'ordre des champs ; la première qui échoue répond `400 { "error": "champ : … " }`.
   - `length` (`min`, `max`) : entre `min` et `max` **caractères** (pas octets), texte rogné avant d'être compté ; la borne

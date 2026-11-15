@@ -202,6 +202,7 @@ pub fn orders() -> Project {
         kind: ServiceKind::Standard,
         templates: vec![],
         realtime: None,
+        challenge: None,
         rpcs: vec![
             Rpc {
                 name: "CreateOrder".into(),
@@ -430,6 +431,7 @@ pub fn orders() -> Project {
         kind: ServiceKind::Standard,
         templates: vec![],
         realtime: None,
+        challenge: None,
         rpcs: vec![],
         http_port: None,
         routes: vec![],
@@ -487,6 +489,7 @@ pub fn orders() -> Project {
         kind: ServiceKind::Standard,
         templates: vec![],
         realtime: None,
+        challenge: None,
         rpcs: vec![],
         http_port: None,
         routes: vec![],
@@ -826,6 +829,46 @@ pub fn add_signup(p: &mut Project) {
     });
 }
 
+/// Adds to the first service a proof-of-work challenge (`GET /challenge`) and a contact form that checks it before it reads
+/// anything else: the visitor's browser computes for a moment, a robot does the same for every form it sends. The solution
+/// comes with the form, in its `challenge` field.
+pub fn add_challenge(p: &mut Project) {
+    let string = || FieldType::String;
+    let mut email = field("email", string());
+    email.rules = vec![Rule::Email];
+    let mut text = field("message", string());
+    text.rules = vec![Rule::Length { min: 1, max: 2000 }];
+    p.messages.push(api(
+        "ContactBody",
+        vec![email, text, field("challenge", string())],
+    ));
+    p.messages
+        .push(api("ContactAck", vec![field("received", FieldType::Bool)]));
+    p.services[0].challenge = Some(ChallengeConfig::default());
+    p.services[0].routes.push(Route {
+        name: "contact".into(),
+        method: HttpMethod::Post,
+        path: "/contact".into(),
+        request: "ContactBody".into(),
+        response: "ContactAck".into(),
+        status: 202,
+        steps: vec![
+            // First: nothing is read, nothing is stored, until a browser has spent its moment.
+            Step::VerifyChallenge {
+                id: "c1".into(),
+                payload: path("input.challenge"),
+            },
+            Step::Respond {
+                id: "c2".into(),
+                fields: vec![set("received", lit(true))],
+                status: None,
+                cookies: vec![],
+                headers: vec![],
+            },
+        ],
+    });
+}
+
 /// Adds to the first service the tables of an order's lines and shipments: a composite primary key, a composite
 /// foreign key with a `CASCADE`, a `UNIQUE` constraint, an index and a `jsonb` column.
 pub fn add_shipments(p: &mut Project) {
@@ -884,6 +927,7 @@ pub fn showcase() -> Project {
     add_stripe_webhook(&mut p);
     add_sealed_text(&mut p);
     add_signup(&mut p);
+    add_challenge(&mut p);
     add_login(&mut p);
     add_jwt(&mut p);
     add_shipments(&mut p);
@@ -2329,6 +2373,7 @@ pub fn add_mailer(p: &mut Project) {
             design: None,
         }],
         realtime: None,
+        challenge: None,
     });
 }
 
@@ -2390,6 +2435,7 @@ pub fn add_realtime(p: &mut Project) {
         kind: ServiceKind::Realtime,
         templates: vec![],
         realtime: Some(RealtimeConfig::default()),
+        challenge: None,
     });
 }
 

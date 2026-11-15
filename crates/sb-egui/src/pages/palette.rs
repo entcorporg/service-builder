@@ -67,6 +67,7 @@ pub fn add_service(app: &mut App, kind: ServiceKind) {
             kind,
             templates: vec![],
             realtime: None,
+            challenge: None,
         };
         if kind == ServiceKind::Realtime {
             svc.realtime = Some(sb_model::RealtimeConfig::default());

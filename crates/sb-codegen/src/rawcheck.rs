@@ -97,6 +97,7 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                 }
             }
             Step::RateLimit { key, .. } => expr(key, &format!("{path}/key"), out),
+            Step::VerifyChallenge { payload, .. } => expr(payload, &format!("{path}/payload"), out),
             Step::Meter {
                 tenant,
                 amount,

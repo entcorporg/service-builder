@@ -59,6 +59,7 @@ pub fn path(name: &str) -> &'static str {
         "verifyHmac" => "M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6zM9 11h6M12 11v5",
         "rateLimit" => "M12 22a10 10 0 100-20 10 10 0 000 20zM12 6v6l4 2",
         "meter" => "M4 20V10M10 20V4M16 20v-7M22 20H2",
+        "verifyChallenge" => "M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6zM9 12l2 2 4-4",
         "checkQuota" => "M12 22a10 10 0 100-20 10 10 0 000 20zM12 7v5M12 16h.01",
         "hashPassword" => "M7 11V8a5 5 0 0110 0v3M5 11h14v10H5zM12 15v2",
         "verifyPassword" => "M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6zM8.5 12l2.5 2.5L15.5 10",
