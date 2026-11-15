@@ -56,18 +56,23 @@ Les projets sous AGPL, SSPL ou BSL ne sont cités que comme projets écartés. L
 | Feature | Branche | Référence | Licence | Langage d'origine | Portage vers Rust |
 | --- | --- | --- | --- | --- | --- |
 | Verrou optimiste et requêtes conditionnelles | `feature/verrou-optimiste` | [Ecto (`optimistic_lock`)](https://github.com/elixir-ecto/ecto) | Apache-2.0 | Elixir | Réécriture à prévoir |
+| Isolation des tenants garantie par la base | `feature/isolation-des-tenants-en-base` | [Supabase (sécurité par ligne)](https://github.com/supabase/supabase) | Apache-2.0 | TypeScript | Réécriture à prévoir |
 
 ### Option d'étape
 
 | Feature | Branche | Référence | Licence | Langage d'origine | Portage vers Rust |
 | --- | --- | --- | --- | --- | --- |
 | Disjoncteur et cloisonnement des appels sortants | `feature/disjoncteur` | [Resilience4j](https://github.com/resilience4j/resilience4j) | Apache-2.0 | Java | Crate Rust disponible |
+| Corps JSON imbriqués pour les appels HTTP | `feature/corps-json-imbrique` | [JSONata](https://github.com/jsonata-js/jsonata) | MIT | JavaScript | Réécriture à prévoir |
+| Limitation de débit partagée entre instances | `feature/limitation-de-debit-partagee` | [redis-cell](https://github.com/brandur/redis-cell) | MIT | Rust | Déjà en Rust |
 
 ### Bloc SQL
 
 | Feature | Branche | Référence | Licence | Langage d'origine | Portage vers Rust |
 | --- | --- | --- | --- | --- | --- |
 | Recherche plein texte | `feature/recherche-plein-texte` | [PostgREST (opérateurs `fts`, `plfts`, `phfts`, `wfts`)](https://github.com/PostgREST/postgrest) | MIT | Haskell | Réécriture à prévoir |
+| Agrégats et auto-jointures dans le bloc SQL | `feature/agregats-sql` | [PostgREST (fonctions d'agrégat)](https://github.com/PostgREST/postgrest) | MIT | Haskell | Réécriture à prévoir |
+| Conseil d'index à l'édition | `feature/conseil-d-index` | [index_advisor](https://github.com/supabase/index_advisor) | Licence PostgreSQL | PL/pgSQL | Réécriture à prévoir |
 
 ### Authentification
 
@@ -120,6 +125,7 @@ Les projets sous AGPL, SSPL ou BSL ne sont cités que comme projets écartés. L
 | Versionnement d'API | `feature/versionnement-d-api` | [Cadwyn](https://github.com/zmievsa/cadwyn) | MIT | Python | Réécriture à prévoir |
 | Serveur MCP du backend généré | `feature/serveur-mcp-genere` | [SDK Rust du Model Context Protocol](https://github.com/modelcontextprotocol/rust-sdk) | En transition de MIT vers Apache-2.0 | Rust | Déjà en Rust |
 | Collection de requêtes exportée | `feature/collection-de-requetes` | [Bruno](https://github.com/usebruno/bruno) | MIT | JavaScript | Réécriture à prévoir |
+| Clients dans d'autres langages | `feature/clients-multi-langages` | [OpenAPI Generator](https://github.com/OpenAPITools/openapi-generator) | Apache-2.0 | Java | Réécriture à prévoir |
 
 ### Données
 
@@ -133,6 +139,8 @@ Les projets sous AGPL, SSPL ou BSL ne sont cités que comme projets écartés. L
 | Cache de lecture | `feature/cache-de-lecture` | [Moka](https://github.com/moka-rs/moka) | MIT ou Apache-2.0 | Rust | Déjà en Rust |
 | Partitionnement et rétention des tables | `feature/partitionnement-et-retention` | [pg_partman](https://github.com/pgpartman/pg_partman) | Licence PostgreSQL | PL/pgSQL et C | Réécriture à prévoir |
 | Identifiants : UUIDv7, identifiants courts, numéros sans trou | `feature/identifiants` | [Sqids](https://github.com/sqids/sqids-rust) | MIT | Rust | Déjà en Rust |
+| Migrations sans interruption de service | `feature/migrations-sans-interruption` | [pgroll](https://github.com/xataio/pgroll) | Apache-2.0 | Go | Crate Rust disponible |
+| Copie anonymisée des données | `feature/donnees-anonymisees` | [Greenmask](https://github.com/GreenmaskIO/greenmask) | Apache-2.0 | Go | Réécriture à prévoir |
 
 ### Exploitation
 
@@ -145,6 +153,21 @@ Les projets sous AGPL, SSPL ou BSL ne sont cités que comme projets écartés. L
 | Tableaux de bord et alertes générés | `feature/tableaux-de-bord-et-alertes` | [Sloth](https://github.com/slok/sloth) | Apache-2.0 | Go | Réécriture à prévoir |
 | Tests de charge générés | `feature/tests-de-charge` | [Goose](https://github.com/tag1consulting/goose) | Apache-2.0 | Rust | Déjà en Rust |
 | Injection de pannes | `feature/injection-de-pannes` | [Toxiproxy](https://github.com/Shopify/toxiproxy) | MIT | Go | Réécriture à prévoir |
+| Tests de robustesse et d'isolation générés | `feature/tests-de-fuzzing-et-d-isolation` | [Schemathesis](https://github.com/schemathesis/schemathesis) | MIT | Python | Réécriture à prévoir |
+| Documentation d'architecture générée | `feature/documentation-d-architecture` | [Mermaid](https://github.com/mermaid-js/mermaid) | MIT | JavaScript | Réécriture à prévoir |
+| Infrastructure générée (OpenTofu) | `feature/infrastructure-opentofu` | [OpenTofu](https://github.com/opentofu/opentofu) | MPL-2.0 | Go | Réécriture à prévoir |
+| Audit des dépendances et inventaire logiciel | `feature/audit-des-dependances-et-sbom` | [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) | MIT ou Apache-2.0 | Rust | Déjà en Rust |
+| Sauvegardes et restauration | `feature/sauvegardes-et-restauration` | [pgBackRest](https://github.com/pgbackrest/pgbackrest) | MIT | C | Réécriture à prévoir |
+| Droits minimaux générés | `feature/droits-minimaux` | [Strimzi (ressources `KafkaTopic` et `KafkaUser`)](https://github.com/strimzi/strimzi-kafka-operator) | Apache-2.0 | Java | Réécriture à prévoir |
+| Déploiement progressif | `feature/deploiement-progressif` | [Argo Rollouts](https://github.com/argoproj/argo-rollouts) | Apache-2.0 | Go | Réécriture à prévoir |
+
+### Application
+
+| Feature | Branche | Référence | Licence | Langage d'origine | Portage vers Rust |
+| --- | --- | --- | --- | --- | --- |
+| Importer un existant | `feature/import-d-un-existant` | [SeaSchema](https://github.com/SeaQL/sea-schema) | MIT ou Apache-2.0 | Rust | Déjà en Rust |
+| Débogueur de flux | `feature/debogueur-de-flux` | [Node-RED (panneau de débogage)](https://github.com/node-red/node-red) | Apache-2.0 | JavaScript | Réécriture à prévoir |
+| Règles de style d'API | `feature/regles-de-style-d-api` | [vacuum](https://github.com/daveshanley/vacuum) | MIT | Go | Réécriture à prévoir |
 
 ## Écarté pour l'instant
 
