@@ -50,6 +50,13 @@ pub fn title(kind: &str) -> &'static str {
         "decrypt" => "Déchiffrer",
         "verifyHmac" => "Vérifier une signature",
         "rateLimit" => "Limiter le débit",
+        "meter" => "Compter une consommation",
+        "checkQuota" => "Vérifier un quota",
+        "verifyChallenge" => "Vérifier un défi anti-robots",
+        "passwordStrength" => "Juger un mot de passe",
+        "apiKeyCreate" => "Émettre une clé d’API",
+        "apiKeyVerify" => "Vérifier une clé d’API",
+        "apiKeyRevoke" => "Révoquer une clé d’API",
         "hashPassword" => "Hacher un mot de passe",
         "verifyPassword" => "Vérifier un mot de passe",
         "randomToken" => "Jeton aléatoire",
@@ -73,7 +80,7 @@ fn tone(kind: &str) -> (Color32, u8, Color32) {
         "forEach" => (0xa78bfa, 43, 0xbfa8ff),
         "respond" => (0x3ecf8e, 43, 0x3ecf8e),
         "fail" => (0xff6678, 38, 0xff6678),
-        "rateLimit" => (0xff8c5a, 41, 0xff9c6e),
+        "rateLimit" | "meter" | "checkQuota" | "verifyChallenge" => (0xff8c5a, 41, 0xff9c6e),
         "code" => (0x78dcff, 38, 0x7fdcff),
         "imageSniff" | "objectPut" | "objectGet" | "objectDelete" | "objectPresignGet"
         | "objectPresignPut" => (0x4ecdc4, 38, 0x4ecdc4),
@@ -93,7 +100,39 @@ fn summary(step: &Step, kind: &str) -> String {
             .unwrap_or_default()
     };
     match kind {
-        "rateLimit" => format!("{} par {} s", get("max"), get("windowSecs")),
+        "verifyChallenge" => "résolu par le navigateur, accepté une fois".into(),
+        "apiKeyCreate" => format!("pour {}, dans {}", get("owner"), get("bind")),
+        "apiKeyVerify" => format!(
+            "propriétaire dans {}{}",
+            get("bind"),
+            if get("scope").is_empty() {
+                String::new()
+            } else {
+                format!(", portée {}", get("scope"))
+            }
+        ),
+        "apiKeyRevoke" => get("keyId"),
+        "passwordStrength" => format!(
+            "score ≥ {}{}",
+            get("minScore"),
+            if get("refuseBreached") == "true" {
+                ", hors fuites connues"
+            } else {
+                ""
+            }
+        ),
+        "meter" => format!("{} × {}", get("amount"), get("key")),
+        "checkQuota" => format!("{} : {} par {}", get("key"), get("limit"), get("period")),
+        "rateLimit" => format!(
+            "{} par {} s{}",
+            get("max"),
+            get("windowSecs"),
+            if get("shared") == "true" {
+                ", partagé entre les instances"
+            } else {
+                ""
+            }
+        ),
         "branch" => {
             let c = get("condition");
             let c = c
@@ -138,6 +177,23 @@ fn field_name(key: &str) -> String {
         "key" => "Clé",
         "max" => "Maximum",
         "windowSecs" => "Fenêtre (s)",
+        "shared" => "Partagé entre les instances (DragonflyDB)",
+        "tenant" => "Locataire (société, compte)",
+        "amount" => "Quantité",
+        "limit" => "Plafond",
+        "period" => "Période (UTC)",
+        "wanted" => "Quantité demandée (1 par défaut)",
+        "minScore" => "Score minimum (0 à 4)",
+        "circuit" => "Disjoncteur (échecs, fenêtre en s, ouverture en s)",
+        "maxConcurrent" => "Appels simultanés au plus (cloison)",
+        "owner" => "Propriétaire (société, compte)",
+        "scopes" => "Portées (ex. orders:read)",
+        "scope" => "Portée exigée",
+        "expiresInSecs" => "Validité (s, vide : n’expire pas)",
+        "keyIdBind" => "Identifiant de la clé dans",
+        "keyId" => "Identifiant de la clé",
+        "inputs" => "Textes du compte (e-mail, nom)",
+        "refuseBreached" => "Refuser les mots de passe des fuites connues",
         "topic" => "Topic",
         "payload" => "Contenu",
         "table" => "Table",
@@ -495,7 +551,7 @@ fn form(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, index: usize) {
 }
 
 /// The blocks that can be added, in the order of the web version.
-const ORDER: [&str; 37] = [
+const ORDER: [&str; 44] = [
     "publish",
     "publishLive",
     "sql",
@@ -508,6 +564,9 @@ const ORDER: [&str; 37] = [
     "respond",
     "fail",
     "rateLimit",
+    "checkQuota",
+    "meter",
+    "verifyChallenge",
     "verifyHmac",
     "signJwt",
     "verifyJwt",
@@ -528,6 +587,10 @@ const ORDER: [&str; 37] = [
     "objectDelete",
     "encrypt",
     "decrypt",
+    "passwordStrength",
+    "apiKeyCreate",
+    "apiKeyVerify",
+    "apiKeyRevoke",
     "hashPassword",
     "verifyPassword",
     "randomToken",
@@ -597,7 +660,30 @@ fn hint(kind: &str) -> &'static str {
         "verifyHmac" => {
             "Webhook signé (HMAC-SHA256 du corps brut), sans session : toujours la première étape"
         }
-        "rateLimit" => "Au-delà de N essais par fenêtre : 429 et Retry-After",
+        "rateLimit" => {
+            "Au-delà de N essais par fenêtre : 429 et Retry-After. Option : compte partagé entre les réplicas"
+        }
+        "verifyChallenge" => {
+            "Preuve de travail (ALTCHA) : refuse en 400 sans solution valide. Première étape d’un formulaire public ; le service doit servir un défi"
+        }
+        "meter" => {
+            "Ajoute une consommation (appels, sièges, Mo) pour un locataire, dans la transaction. Une clé d’idempotence évite le double compte"
+        }
+        "checkQuota" => {
+            "Au-delà du plafond de la période : 429 et Retry-After. À placer avant le bloc « Compter », dans la même route"
+        }
+        "apiKeyCreate" => {
+            "Pour un client machine : sbk_<id>_<secret>, le secret n’est stocké que haché et montré une seule fois, dans la réponse"
+        }
+        "apiKeyVerify" => {
+            "Authentifie par clé : 401 identique quelle que soit la raison, 403 sans la portée demandée. Première étape d’une route machine"
+        }
+        "apiKeyRevoke" => {
+            "Révoque une clé (404 si inconnue ou déjà révoquée) ; avec un propriétaire, seulement les siennes"
+        }
+        "passwordStrength" => {
+            "Refuse en 400 un mot de passe trop facile à deviner (zxcvbn), et, en option, ceux des fuites connues. Avant « Hacher »"
+        }
         "hashPassword" => "argon2id, hors du runtime async : le texte à stocker",
         "verifyPassword" => "Vrai ou faux ; un compte inconnu coûte le même temps",
         "randomToken" => "256 bits en hexadécimal : session, e-mail, réinitialisation",
@@ -626,8 +712,8 @@ fn allowed(app: &App, list: &[Step], loc: &Loc) -> Vec<&'static str> {
         .filter(|t| match *t {
             "publishLive" => has_realtime,
             "respond" => has_response,
-            "fail" | "rateLimit" | "verifyJwt" | "imageSniff" | "totpVerify"
-            | "recoveryCodeUse" => http,
+            "fail" | "rateLimit" | "checkQuota" | "verifyChallenge" | "passwordStrength"
+            | "verifyJwt" | "imageSniff" | "totpVerify" | "recoveryCodeUse" => http,
             t if t.starts_with("passkey") => http,
             "verifyHmac" => allow_signature,
             _ => true,

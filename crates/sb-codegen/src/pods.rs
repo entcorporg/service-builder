@@ -159,7 +159,12 @@ fn grpc_port(service: &Service) -> Option<u16> {
 /// nothing for a browser.
 fn public_paths(service: &Service) -> Vec<String> {
     match service.kind {
-        ServiceKind::Standard => service.routes.iter().map(|r| r.path.clone()).collect(),
+        ServiceKind::Standard => service
+            .routes
+            .iter()
+            .map(|r| r.path.clone())
+            .chain(service.challenge.iter().map(|c| c.path.clone()))
+            .collect(),
         ServiceKind::Realtime => service.realtime.iter().map(|r| r.path.clone()).collect(),
         ServiceKind::Mta => vec![],
     }
@@ -462,6 +467,8 @@ fn compose(project: &Project, mounts: &[String]) -> String {
     let name = stack_name(project);
     let mta = has(project, ServiceKind::Mta);
     let realtime = has(project, ServiceKind::Realtime);
+    // DragonflyDB: the real-time service reads its events there, and a shared rate limit counts there.
+    let store = project.uses_store();
     let garage = project.uses_garage();
     // Published on the loopback only: the stack is not meant to be reached from the network without the proxy.
     let admin_port = |container: &str| {
@@ -609,7 +616,7 @@ fn compose(project: &Project, mounts: &[String]) -> String {
             y.line(3, format!("- \"127.0.0.1:{port}:8025\""));
         }
     }
-    if realtime {
+    if store {
         y.line(1, "dragonfly:");
         y.line(2, "<<: *limits");
         y.line(2, "image: docker.dragonflydb.io/dragonflydb/dragonfly");
@@ -692,7 +699,9 @@ fn compose(project: &Project, mounts: &[String]) -> String {
         }
         let mut needs: Vec<&str> = match service.kind {
             ServiceKind::Realtime => vec!["dragonfly"],
-            ServiceKind::Standard if realtime => vec!["kafka", "postgres", "dragonfly"],
+            ServiceKind::Standard if service.uses_shared_limit() || realtime => {
+                vec!["kafka", "postgres", "dragonfly"]
+            }
             _ => vec!["kafka", "postgres"],
         };
         if stores {
@@ -782,7 +791,7 @@ fn environment(project: &Project, service: &Service) -> Vec<(String, String)> {
                     ));
                 }
             }
-            if has(project, ServiceKind::Realtime) {
+            if has(project, ServiceKind::Realtime) || service.uses_shared_limit() {
                 env.push(dragonfly);
             }
             // The object store: where the service reaches it, where a browser does, and the bucket of each variable
@@ -1636,6 +1645,16 @@ mod tests {
             routers.contains("(PathPrefix(`/auth/login`) || PathPrefix(`/auth/sessions`))"),
             "{routers}"
         );
+    }
+
+    #[test]
+    fn the_proxy_sends_the_path_of_a_challenge_to_the_service_that_hands_it_out() {
+        let mut p = sample::orders();
+        sample::add_challenge(&mut p);
+        assert!(public_paths(&p.services[0]).contains(&"/challenge".to_string()));
+        p.pods.traefik.enabled = true;
+        let routers = file(&files(&p), "traefik/dynamic/routers.yaml");
+        assert!(routers.contains("PathPrefix(`/challenge`)"), "{routers}");
     }
 
     #[test]

@@ -249,9 +249,156 @@ fn service(app: &mut App, ui: &mut Ui, name: &str) {
 
     rpcs(app, ui, &project, si);
     routes(app, ui, svc, &sname);
+    compression(app, ui, svc, &sname);
+    challenge(app, ui, svc, &sname);
     consumers(app, ui, &project, si);
     jobs(app, ui, svc, si);
     delete_service_button(app, ui, si);
+}
+
+/// Whether the answers of the HTTP API are compressed: a setting of the service, shown once it has routes.
+fn compression(app: &mut App, ui: &mut Ui, svc: &Service, sname: &str) {
+    if svc.routes.is_empty() {
+        return;
+    }
+    let current = svc.compression;
+    let set = section(
+        ui,
+        "Compression des réponses",
+        "publish",
+        |_| {},
+        |ui| {
+            field(
+                ui,
+                "Compresser",
+                "gzip, brotli ou zstd selon l’Accept-Encoding du client : le JSON de l’API en pèse une fraction. Les réponses de moins de 256 octets, les flux d’événements, le gRPC et les images ne le sont jamais.",
+                |ui| crate::widgets::check(ui, current, "Les réponses de l’API sont compressées"),
+            )
+        },
+    );
+    if let Some(on) = set {
+        let sname = sname.to_string();
+        app.edit(|p| {
+            if let Some(s) = svc_mut(p, &sname) {
+                s.compression = on;
+            }
+        });
+    }
+}
+
+/// The proof-of-work challenge the service hands out against the robots that fill in a form: where, signed with which key, how
+/// much work and for how long. The routes that ask for it have a « Vérifier un défi » block.
+fn challenge(app: &mut App, ui: &mut Ui, svc: &Service, sname: &str) {
+    separator(ui);
+    let current = svc.challenge.clone();
+    let (on, path, key_env, work, ttl) = section(
+        ui,
+        "Défi anti-robots",
+        "publish",
+        |_| {},
+        |ui| {
+            let on = field(
+                ui,
+                "Servir",
+                "Un défi de preuve de travail (ALTCHA) : le navigateur du visiteur calcule un instant, un robot le fait pour chaque formulaire qu’il envoie. Sans service tiers ni suivi. Les routes qui l’exigent ont un bloc « Vérifier un défi ».",
+                |ui| {
+                    crate::widgets::check(
+                        ui,
+                        current.is_some(),
+                        "Le service remet un défi à résoudre",
+                    )
+                },
+            );
+            let (mut path, mut key_env, mut work, mut ttl) = (None, None, None, None);
+            if let Some(c) = &current {
+                path = field(
+                    ui,
+                    "Route",
+                    "Chemin du défi (GET) sur le port HTTP du service. Ce n’est pas celui d’une route.",
+                    |ui| {
+                        commit_entry(
+                            ui,
+                            ("challenge-path", sname),
+                            &c.path,
+                            true,
+                            "/challenge",
+                            false,
+                        )
+                    },
+                );
+                key_env = field(
+                    ui,
+                    "Clé de signature",
+                    "Variable d’environnement qui porte la clé (16 caractères au moins), la même sur tous les réplicas. En production le service ne démarre pas sans elle.",
+                    |ui| {
+                        commit_entry(
+                            ui,
+                            ("challenge-key", sname),
+                            &c.key_env,
+                            true,
+                            "CHALLENGE_HMAC_KEY",
+                            false,
+                        )
+                    },
+                );
+                work = field(
+                    ui,
+                    "Travail demandé",
+                    "Le nombre secret est tiré entre 0 et cette valeur : le navigateur essaie la moitié d’entre eux en moyenne. 1 000 000 prend une à deux secondes.",
+                    |ui| {
+                        number(
+                            ui,
+                            ("challenge-work", sname),
+                            i64::from(c.max_number),
+                            1,
+                            i64::from(sb_model::MAX_CHALLENGE_NUMBER),
+                        )
+                    },
+                );
+                ttl = field(
+                    ui,
+                    "Validité (s)",
+                    "Combien de temps un défi peut être résolu puis envoyé (10 s à 24 h). Chaque défi n’est accepté qu’une fois.",
+                    |ui| {
+                        number(
+                            ui,
+                            ("challenge-ttl", sname),
+                            i64::from(c.ttl_secs),
+                            10,
+                            86_400,
+                        )
+                    },
+                );
+            }
+            (on, path, key_env, work, ttl)
+        },
+    );
+    let sname = sname.to_string();
+    if let Some(on) = on {
+        app.edit(|p| {
+            if let Some(s) = svc_mut(p, &sname) {
+                s.challenge = on.then(sb_model::ChallengeConfig::default);
+            }
+        });
+    }
+    if path.is_some() || key_env.is_some() || work.is_some() || ttl.is_some() {
+        app.edit(|p| {
+            if let Some(c) = svc_mut(p, &sname).and_then(|s| s.challenge.as_mut()) {
+                if let Some(v) = path {
+                    c.path = v;
+                }
+                if let Some(v) = key_env {
+                    c.key_env = v;
+                }
+                if let Some(v) = work {
+                    c.max_number = v.clamp(1, i64::from(sb_model::MAX_CHALLENGE_NUMBER)) as u32;
+                }
+                if let Some(v) = ttl {
+                    c.ttl_secs = v.clamp(10, 86_400) as u32;
+                }
+            }
+        });
+    }
 }
 
 fn delete_service_button(app: &mut App, ui: &mut Ui, si: usize) {

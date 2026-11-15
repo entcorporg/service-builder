@@ -165,9 +165,12 @@ mod tests {
                 "contracts/src/lib.rs",
                 "docker-compose.yml",
                 "runtime/Cargo.toml",
+                "runtime/src/api_key.rs",
+                "runtime/src/challenge.rs",
                 "runtime/src/crypto.rs",
                 "runtime/src/db.rs",
                 "runtime/src/dedup.rs",
+                "runtime/src/html.rs",
                 "runtime/src/http_client.rs",
                 "runtime/src/jobs.rs",
                 "runtime/src/jwt.rs",
@@ -175,9 +178,12 @@ mod tests {
                 "runtime/src/live.rs",
                 "runtime/src/logic.rs",
                 "runtime/src/outbox.rs",
+                "runtime/src/password.rs",
                 "runtime/src/rate_limit.rs",
+                "runtime/src/resilience.rs",
                 "runtime/src/s3.rs",
                 "runtime/src/totp.rs",
+                "runtime/src/usage.rs",
                 "runtime/src/validation.rs",
                 "runtime/src/webauthn.rs",
                 "runtime/src/webhook.rs",
@@ -1225,6 +1231,332 @@ mod tests {
     }
 
     #[test]
+    fn a_shared_rate_limit_counts_in_the_store_and_only_its_service_brings_the_client_in() {
+        let mut p = sample::orders();
+        let mut found = 0;
+        for step in &mut p.services[0].routes[0].steps {
+            if let sb_model::Step::RateLimit { shared, .. } = step {
+                *shared = true;
+                found += 1;
+            }
+        }
+        assert_eq!(found, 1, "the sample has one rate limit on its first route");
+        let files = generate(&p).unwrap();
+        let flat = file(&files, "services/orders/src/flows/api.rs");
+        assert!(
+            flat.contains(
+                "eda_runtime::rate_limit::check_shared(\"h8\", &(\"place_order\".to_string()), 100, 60).await?;"
+            ),
+            "{flat}"
+        );
+        assert!(!flat.contains("rate_limit::check(\"h8\""), "{flat}");
+        assert!(
+            file(&files, "services/orders/Cargo.toml").contains("features = [\"shared-limit\"]")
+        );
+        assert!(
+            file(&files, "services/orders/src/app/config.rs")
+                .contains("eda_runtime::rate_limit::check_config()?;")
+        );
+        assert!(file(&files, "runtime/Cargo.toml").contains("shared-limit = [\"dep:redis\"]"));
+        // The store is in the stack even though the project has no real-time service, and the service waits for it.
+        let compose = file(&files, "docker-compose.yml");
+        assert!(
+            compose.contains("dragonfly:") && compose.contains("6379:6379"),
+            "{compose}"
+        );
+        // Without the option: none of it.
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/Cargo.toml").contains("shared-limit"));
+        assert!(
+            !file(&plain, "services/orders/src/app/config.rs").contains("rate_limit::check_config")
+        );
+        assert!(!file(&plain, "docker-compose.yml").contains("dragonfly"));
+    }
+
+    #[test]
+    fn meters_and_quotas_keep_their_uses_in_the_database_of_the_service() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_usage(&mut p);
+        let files = generate(&p).unwrap();
+        let flat = file(&files, "services/orders/src/flows/api.rs").replace("\n", " ");
+        let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+        // The check holds a lock until the transaction ends, so it is in the run of the use that follows it.
+        let check = flat.find(
+            "let calls_left: i64 = eda_runtime::usage::check(&mut tx, \"api_calls\", &(claims.tid.clone()), 1000, 1_i64, eda_runtime::usage::Period::Month).await?;",
+        );
+        let meter = flat.find(
+            "eda_runtime::usage::meter(&mut tx, \"api_calls\", &(claims.tid.clone()), 1, None).await?;",
+        );
+        assert!(check.is_some() && meter.is_some(), "{flat}");
+        assert!(check < meter);
+        // The table, its indexes and the view are created with the schema, only in the service that meters.
+        let schema = file(&files, "services/orders/src/app/schema.rs");
+        for statement in [
+            "CREATE_EVENTS_TABLE",
+            "CREATE_EVENTS_INDEX",
+            "CREATE_EVENTS_UNIQUE",
+            "CREATE_DAILY_VIEW",
+        ] {
+            assert!(
+                schema.contains(&format!("eda_runtime::usage::{statement},")),
+                "{statement}"
+            );
+        }
+        assert!(file(&files, "runtime/src/lib.rs").contains("pub mod usage;"));
+        assert!(
+            file(&files, "runtime/src/usage.rs")
+                .contains("CREATE TABLE IF NOT EXISTS usage_events")
+        );
+        assert!(!file(&files, "services/payments/src/app/schema.rs").contains("usage"));
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/src/app/schema.rs").contains("usage"));
+        // The quota is one of the answers the document of the route lists.
+        let openapi = file(&files, "services/orders/openapi.json");
+        assert!(
+            openapi.contains("The quota is used up for the period"),
+            "{openapi}"
+        );
+    }
+
+    #[test]
+    fn a_challenge_is_handed_out_on_its_path_and_checked_first_by_the_route_that_asks_for_it() {
+        let mut p = sample::orders();
+        sample::add_challenge(&mut p);
+        let files = generate(&p).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        assert!(
+            http.contains(".route(\"/challenge\", get(challenge_document))"),
+            "{http}"
+        );
+        assert!(
+            http.contains("eda_runtime::challenge::issue(\"CHALLENGE_HMAC_KEY\", 1000000, 300)"),
+            "{http}"
+        );
+        // Never cached: each visitor gets their own.
+        assert!(
+            http.contains("(axum::http::header::CACHE_CONTROL, \"no-store\")"),
+            "{http}"
+        );
+        // The key is checked when the service starts; the solutions already accepted live in the database of the service.
+        assert!(
+            file(&files, "services/orders/src/app/config.rs")
+                .contains("eda_runtime::challenge::check_config(\"CHALLENGE_HMAC_KEY\")?;")
+        );
+        assert!(
+            file(&files, "services/orders/src/app/schema.rs")
+                .contains("eda_runtime::challenge::CREATE_USES_TABLE,")
+        );
+        // The route checks it before anything else.
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        let check = api
+            .find("eda_runtime::challenge::verify(&mut tx, \"CHALLENGE_HMAC_KEY\", 1000000, &(input.challenge.clone())).await?;")
+            .unwrap_or_else(|| panic!("{api}"));
+        let fn_start = api.find("pub async fn contact(").unwrap();
+        let first_step = api[fn_start..].find("eda_runtime::").unwrap() + fn_start;
+        assert!(
+            first_step <= check,
+            "nothing but the transaction comes before the check"
+        );
+        // The document of the service tells the front where the challenge is, and the proxy sends the path to the service.
+        let openapi = file(&files, "services/orders/openapi.json");
+        assert!(
+            openapi.contains("\"/challenge\"") && openapi.contains("\"maxnumber\""),
+            "{openapi}"
+        );
+        assert!(
+            openapi.contains("The challenge is missing, wrong, expired or already used"),
+            "{openapi}"
+        );
+        assert!(file(&files, "runtime/src/lib.rs").contains("pub mod challenge;"));
+        // A service that has none: none of it.
+        let plain = generate(&sample::orders()).unwrap();
+        let http = file(&plain, "services/orders/src/transport/http.rs");
+        assert!(!http.contains("challenge"), "{http}");
+        assert!(!file(&plain, "services/orders/src/app/schema.rs").contains("challenge"));
+        assert!(!file(&plain, "services/orders/src/app/config.rs").contains("challenge"));
+        assert!(!file(&plain, "services/orders/openapi.json").contains("challenge"));
+    }
+
+    #[test]
+    fn a_password_is_judged_before_it_is_hashed_and_only_its_service_brings_the_estimator_in() {
+        let mut p = sample::orders();
+        sample::add_signup(&mut p);
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs").replace('\n', " ");
+        let api = api.split_whitespace().collect::<Vec<_>>().join(" ");
+        let judge = api
+            .find("eda_runtime::password::check(&(input.password.clone()), &[(input.email.clone()).as_str()], 3, true).await?;")
+            .unwrap_or_else(|| panic!("{api}"));
+        let hash = api.find("eda_runtime::crypto::hash_password").unwrap();
+        assert!(judge < hash, "the password is judged before it is hashed");
+        assert!(file(&files, "services/orders/Cargo.toml").contains("\"password-strength\""));
+        assert!(
+            file(&files, "runtime/Cargo.toml")
+                .contains("password-strength = [\"dep:zxcvbn\", \"dep:reqwest\"]")
+        );
+        assert!(
+            file(&files, "runtime/src/lib.rs")
+                .contains("#[cfg(feature = \"password-strength\")]\npub mod password;")
+        );
+        assert!(file(&files, "Cargo.toml").contains("zxcvbn = \"3\""));
+        let openapi = file(&files, "services/orders/openapi.json");
+        assert!(
+            openapi.contains("The password is too easy to guess"),
+            "{openapi}"
+        );
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/Cargo.toml").contains("password-strength"));
+    }
+
+    #[test]
+    fn api_keys_are_issued_checked_and_revoked_in_the_transaction_of_the_handler() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_api_keys(&mut p);
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs").replace('\n', " ");
+        let api = api.split_whitespace().collect::<Vec<_>>().join(" ");
+        for expected in [
+            "let (api_key, api_key_id): (String, String) = { let created = eda_runtime::api_key::create(&mut tx, &(claims.tid.clone()), &(input.name.clone()), &[\"orders:read\"], None).await?; (created.key, created.key_id) };",
+            "eda_runtime::api_key::revoke(&mut tx, &(input.key_id.clone()), Some((claims.tid.clone()).as_str())).await?;",
+            "let owner: String = eda_runtime::api_key::verify(&mut tx, &(input.api_key.clone()), Some(\"orders:read\")).await?.owner;",
+        ] {
+            assert!(api.contains(expected), "{expected}\n{api}");
+        }
+        // The table (only its hash of each secret) is created with the schema, only in the service that has the steps.
+        let schema = file(&files, "services/orders/src/app/schema.rs");
+        assert!(
+            schema.contains("eda_runtime::api_key::CREATE_TABLE,")
+                && schema.contains("eda_runtime::api_key::CREATE_OWNER_INDEX,")
+        );
+        assert!(!file(&files, "services/payments/src/app/schema.rs").contains("api_key"));
+        assert!(file(&files, "runtime/src/lib.rs").contains("pub mod api_key;"));
+        // The document says what a client may be answered.
+        let openapi = file(&files, "services/orders/openapi.json");
+        for answer in [
+            "The API key is missing or not valid",
+            "The API key is not allowed to do this",
+            "No such API key",
+        ] {
+            assert!(openapi.contains(answer), "{answer}");
+        }
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/src/app/schema.rs").contains("api_key"));
+    }
+
+    #[test]
+    fn a_service_that_asks_for_it_compresses_its_answers_and_only_it_builds_the_codecs() {
+        let mut p = sample::orders();
+        p.services[0].compression = true;
+        let files = generate(&p).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        assert!(
+            http.contains("use tower_http::compression::{")
+                && http.contains("CompressionLayer,")
+                && http.contains("predicate::{DefaultPredicate, Predicate, SizeAbove},"),
+            "{http}"
+        );
+        // After the CORS layer (so that its headers are on the compressed answer), and not for small answers.
+        let cors = http.find(".layer(cors(config))").unwrap();
+        let compression = http
+            .find(".layer(CompressionLayer::new().compress_when(DefaultPredicate::new().and(SizeAbove::new(256))))")
+            .unwrap_or_else(|| panic!("{http}"));
+        assert!(cors < compression);
+        assert!(
+            file(&files, "services/orders/Cargo.toml")
+                .contains("tower-http = { workspace = true, features = [\"compression-full\"] }")
+        );
+        // The other services do not pay for the codecs, and a project that asks for nothing writes nothing of it.
+        assert!(!file(&files, "services/payments/Cargo.toml").contains("compression"));
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/src/transport/http.rs").contains("ompression"));
+        assert!(!file(&plain, "services/orders/Cargo.toml").contains("compression"));
+    }
+
+    #[test]
+    fn an_html_text_is_cleaned_by_the_runtime_and_only_the_service_that_does_it_builds_the_parser()
+    {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_notes(&mut p);
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        assert!(
+            api.contains("eda_runtime::html::sanitize(&(input.body.clone()))"),
+            "{api}"
+        );
+        assert!(file(&files, "services/orders/Cargo.toml").contains("\"html\""));
+        assert!(file(&files, "runtime/Cargo.toml").contains("html = [\"dep:ammonia\"]"));
+        assert!(
+            file(&files, "runtime/src/lib.rs")
+                .contains("#[cfg(feature = \"html\")]\npub mod html;")
+        );
+        assert!(file(&files, "Cargo.toml").contains("ammonia = \"4\""));
+        assert!(!file(&files, "services/payments/Cargo.toml").contains("html"));
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/Cargo.toml").contains("\"html\""));
+    }
+
+    #[test]
+    fn a_call_through_a_circuit_names_its_policy_and_one_without_is_left_as_it_was() {
+        let files = generate(&sample::showcase()).unwrap();
+        let flat = |path: &str| {
+            file(&files, path)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        // httpCall: the policy is a field of the call, with the dependency the address in the environment names.
+        let api = flat("services/orders/src/flows/api.rs");
+        assert!(
+            api.contains("resilience: eda_runtime::resilience::Policy { circuit: Some(eda_runtime::resilience::Circuit { failures: 5, window_secs: 30, open_secs: 30 }), max_concurrent: Some(20) },"),
+            "{api}"
+        );
+        assert!(
+            api.contains("resilience: eda_runtime::resilience::Policy { circuit: Some(eda_runtime::resilience::Circuit { failures: 3, window_secs: 60, open_secs: 20 }), max_concurrent: None },"),
+            "{api}"
+        );
+        // callRpc: through the circuit of the service called, a refusal a 503, and the verdict from what the service answered.
+        let consumers = flat("services/notifications/src/flows/consumers.rs");
+        let rpc = consumers
+            .find("eda_runtime::resilience::enter(eda_runtime::resilience::Policy { circuit: Some(eda_runtime::resilience::Circuit { failures: 5, window_secs: 30, open_secs: 30 }), max_concurrent: None }, \"Orders\", \"n2\")?;")
+            .unwrap_or_else(|| panic!("{consumers}"));
+        let verdict = consumers
+            .find("tonic::Code::Unavailable | tonic::Code::DeadlineExceeded")
+            .unwrap();
+        assert!(rpc < verdict);
+        assert!(
+            consumers.contains("__result }?.into_inner()"),
+            "{consumers}"
+        );
+        // Without the options, the call is the plain one: nothing of the policy is written.
+        let mut bare = sample::orders();
+        for step in bare
+            .services
+            .iter_mut()
+            .flat_map(|s| s.consumers.iter_mut())
+            .flat_map(|c| c.steps.iter_mut())
+        {
+            if let sb_model::Step::CallRpc {
+                circuit,
+                max_concurrent,
+                ..
+            } = step
+            {
+                (*circuit, *max_concurrent) = (None, None);
+            }
+        }
+        let plain = generate(&bare).unwrap();
+        let consumers = file(&plain, "services/notifications/src/flows/consumers.rs");
+        assert!(
+            consumers.contains(".await?.into_inner()") && !consumers.contains("resilience"),
+            "{consumers}"
+        );
+        assert!(!file(&plain, "services/orders/src/flows/api.rs").contains("resilience: "));
+    }
+
+    #[test]
     fn objects_are_stored_in_a_bucket_of_the_environment_and_images_get_room_in_the_body() {
         let mut p = sample::orders();
         sample::add_jwt(&mut p);
@@ -1380,7 +1712,7 @@ mod tests {
         // Insert: the tenant is written with the row, from the variable the handler bound. Nothing in the steps says so.
         assert!(
             flat.contains("INSERT INTO \\\"notes\\\" (\\\"note_id\\\", \\\"body\\\", \\\"tenant_id\\\") VALUES ($1, $2, $3)")
-                && flat.contains(".bind(note_id.clone()).bind(input.body.clone()).bind(tenant_id.clone())"),
+                && flat.contains(".bind(note_id.clone()).bind(eda_runtime::html::sanitize(&(input.body.clone()))).bind(tenant_id.clone())"),
             "{flat}"
         );
         // Select: the tenant, and only the rows that were not deleted.
@@ -2029,7 +2361,16 @@ mod tests {
         let http = file(&files, "services/orders/src/transport/http.rs");
         assert!(http.contains(".route(\"/docs/api.json\", get(openapi_document))"));
         assert!(http.contains("include_str!(\"../../openapi.json\")"));
-        assert!(http.contains("routing::{get"), "{}", &http[..600]);
+        let routing = http
+            .lines()
+            .find(|l| l.contains("routing::{"))
+            .expect("the routing import");
+        assert!(
+            routing
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|w| w == "get"),
+            "{routing}"
+        );
     }
 
     #[test]

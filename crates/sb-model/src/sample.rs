@@ -202,6 +202,8 @@ pub fn orders() -> Project {
         kind: ServiceKind::Standard,
         templates: vec![],
         realtime: None,
+        challenge: None,
+        compression: false,
         rpcs: vec![
             Rpc {
                 name: "CreateOrder".into(),
@@ -282,6 +284,7 @@ pub fn orders() -> Project {
                         key: lit("place_order"),
                         max: 100,
                         window_secs: 60,
+                        shared: false,
                     },
                     Step::Branch {
                         id: "h0".into(),
@@ -429,6 +432,8 @@ pub fn orders() -> Project {
         kind: ServiceKind::Standard,
         templates: vec![],
         realtime: None,
+        challenge: None,
+        compression: false,
         rpcs: vec![],
         http_port: None,
         routes: vec![],
@@ -486,6 +491,8 @@ pub fn orders() -> Project {
         kind: ServiceKind::Standard,
         templates: vec![],
         realtime: None,
+        challenge: None,
+        compression: false,
         rpcs: vec![],
         http_port: None,
         routes: vec![],
@@ -520,6 +527,9 @@ pub fn orders() -> Project {
                             set("reason", path("input.reason")),
                         ],
                         bind: Some("cancelled".into()),
+                        // Orders is asked to cancel; while it fails, the event waits (and is retried) instead of piling calls on it.
+                        circuit: Some(CircuitConfig::default()),
+                        max_concurrent: None,
                     },
                     Step::Log {
                         id: "n3".into(),
@@ -809,6 +819,15 @@ pub fn add_signup(p: &mut Project) {
         response: "SignupAck".into(),
         status: 201,
         steps: vec![
+            // Before the hash: a password that a dictionary or a breach already knows is not worth hashing.
+            Step::PasswordStrength {
+                id: "s0".into(),
+                password: path("input.password"),
+                min_score: DEFAULT_MIN_PASSWORD_SCORE,
+                inputs: vec![path("input.email")],
+                refuse_breached: true,
+                bind: None,
+            },
             Step::HashPassword {
                 id: "s1".into(),
                 input: path("input.password"),
@@ -817,6 +836,46 @@ pub fn add_signup(p: &mut Project) {
             Step::Respond {
                 id: "s2".into(),
                 fields: vec![set("email", path("input.email"))],
+                status: None,
+                cookies: vec![],
+                headers: vec![],
+            },
+        ],
+    });
+}
+
+/// Adds to the first service a proof-of-work challenge (`GET /challenge`) and a contact form that checks it before it reads
+/// anything else: the visitor's browser computes for a moment, a robot does the same for every form it sends. The solution
+/// comes with the form, in its `challenge` field.
+pub fn add_challenge(p: &mut Project) {
+    let string = || FieldType::String;
+    let mut email = field("email", string());
+    email.rules = vec![Rule::Email];
+    let mut text = field("message", string());
+    text.rules = vec![Rule::Length { min: 1, max: 2000 }];
+    p.messages.push(api(
+        "ContactBody",
+        vec![email, text, field("challenge", string())],
+    ));
+    p.messages
+        .push(api("ContactAck", vec![field("received", FieldType::Bool)]));
+    p.services[0].challenge = Some(ChallengeConfig::default());
+    p.services[0].routes.push(Route {
+        name: "contact".into(),
+        method: HttpMethod::Post,
+        path: "/contact".into(),
+        request: "ContactBody".into(),
+        response: "ContactAck".into(),
+        status: 202,
+        steps: vec![
+            // First: nothing is read, nothing is stored, until a browser has spent its moment.
+            Step::VerifyChallenge {
+                id: "c1".into(),
+                payload: path("input.challenge"),
+            },
+            Step::Respond {
+                id: "c2".into(),
+                fields: vec![set("received", lit(true))],
                 status: None,
                 cookies: vec![],
                 headers: vec![],
@@ -883,6 +942,7 @@ pub fn showcase() -> Project {
     add_stripe_webhook(&mut p);
     add_sealed_text(&mut p);
     add_signup(&mut p);
+    add_challenge(&mut p);
     add_login(&mut p);
     add_jwt(&mut p);
     add_shipments(&mut p);
@@ -890,6 +950,8 @@ pub fn showcase() -> Project {
     add_passkeys(&mut p);
     add_avatars(&mut p);
     add_notes(&mut p);
+    add_usage(&mut p);
+    add_api_keys(&mut p);
     add_sql_reads(&mut p);
     add_mailer(&mut p);
     add_mail_design(&mut p);
@@ -898,6 +960,8 @@ pub fn showcase() -> Project {
     add_schema_changes(&mut p);
     add_receipts(&mut p);
     add_http_calls(&mut p);
+    // The JSON of the API goes out compressed to the clients that accept it.
+    p.services[0].compression = true;
     p
 }
 
@@ -955,11 +1019,13 @@ pub fn add_login(p: &mut Project) {
         response: "LoginAck".into(),
         status: 200,
         steps: vec![
+            // The attempts are counted for all the replicas: a guesser must not get five tries per instance.
             Step::RateLimit {
                 id: "g1".into(),
                 key: path("input.email"),
                 max: 5,
                 window_secs: 900,
+                shared: true,
             },
             // None for an unknown account: the check below then runs against a dummy hash.
             Step::Let {
@@ -1323,6 +1389,7 @@ pub fn add_totp(p: &mut Project) {
                 key: path("input.account"),
                 max: 5,
                 window_secs: 900,
+                shared: false,
             },
             // An account that never enrolled gets the answer of a wrong code.
             sql("f6", SqlOp::Select, &["secret_sealed"], vec![], refused()),
@@ -1347,6 +1414,7 @@ pub fn add_totp(p: &mut Project) {
                 key: path("input.account"),
                 max: 5,
                 window_secs: 900,
+                shared: false,
             },
             Step::RecoveryCodeUse {
                 id: "f10".into(),
@@ -1486,6 +1554,7 @@ pub fn add_passkeys(p: &mut Project) {
                 key: path("input.account"),
                 max: 10,
                 window_secs: 900,
+                shared: false,
             },
             Step::PasskeyLoginStart {
                 id: "p8".into(),
@@ -1541,6 +1610,7 @@ pub fn add_passkeys(p: &mut Project) {
                 key: path("input.client"),
                 max: 30,
                 window_secs: 900,
+                shared: false,
             },
             Step::PasskeyLoginStart {
                 id: "p14".into(),
@@ -1741,6 +1811,192 @@ pub fn add_avatars(p: &mut Project) {
     routes.push(download);
 }
 
+/// API keys for a client that is a machine. A company, signed in with a token (the `tid` claim), issues keys scoped to what a
+/// robot may do and revokes its own; the robot calls a route with `X-API-Key` and is answered for the company the key belongs to.
+/// Needs [`add_jwt`], whose `AccessClaims` and signing key it uses.
+pub fn add_api_keys(p: &mut Project) {
+    let string = || FieldType::String;
+    let header = |name: &str, header: &str| {
+        let mut f = field(name, string());
+        f.lenient = true; // the flow answers 401 itself
+        f.source = Some(RequestSource::Header {
+            name: header.into(),
+        });
+        f
+    };
+    p.messages.push(api(
+        "ApiKeyIssue",
+        vec![header("token", "Authorization"), field("name", string())],
+    ));
+    p.messages.push(api(
+        "ApiKeyIssued",
+        vec![field("key", string()), field("key_id", string())],
+    ));
+    p.messages.push(api(
+        "ApiKeyRevocation",
+        vec![header("token", "Authorization"), field("key_id", string())],
+    ));
+    p.messages.push(api(
+        "ApiKeyRevoked",
+        vec![field("revoked", FieldType::Bool)],
+    ));
+    p.messages
+        .push(api("MachineCall", vec![header("api_key", "X-API-Key")]));
+    p.messages
+        .push(api("MachineAnswer", vec![field("owner", string())]));
+    let verify_jwt = |id: &str| Step::VerifyJwt {
+        id: id.into(),
+        token: path("input.token"),
+        bearer: true,
+        source: JwksSource::Keys {
+            key_envs: vec!["JWT_SIGNING_KEY".into()],
+        },
+        issuer: "orders".into(),
+        schema: "AccessClaims".into(),
+        bind: "claims".into(),
+    };
+    let routes = &mut p.services[0].routes;
+    routes.push(Route {
+        name: "issue_api_key".into(),
+        method: HttpMethod::Post,
+        path: "/tenant/api-keys".into(),
+        request: "ApiKeyIssue".into(),
+        response: "ApiKeyIssued".into(),
+        status: 201,
+        steps: vec![
+            verify_jwt("k1"),
+            // The key is in the answer and nowhere else: only its hash is kept.
+            Step::ApiKeyCreate {
+                id: "k2".into(),
+                owner: path("claims.tid"),
+                name: path("input.name"),
+                scopes: vec!["orders:read".into()],
+                expires_in_secs: None,
+                bind: "api_key".into(),
+                key_id_bind: Some("api_key_id".into()),
+            },
+            Step::Respond {
+                id: "k3".into(),
+                fields: vec![
+                    set("key", path("api_key")),
+                    set("key_id", path("api_key_id")),
+                ],
+                status: None,
+                cookies: vec![],
+                headers: vec![],
+            },
+        ],
+    });
+    routes.push(Route {
+        name: "revoke_api_key".into(),
+        method: HttpMethod::Delete,
+        path: "/tenant/api-keys/{key_id}".into(),
+        request: "ApiKeyRevocation".into(),
+        response: "ApiKeyRevoked".into(),
+        status: 200,
+        steps: vec![
+            verify_jwt("k4"),
+            // A company revokes its own keys and no one else's.
+            Step::ApiKeyRevoke {
+                id: "k5".into(),
+                key_id: path("input.key_id"),
+                owner: Some(path("claims.tid")),
+            },
+            Step::Respond {
+                id: "k6".into(),
+                fields: vec![set("revoked", lit(true))],
+                status: None,
+                cookies: vec![],
+                headers: vec![],
+            },
+        ],
+    });
+    routes.push(Route {
+        name: "machine_orders".into(),
+        method: HttpMethod::Get,
+        path: "/machine/orders".into(),
+        request: "MachineCall".into(),
+        response: "MachineAnswer".into(),
+        status: 200,
+        steps: vec![
+            Step::ApiKeyVerify {
+                id: "k7".into(),
+                key: path("input.api_key"),
+                scope: Some("orders:read".into()),
+                bind: "owner".into(),
+                key_id_bind: None,
+            },
+            Step::Respond {
+                id: "k8".into(),
+                fields: vec![set("owner", path("owner"))],
+                status: None,
+                cookies: vec![],
+                headers: vec![],
+            },
+        ],
+    });
+}
+
+/// A metered route: a company gets a thousand calls a month, whatever the number of replicas or of simultaneous requests. The
+/// check and the use are in the same run, so two calls of the company cannot both take the last one, and what is left after the
+/// call is answered. Needs [`add_jwt`], whose `AccessClaims` and signing key it uses.
+pub fn add_usage(p: &mut Project) {
+    let mut token = field("token", FieldType::String);
+    token.lenient = true; // the flow answers 401 itself
+    token.source = Some(RequestSource::Header {
+        name: "Authorization".into(),
+    });
+    p.messages.push(api("UsageRequest", vec![token]));
+    p.messages.push(api(
+        "UsageView",
+        vec![field("calls_left", FieldType::Int64)],
+    ));
+    p.services[0].routes.push(Route {
+        name: "usage_report".into(),
+        method: HttpMethod::Get,
+        path: "/tenant/usage".into(),
+        request: "UsageRequest".into(),
+        response: "UsageView".into(),
+        status: 200,
+        steps: vec![
+            Step::VerifyJwt {
+                id: "u1".into(),
+                token: path("input.token"),
+                bearer: true,
+                source: JwksSource::Keys {
+                    key_envs: vec!["JWT_SIGNING_KEY".into()],
+                },
+                issuer: "orders".into(),
+                schema: "AccessClaims".into(),
+                bind: "claims".into(),
+            },
+            Step::CheckQuota {
+                id: "u2".into(),
+                key: "api_calls".into(),
+                tenant: path("claims.tid"),
+                limit: lit(1000),
+                period: UsagePeriod::Month,
+                wanted: None,
+                bind: Some("calls_left".into()),
+            },
+            Step::Meter {
+                id: "u3".into(),
+                key: "api_calls".into(),
+                tenant: path("claims.tid"),
+                amount: lit(1),
+                idempotency_key: None,
+            },
+            Step::Respond {
+                id: "u4".into(),
+                fields: vec![set("calls_left", path("calls_left"))],
+                status: None,
+                cookies: vec![],
+                headers: vec![],
+            },
+        ],
+    });
+}
+
 /// Adds to the first service notes that belong to a tenant and are never really deleted: the table is filtered by its
 /// tenant column and keeps its deleted rows (`softDelete`), so the steps below name neither `tenant_id` nor `deleted_at`.
 /// The tenant is the `tid` claim of the verified token, bound to the variable `tenant_id` that the table leans on. It needs
@@ -1884,6 +2140,7 @@ pub fn add_notes(p: &mut Project) {
             repeated: false,
             value: new_uuid(),
         },
+        // The body is rich text: what is stored (and answered) has lost its scripts and its event attributes.
         sql(
             "n5",
             SqlOp::Insert,
@@ -1891,7 +2148,7 @@ pub fn add_notes(p: &mut Project) {
             vec![],
             vec![
                 set("note_id", path("note_id")),
-                set("body", path("input.body")),
+                set("body", call(Func::SanitizeHtml, vec![path("input.body")])),
             ],
             None,
         ),
@@ -1899,7 +2156,7 @@ pub fn add_notes(p: &mut Project) {
             id: "n6".into(),
             fields: vec![
                 set("note_id", path("note_id")),
-                set("body", path("input.body")),
+                set("body", call(Func::SanitizeHtml, vec![path("input.body")])),
             ],
             status: None,
             cookies: vec![],
@@ -2261,6 +2518,8 @@ pub fn add_mailer(p: &mut Project) {
             design: None,
         }],
         realtime: None,
+        challenge: None,
+        compression: false,
     });
 }
 
@@ -2322,6 +2581,8 @@ pub fn add_realtime(p: &mut Project) {
         kind: ServiceKind::Realtime,
         templates: vec![],
         realtime: Some(RealtimeConfig::default()),
+        challenge: None,
+        compression: false,
     });
 }
 
@@ -2749,6 +3010,9 @@ pub fn add_http_calls(p: &mut Project) {
                 on_error: HttpOnError::Fail,
                 error_status: 502,
                 error_message: "the payment provider did not accept the payment".into(),
+                // Five failures in thirty seconds cut the calls for thirty seconds; twenty payments at a time at most.
+                circuit: Some(CircuitConfig::default()),
+                max_concurrent: Some(20),
             },
             Step::Respond {
                 id: "i2".into(),
@@ -2797,6 +3061,13 @@ pub fn add_http_calls(p: &mut Project) {
                 on_error: HttpOnError::Continue,
                 error_status: 502,
                 error_message: "the SMS provider did not answer correctly".into(),
+                // An open circuit is a call nobody answered (status 0): the branch below answers a 502 at once.
+                circuit: Some(CircuitConfig {
+                    failures: 3,
+                    window_secs: 60,
+                    open_secs: 20,
+                }),
+                max_concurrent: None,
             },
             Step::Branch {
                 id: "s2".into(),

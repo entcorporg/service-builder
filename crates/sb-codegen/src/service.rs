@@ -177,6 +177,15 @@ fn cargo_toml(service: &Service) -> String {
     } else {
         "axum.workspace = true\ntower-http.workspace = true\nserde_json.workspace = true\n"
     };
+    // Compression brings the codecs in (gzip, brotli, zstd): only the services that ask for it build them.
+    let http = if service.compression && !service.routes.is_empty() {
+        http.replace(
+            "tower-http.workspace = true\n",
+            "tower-http = { workspace = true, features = [\"compression-full\"] }\n",
+        )
+    } else {
+        http.to_string()
+    };
     // Passkeys bring OpenSSL in and object storage the AWS SDK: only the services that use them build them.
     let mut features = vec![];
     if uses_passkeys(service) {
@@ -190,6 +199,15 @@ fn cargo_toml(service: &Service) -> String {
     }
     if uses_live(service) {
         features.push("\"live\"");
+    }
+    if service.uses_shared_limit() {
+        features.push("\"shared-limit\"");
+    }
+    if service.uses_password_strength() {
+        features.push("\"password-strength\"");
+    }
+    if service.uses_html_sanitizer() {
+        features.push("\"html\"");
     }
     let passkeys = if features.is_empty() {
         String::new()
@@ -393,6 +411,17 @@ fn config_rs(project: &Project, service: &Service, publishes: bool) -> String {
     if uses_live(service) {
         c.line("// The events for the browsers go through DragonflyDB: in production the service must know where it is.");
         c.line("eda_runtime::live::check_config()?;");
+    }
+    if let Some(cfg) = &service.challenge {
+        c.line("// The challenges are signed with a key every replica shares: in production the service must have it.");
+        c.line(format!(
+            "eda_runtime::challenge::check_config({:?})?;",
+            cfg.key_env
+        ));
+    }
+    if service.uses_shared_limit() {
+        c.line("// The rate limits counted for all the replicas go through DragonflyDB: in production the service must know where it is.");
+        c.line("eda_runtime::rate_limit::check_config()?;");
     }
     let buckets = bucket_envs(service);
     if !buckets.is_empty() {
@@ -666,6 +695,26 @@ fn schema_rs(service: &Service) -> String {
         c.line("eda_runtime::webauthn::ADD_STATES_ORIGIN,");
         c.line("eda_runtime::webauthn::CREATE_CREDENTIALS_TABLE,");
         c.line("eda_runtime::webauthn::CREATE_CREDENTIALS_INDEX,");
+    }
+    if service.uses_api_keys() {
+        // The keys issued to the clients that are machines: only the hash of each secret.
+        c.line("eda_runtime::api_key::CREATE_TABLE,");
+        c.line("eda_runtime::api_key::CREATE_OWNER_INDEX,");
+    }
+    if service.uses_challenge_check() {
+        // The solutions already accepted: a solution is worth one form, for every replica.
+        c.line("eda_runtime::challenge::CREATE_USES_TABLE,");
+    }
+    if service.uses_usage() {
+        // The uses metered and checked against quotas, and the view that adds them up per day.
+        for statement in [
+            "CREATE_EVENTS_TABLE",
+            "CREATE_EVENTS_INDEX",
+            "CREATE_EVENTS_UNIQUE",
+            "CREATE_DAILY_VIEW",
+        ] {
+            c.line(format!("eda_runtime::usage::{statement},"));
+        }
     }
     if replay {
         c.line("eda_runtime::totp::CREATE_STEPS_TABLE,");
@@ -1001,7 +1050,7 @@ fn http_rs(project: &Project, service: &Service) -> String {
     // Only the first method of a path is a free function; the others chain on the `MethodRouter`.
     let mut verbs: Vec<String> = paths.iter().map(|(_, rs)| verb(rs[0].method)).collect();
     let serves_openapi = project.openapi.serve;
-    if serves_openapi {
+    if serves_openapi || service.challenge.is_some() {
         verbs.push("get".into());
     }
     verbs.sort();
@@ -1061,6 +1110,12 @@ fn http_rs(project: &Project, service: &Service) -> String {
     c.line(format!("    routing::{{{}}},", verbs.join(", ")));
     c.line("};");
     c.line("use contracts::pb;");
+    if service.compression {
+        c.line("use tower_http::compression::{");
+        c.line("    CompressionLayer,");
+        c.line("    predicate::{DefaultPredicate, Predicate, SizeAbove},");
+        c.line("};");
+    }
     c.line("use tower_http::cors::{Any, CorsLayer};");
     c.blank();
     c.line("use crate::{");
@@ -1103,7 +1158,17 @@ fn http_rs(project: &Project, service: &Service) -> String {
             project.openapi.path
         ));
     }
+    if let Some(cfg) = &service.challenge {
+        c.line(format!(
+            "    .route({:?}, get(challenge_document))",
+            cfg.path
+        ));
+    }
     c.line("    .layer(cors(config))");
+    if service.compression {
+        // The default predicate leaves out event streams, gRPC and images; a small answer is not worth the header it costs.
+        c.line("    .layer(CompressionLayer::new().compress_when(DefaultPredicate::new().and(SizeAbove::new(256))))");
+    }
     c.line("    .with_state(ctx);");
     c.line("let listener = tokio::net::TcpListener::bind((\"0.0.0.0\", config.http_port)).await?;");
     c.line(format!(
@@ -1136,6 +1201,24 @@ fn http_rs(project: &Project, service: &Service) -> String {
         c.blank();
         c.open("async fn openapi_document() -> impl IntoResponse");
         c.line("([(axum::http::header::CONTENT_TYPE, \"application/json\")], OPENAPI)");
+        c.close();
+    }
+
+    if let Some(cfg) = &service.challenge {
+        c.blank();
+        c.line("/// A new proof-of-work challenge for the form that comes next (see `eda_runtime::challenge`). Never cached: each visitor gets");
+        c.line("/// their own, and one is accepted once.");
+        c.open("async fn challenge_document() -> Response");
+        c.line(format!(
+            "match eda_runtime::challenge::issue({:?}, {}, {}) {{",
+            cfg.key_env, cfg.max_number, cfg.ttl_secs
+        ));
+        c.line("    Ok(challenge) => ([(axum::http::header::CACHE_CONTROL, \"no-store\")], Json(challenge)).into_response(),");
+        c.line("    Err(error) => {");
+        c.line("        tracing::error!(%error, \"cannot make a challenge\");");
+        c.line("        StatusCode::INTERNAL_SERVER_ERROR.into_response()");
+        c.line("    }");
+        c.line("}");
         c.close();
     }
 
@@ -2214,11 +2297,13 @@ fn steps(
                 c.line("});");
             }
             Step::CallRpc {
+                id,
                 service,
                 method,
                 request,
                 bind,
-                ..
+                circuit,
+                max_concurrent,
             } => {
                 let target = project.service(service).ok_or_else(|| {
                     CodegenError::Internal(format!("unknown service `{service}`"))
@@ -2227,11 +2312,27 @@ fn steps(
                     .rpc(method)
                     .ok_or_else(|| CodegenError::Internal(format!("unknown RPC `{method}`")))?;
                 let literal = struct_literal(project, scope, &rpc.request, request)?;
-                let call = format!(
-                    "ctx.{}.clone().{}({literal}).await?.into_inner()",
-                    snake(service),
-                    snake(method)
-                );
+                let call = if circuit.is_none() && max_concurrent.is_none() {
+                    format!(
+                        "ctx.{}.clone().{}({literal}).await?.into_inner()",
+                        snake(service),
+                        snake(method)
+                    )
+                } else {
+                    // Through the circuit and the bulkhead: a call they refuse is a 503 (`?`), and what the service answered says
+                    // whether it is unwell: not a refusal of the request (`invalid argument`, `not found`...), but no answer, a
+                    // timeout or an error of its own.
+                    format!(
+                        "{{ let __guard = eda_runtime::resilience::enter({}, {service:?}, {id:?})?; \
+                         let __result = ctx.{}.clone().{}({literal}).await; \
+                         __guard.finish(!matches!(&__result, Err(status) if matches!(status.code(), \
+                         tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Internal | tonic::Code::Unknown | tonic::Code::ResourceExhausted))); \
+                         __result }}?.into_inner()",
+                        resilience_policy(circuit, max_concurrent),
+                        snake(service),
+                        snake(method)
+                    )
+                };
                 match bind {
                     Some(var) => {
                         c.line(format!("let {var} = {call};"));
@@ -2344,12 +2445,188 @@ fn steps(
                 key,
                 max,
                 window_secs,
-                ..
+                shared,
             } => {
                 let key = lower(project, scope, key, &TypeRef::scalar(FieldType::String))?;
+                if *shared {
+                    // Counted in the key-value server, so that every replica sees the same attempts; in memory if it is down.
+                    c.line(format!(
+                        "eda_runtime::rate_limit::check_shared({id:?}, &({key}), {max}, {window_secs}).await?;"
+                    ));
+                } else {
+                    c.line(format!(
+                        "eda_runtime::rate_limit::check({id:?}, &({key}), {max}, {window_secs})?;"
+                    ));
+                }
+            }
+            Step::ApiKeyCreate {
+                owner,
+                name,
+                scopes,
+                expires_in_secs,
+                bind,
+                key_id_bind,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let owner = lower(project, scope, owner, &text)?;
+                let name = lower(project, scope, name, &text)?;
+                let scopes: Vec<String> = scopes.iter().map(|s| format!("{s:?}")).collect();
+                let expires = match expires_in_secs {
+                    Some(seconds) => format!(
+                        "Some({})",
+                        lower(project, scope, seconds, &TypeRef::scalar(FieldType::Int64))?
+                    ),
+                    None => "None".to_string(),
+                };
+                let call = format!(
+                    "eda_runtime::api_key::create(&mut tx, &({owner}), &({name}), &[{}], {expires}).await?",
+                    scopes.join(", ")
+                );
+                match key_id_bind {
+                    // The key is shown once: it is only what `bind` holds, and what the client is answered.
+                    Some(kid) => c.line(format!(
+                        "let ({bind}, {kid}): (String, String) = {{ let created = {call}; (created.key, created.key_id) }};"
+                    )),
+                    None => c.line(format!("let {bind}: String = {call}.key;")),
+                };
+                scope.bind(bind.clone(), text.clone());
+                if let Some(kid) = key_id_bind {
+                    scope.bind(kid.clone(), text);
+                }
+            }
+            Step::ApiKeyVerify {
+                key,
+                scope: needed,
+                bind,
+                key_id_bind,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let key = lower(project, scope, key, &text)?;
+                let needed = match needed {
+                    Some(needed) => format!("Some({needed:?})"),
+                    None => "None".to_string(),
+                };
+                let call =
+                    format!("eda_runtime::api_key::verify(&mut tx, &({key}), {needed}).await?");
+                match key_id_bind {
+                    Some(kid) => c.line(format!(
+                        "let ({bind}, {kid}): (String, String) = {{ let verified = {call}; (verified.owner, verified.key_id) }};"
+                    )),
+                    None => c.line(format!("let {bind}: String = {call}.owner;")),
+                };
+                scope.bind(bind.clone(), text.clone());
+                if let Some(kid) = key_id_bind {
+                    scope.bind(kid.clone(), text);
+                }
+            }
+            Step::ApiKeyRevoke { key_id, owner, .. } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let key_id = lower(project, scope, key_id, &text)?;
+                let owner = match owner {
+                    Some(owner) => {
+                        format!("Some(({}).as_str())", lower(project, scope, owner, &text)?)
+                    }
+                    None => "None".to_string(),
+                };
                 c.line(format!(
-                    "eda_runtime::rate_limit::check({id:?}, &({key}), {max}, {window_secs})?;"
+                    "eda_runtime::api_key::revoke(&mut tx, &({key_id}), {owner}).await?;"
                 ));
+            }
+            Step::PasswordStrength {
+                password,
+                min_score,
+                inputs,
+                refuse_breached,
+                bind,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let password = lower(project, scope, password, &text)?;
+                let mut words = vec![];
+                for input in inputs {
+                    words.push(format!(
+                        "({}).as_str()",
+                        lower(project, scope, input, &text)?
+                    ));
+                }
+                let call = format!(
+                    "eda_runtime::password::check(&({password}), &[{}], {min_score}, {refuse_breached}).await?",
+                    words.join(", ")
+                );
+                match bind {
+                    Some(bind) => {
+                        c.line(format!("let {bind}: i32 = i32::from({call});"));
+                        scope.bind(bind.clone(), TypeRef::scalar(FieldType::Int32));
+                    }
+                    None => {
+                        c.line(format!("{call};"));
+                    }
+                }
+            }
+            Step::VerifyChallenge { payload, .. } => {
+                let cfg = service.challenge.as_ref().ok_or_else(|| {
+                    CodegenError::Internal(
+                        "`verifyChallenge` in a service with no challenge".into(),
+                    )
+                })?;
+                let payload = lower(project, scope, payload, &TypeRef::scalar(FieldType::String))?;
+                c.line(format!(
+                    "eda_runtime::challenge::verify(&mut tx, {:?}, {}, &({payload})).await?;",
+                    cfg.key_env, cfg.max_number
+                ));
+            }
+            Step::Meter {
+                key,
+                tenant,
+                amount,
+                idempotency_key,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let tenant = lower(project, scope, tenant, &text)?;
+                let amount = lower(project, scope, amount, &TypeRef::scalar(FieldType::Int64))?;
+                let once = match idempotency_key {
+                    Some(once) => {
+                        format!("Some(({}).as_str())", lower(project, scope, once, &text)?)
+                    }
+                    None => "None".to_string(),
+                };
+                c.line(format!(
+                    "eda_runtime::usage::meter(&mut tx, {key:?}, &({tenant}), {amount}, {once}).await?;"
+                ));
+            }
+            Step::CheckQuota {
+                key,
+                tenant,
+                limit,
+                period,
+                wanted,
+                bind,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let units = TypeRef::scalar(FieldType::Int64);
+                let tenant = lower(project, scope, tenant, &text)?;
+                let limit = lower(project, scope, limit, &units)?;
+                let wanted = match wanted {
+                    Some(wanted) => lower(project, scope, wanted, &units)?,
+                    None => "1_i64".to_string(),
+                };
+                let period = format!("eda_runtime::usage::Period::{}", period_variant(*period));
+                let call = format!(
+                    "eda_runtime::usage::check(&mut tx, {key:?}, &({tenant}), {limit}, {wanted}, {period}).await?"
+                );
+                match bind {
+                    Some(bind) => {
+                        c.line(format!("let {bind}: i64 = {call};"));
+                        scope.bind(bind.clone(), units);
+                    }
+                    None => {
+                        c.line(format!("{call};"));
+                    }
+                }
             }
             Step::Sql { .. } => sql_step(c, project, service, scope, step)?,
             Step::HttpCall { .. } => crate::http_call::http_call_step(c, project, scope, step)?,
@@ -2802,6 +3079,41 @@ fn placeholder(n: usize, col: &Column) -> String {
         format!("${n}::{}", col.ty.sql().to_lowercase())
     } else {
         format!("${n}")
+    }
+}
+
+/// The `eda_runtime::resilience::Policy` of a call: its circuit and its bulkhead, or none of either.
+pub(crate) fn resilience_policy(
+    circuit: &Option<sb_model::CircuitConfig>,
+    max_concurrent: &Option<u32>,
+) -> String {
+    if circuit.is_none() && max_concurrent.is_none() {
+        return "eda_runtime::resilience::Policy::default()".to_string();
+    }
+    let circuit = match circuit {
+        Some(c) => format!(
+            "Some(eda_runtime::resilience::Circuit {{ failures: {}, window_secs: {}, open_secs: {} }})",
+            c.failures, c.window_secs, c.open_secs
+        ),
+        None => "None".to_string(),
+    };
+    let max_concurrent = match max_concurrent {
+        Some(n) => format!("Some({n})"),
+        None => "None".to_string(),
+    };
+    format!(
+        "eda_runtime::resilience::Policy {{ circuit: {circuit}, max_concurrent: {max_concurrent} }}"
+    )
+}
+
+/// The variant of `eda_runtime::usage::Period` for a period of the model.
+fn period_variant(period: sb_model::UsagePeriod) -> &'static str {
+    match period {
+        sb_model::UsagePeriod::Hour => "Hour",
+        sb_model::UsagePeriod::Day => "Day",
+        sb_model::UsagePeriod::Month => "Month",
+        sb_model::UsagePeriod::Year => "Year",
+        sb_model::UsagePeriod::Forever => "Forever",
     }
 }
 
@@ -3346,8 +3658,21 @@ fn describe(step: &Step) -> String {
         Step::Fail { status, .. } => format!("fail {status}"),
         Step::VerifyHmac { header, .. } => format!("verify the signature in {header}"),
         Step::RateLimit {
-            max, window_secs, ..
-        } => format!("rate limit {max} per {window_secs}s"),
+            max,
+            window_secs,
+            shared,
+            ..
+        } => format!(
+            "rate limit {max} per {window_secs}s{}",
+            if *shared { " (shared)" } else { "" }
+        ),
+        Step::VerifyChallenge { .. } => "verify the challenge".into(),
+        Step::PasswordStrength { .. } => "judge the password".into(),
+        Step::ApiKeyCreate { bind, .. } => format!("issue an API key into {bind}"),
+        Step::ApiKeyVerify { bind, .. } => format!("check the API key, its owner into {bind}"),
+        Step::ApiKeyRevoke { .. } => "revoke an API key".into(),
+        Step::Meter { key, .. } => format!("meter {key}"),
+        Step::CheckQuota { key, .. } => format!("check the quota of {key}"),
         Step::HashPassword { bind, .. } => format!("hash password into {bind}"),
         Step::VerifyPassword { bind, .. } => format!("verify password into {bind}"),
         Step::RandomToken { bind, .. } => format!("random token into {bind}"),

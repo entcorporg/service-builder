@@ -58,6 +58,17 @@ pub fn path(name: &str) -> &'static str {
         "decrypt" => "M7 11V8a5 5 0 019.6-2M5 11h14v10H5zM12 14v4",
         "verifyHmac" => "M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6zM9 11h6M12 11v5",
         "rateLimit" => "M12 22a10 10 0 100-20 10 10 0 000 20zM12 6v6l4 2",
+        "meter" => "M4 20V10M10 20V4M16 20v-7M22 20H2",
+        "verifyChallenge" => "M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6zM9 12l2 2 4-4",
+        "checkQuota" => "M12 22a10 10 0 100-20 10 10 0 000 20zM12 7v5M12 16h.01",
+        "apiKeyCreate" => "M15 7a4 4 0 11-3.9 4.900L3 20v-3h3v-3h3l2.100-2.100A4 4 0 0115 7z",
+        "apiKeyVerify" => {
+            "M12 3l8 3v6c0 5-3.500 8-8 9-4.500-1-8-4-8-9V6zM10 10a2 2 0 100 4 2 2 0 000-4zM12 12h5v2"
+        }
+        "apiKeyRevoke" => {
+            "M15 7a4 4 0 11-3.900 4.900L3 20v-3h3v-3h3l2.100-2.100A4 4 0 0115 7zM17 17l4 4M21 17l-4 4"
+        }
+        "passwordStrength" => "M5 21V13M10 21V9M15 21V5M20 21V3",
         "hashPassword" => "M7 11V8a5 5 0 0110 0v3M5 11h14v10H5zM12 15v2",
         "verifyPassword" => "M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6zM8.5 12l2.5 2.5L15.5 10",
         "randomToken" => "M3 8h18v8H3zM7 12h.01M12 12h.01M17 12h.01",

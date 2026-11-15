@@ -120,11 +120,14 @@ impl Checker<'_> {
             on_error,
             error_status,
             error_message,
+            circuit,
+            max_concurrent,
             ..
         } = step
         else {
             return;
         };
+        self.resilience(path, circuit, max_concurrent);
         if !is_env_name(base_url_env) {
             self.error(
                 "E_HTTP_CALL_BASE_ENV",

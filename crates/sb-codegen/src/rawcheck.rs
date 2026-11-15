@@ -97,6 +97,58 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                 }
             }
             Step::RateLimit { key, .. } => expr(key, &format!("{path}/key"), out),
+            Step::ApiKeyCreate {
+                owner,
+                name,
+                expires_in_secs,
+                ..
+            } => {
+                expr(owner, &format!("{path}/owner"), out);
+                expr(name, &format!("{path}/name"), out);
+                if let Some(seconds) = expires_in_secs {
+                    expr(seconds, &format!("{path}/expiresInSecs"), out);
+                }
+            }
+            Step::ApiKeyVerify { key, .. } => expr(key, &format!("{path}/key"), out),
+            Step::ApiKeyRevoke { key_id, owner, .. } => {
+                expr(key_id, &format!("{path}/keyId"), out);
+                if let Some(owner) = owner {
+                    expr(owner, &format!("{path}/owner"), out);
+                }
+            }
+            Step::PasswordStrength {
+                password, inputs, ..
+            } => {
+                expr(password, &format!("{path}/password"), out);
+                for (i, input) in inputs.iter().enumerate() {
+                    expr(input, &format!("{path}/inputs/{i}"), out);
+                }
+            }
+            Step::VerifyChallenge { payload, .. } => expr(payload, &format!("{path}/payload"), out),
+            Step::Meter {
+                tenant,
+                amount,
+                idempotency_key,
+                ..
+            } => {
+                expr(tenant, &format!("{path}/tenant"), out);
+                expr(amount, &format!("{path}/amount"), out);
+                if let Some(once) = idempotency_key {
+                    expr(once, &format!("{path}/idempotencyKey"), out);
+                }
+            }
+            Step::CheckQuota {
+                tenant,
+                limit,
+                wanted,
+                ..
+            } => {
+                expr(tenant, &format!("{path}/tenant"), out);
+                expr(limit, &format!("{path}/limit"), out);
+                if let Some(wanted) = wanted {
+                    expr(wanted, &format!("{path}/wanted"), out);
+                }
+            }
             Step::VerifyHmac { .. } => {}
             Step::SignJwt { claims, .. } => assignments(claims, &format!("{path}/claims"), out),
             Step::VerifyJwt { token, .. } => expr(token, &format!("{path}/token"), out),

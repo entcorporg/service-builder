@@ -51,7 +51,7 @@ vérité : le canvas, l'inspecteur et le code généré en sont des vues.
   Un producteur sans étape *Publier* donne un avertissement. Les projets enregistrés avant (`schemaVersion` 1) sont
   migrés à l'ouverture : tout service qui publiait sur un topic en devient producteur.
 - **Services** : des RPC (gRPC), des routes HTTP, des consumers (Kafka) et des tâches planifiées. Chacun contient une **liste d'étapes**.
-- **Étapes** : `log`, `let`, `publish`, `publishLive`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `rateLimit` et `verifyHmac` (routes HTTP), `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
+- **Étapes** : `log`, `let`, `publish`, `publishLive`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `rateLimit`, `checkQuota`, `verifyChallenge`, `passwordStrength`, `apiKeyVerify`, `apiKeyRevoke` et `verifyHmac` (routes HTTP), `meter`, `apiKeyCreate`, `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
   Une liste d'étapes est un arbre (pas un graphe arbitraire) : cela se génère en Rust structuré et s'édite comme
   une pile de blocs, comme dans un page builder.
 
@@ -253,9 +253,142 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
 - **Limiter le débit** : l'étape `rateLimit` compte chaque essai sous une **clé** (un texte : l'e-mail, une adresse, ou un
   littéral pour tout le monde) et, au-delà de `max` essais dans les `windowSecs` dernières secondes (1 à 86 400), répond
   `429` avec `Retry-After` (secondes à attendre). Fenêtre glissante, une par étape et par clé ; un essai refusé n'est pas
-  compté. Le compte vit **en mémoire de chaque instance** : avec plusieurs réplicas la limite réelle est multipliée d'autant
-  (un magasin partagé, Valkey par exemple, est un prochain pas). Les clés inactives sont oubliées toutes les minutes.
+  compté. Par défaut le compte vit **en mémoire de chaque instance** : avec plusieurs réplicas la limite réelle est multipliée
+  d'autant. Les clés inactives sont oubliées toutes les minutes.
+  Avec l'option **`shared`**, le compte vit dans le magasin clé-valeur du projet (DragonflyDB, Valkey ou Redis 5+ :
+  `DRAGONFLY_URL`, celui de `publishLive`) et la limite est la même quel que soit le nombre de réplicas. C'est la même fenêtre
+  glissante, comptée par un script Lua que le serveur exécute sans interruption (oublier les essais sortis de la fenêtre,
+  refuser sans compter quand `max` y sont, sinon compter celui-ci) ; l'horloge est celle du serveur, donc les réplicas
+  ne peuvent pas être en désaccord. Une entrée par essai de la fenêtre : `max` ne dépasse pas 10 000 (`E_RATE_LIMIT_SHARED_MAX`).
+  Le magasin est un confort, pas une dépendance : s'il est injoignable ou ne répond pas en 250 ms, l'étape compte en mémoire
+  comme sans l'option, l'écrit dans le journal et ne l'interroge plus pendant 5 s ; une requête n'est jamais refusée parce que
+  le magasin est tombé (pendant ce temps, la limite redevient « par instance »). Le service ne démarre pas en production sans
+  `DRAGONFLY_URL`. Le générateur ajoute DragonflyDB à la pile (`docker-compose.yml`, Pods) pour tout projet qui a une étape
+  partagée, même sans service temps réel.
   Routes seulement (`E_RATE_LIMIT_OUTSIDE_ROUTE`), `E_RATE_LIMIT_MAX`, `E_RATE_LIMIT_WINDOW`.
+- **Compter une consommation et poser un quota** : les étapes `meter` et `checkQuota` comptent un usage par locataire et par
+  période, dans la base du service. Chaque usage est une ligne de `usage_events` (`meter`, `tenant`, `amount`, `idempotency_key`,
+  `occurred_at`), écrite **dans la transaction du handler** : l'usage et ce qu'il paie sont validés ensemble ou pas du tout. Une
+  vue `usage_daily` additionne par compteur, locataire et jour (UTC) pour un tableau de bord ou une facture ; les lignes sont
+  gardées, ce sont elles qu'une facture se vérifie contre. Les deux tables sont créées avec le schéma, seulement dans le service
+  qui a l'une des deux étapes, et leurs noms sont réservés (`E_TABLE_RESERVED`).
+  - `meter { key, tenant, amount, idempotencyKey? }` : `key` est le compteur (`api_calls`, `seats`, `storage.mb` : minuscules,
+    chiffres, `_.-`, 64 caractères au plus, `E_METER_NAME`), `tenant` un texte, `amount` un entier (`int64`). Un montant négatif
+    rend des unités (un siège libéré). Avec `idempotencyKey`, un second usage de même clé (pour ce compteur et ce locataire) est
+    ignoré : une requête rejouée ou un événement relivré compte une fois. Partout où il y a une transaction.
+  - `checkQuota { key, tenant, limit, period, wanted?, bind? }` : refuse en `429` avec `Retry-After` (les secondes jusqu'à la fin
+    de la période ; rien pour `forever`) quand l'usage de la période plus `wanted` (1 par défaut) dépasserait `limit` (un
+    entier : un littéral, ou une valeur lue par le flux, ce qui lie le plafond à l'offre). `period` : `hour`, `day`, `month`
+    (défaut), `year` (périodes calendaires en UTC) ou `forever` (tout depuis le premier usage : un stock, des sièges, du
+    stockage). `bind` reçoit ce qu'il reste après la requête (`int64`). Routes seulement (`E_QUOTA_OUTSIDE_ROUTE`).
+  - Le quota est lu **dans les lignes**, pas dans un compteur à côté : les deux ne peuvent pas diverger. Le contrôle prend un
+    verrou consultatif (`pg_advisory_xact_lock`) sur le couple compteur-locataire, tenu jusqu'à la fin de la transaction : deux
+    requêtes d'un même locataire ne peuvent pas prendre la dernière unité, la seconde attend la première puis voit son usage.
+    D'où la règle : **`checkQuota` puis `meter` dans la même route**.
+  - Limites : OpenMeter (la référence) agrège dans ClickHouse ; ici PostgreSQL, ce qui tient la facturation d'un produit, pas
+    des milliards d'événements. Pas d'archivage ni de purge des lignes, pas de remise à zéro anticipée d'un compteur (poser un
+    `meter` négatif), pas de droit « par fonctionnalité » (`entitlements`) autre que le plafond.
+- **Défi anti-robots** : un défi de **preuve de travail** à la manière d'[ALTCHA](https://altcha.org), sans service tiers ni
+  suivi, contre l'inscription et les formulaires automatisés que `rateLimit` ne suffit pas à arrêter. Deux morceaux :
+  - **Le service remet un défi** : `challenge { path, keyEnv, maxNumber, ttlSecs }` sur le service (par défaut `/challenge`,
+    `CHALLENGE_HMAC_KEY`, 1 000 000, 300 s). Le service répond `GET <path>` (sans authentification, `Cache-Control: no-store`) avec
+    `{ algorithm: "SHA-256", challenge, maxnumber, salt, signature }`, ce que lit le widget ALTCHA : `salt` est un aléa suivi de
+    `?expires=<unix>&`, `challenge` le SHA-256 du sel suivi d'un nombre secret tiré dans `0..=maxnumber` (que le widget retrouve
+    en les essayant tous), `signature` le HMAC-SHA256 du `challenge` sous la clé. Le chemin est servi par l'API HTTP du service
+    (le proxy des Pods l'y envoie), décrit dans son document OpenAPI. Validé : `E_CHALLENGE_PATH` (forme, pas celui d'une route
+    `GET` ni du document OpenAPI), `E_CHALLENGE_KEY_ENV`, `E_CHALLENGE_WORK` (1 à 10 000 000), `E_CHALLENGE_TTL` (10 s à 24 h),
+    `E_CHALLENGE_NO_HTTP` (un service sans route ne sert pas d'HTTP). Au démarrage le service ne tourne pas sans clé en
+    production (16 caractères au moins) ; hors production, une clé de développement, dite dans le journal.
+  - **La route vérifie** : `verifyChallenge { payload }`, **première étape** du formulaire, lit ce que le widget envoie (un texte :
+    le base64 d'un JSON `{ algorithm, challenge, number, salt, signature }`) et refuse en `400` (« le défi est absent, faux,
+    expiré ou déjà utilisé » ; la raison exacte reste dans le journal). Dans l'ordre : l'algorithme est `SHA-256` et le nombre dans
+    l'intervalle demandé ; la signature est celle du `challenge` (un défi que **ce** service a fait, n'importe quel réplica : la clé
+    est partagée ; comparaison à temps constant) ; le hash du sel et du nombre est le `challenge` (le travail est fait) ;
+    l'expiration, portée par le sel donc couverte par le hash, n'est pas passée ; la solution n'a pas servi. Une solution **vaut un
+    formulaire** : sa signature est inscrite dans `challenge_uses` (créée avec le schéma, nom réservé : `E_TABLE_RESERVED`) **dans
+    la transaction du handler**, donc pour tous les réplicas à la fois, et si le handler échoue après, l'inscription est annulée
+    avec le reste et le visiteur peut renvoyer la même solution. Les lignes des défis expirés sont balayées au passage (quelques
+    requêtes sur cent), sans tâche planifiée. Routes seulement (`E_CHALLENGE_OUTSIDE_ROUTE`), service qui sert un défi
+    (`E_CHALLENGE_NOT_SERVED`).
+  - Interopérable avec ALTCHA dans les deux sens (vérifié contre la bibliothèque `altcha-lib-rs`, Apache-2.0 d'après son `Cargo.toml` : elle accepte
+    nos défis et nous acceptons les siens) ; le code est écrit d'après le protocole et ne reprend rien d'elle. Seul `SHA-256` est
+    accepté. Limites : une preuve de travail ralentit un robot, elle ne l'arrête pas ; elle n'est pas une preuve d'humanité (ni
+    reconnaissance de comportement, ni réputation d'adresse) et se règle par `maxNumber` contre le temps passé par un visiteur sur
+    un téléphone. Elle s'ajoute à `rateLimit` (par adresse, par compte), elle ne le remplace pas.
+- **Robustesse d'un mot de passe** : l'étape `passwordStrength { password, minScore, inputs, refuseBreached, bind }` juge un
+  mot de passe **avant** `hashPassword`. Elle estime la facilité à le deviner avec [zxcvbn](https://github.com/shssoichiro/zxcvbn-rs)
+  (MIT) : dictionnaires et mots de passe courants, prénoms, suites de touches, dates, répétitions, substitutions « l33t », et les
+  `inputs` du compte (l'e-mail, le nom : chacun compte, ainsi que chacun de ses mots de trois caractères ou plus, car
+  l'estimateur ne reconnaît un texte que comme mot entier). Le score va de 0 à 4 ; en dessous de `minScore` (3 par défaut,
+  `E_PASSWORD_SCORE` au-delà de 4) la route répond `400 { "error": "password: too easy to guess (<raison>)" }`. Seuls les 100
+  premiers caractères sont jugés (l'estimateur est quadratique). L'estimation tourne sur le pool bloquant, comme le hachage.
+  `bind` reçoit le score (`int32`). Avec `refuseBreached`, la présence dans une fuite connue est vérifiée **par plage**
+  (Pwned Passwords) : le SHA-1 est calculé sur place, **seuls cinq caractères** en sortent (`Add-Padding: true`, pas de
+  redirection), la comparaison se fait sur place ; l'adresse est `PWNED_PASSWORDS_URL` (un miroir peut être nommé). Si l'API ne
+  répond pas en 3 s, le mot de passe **passe** (et le journal le dit) : on n'arrête pas les inscriptions parce qu'un autre
+  service est tombé. Routes seulement (`E_PASSWORD_OUTSIDE_ROUTE`). Limite : la vérification de fuite sort du réseau du projet.
+- **Clés d'API** : pour un client qui est une machine, pas une personne. Trois étapes, dans la base du service (table `api_keys`,
+  créée avec le schéma, nom réservé : `E_TABLE_RESERVED`), **dans la transaction du handler**.
+  - `apiKeyCreate { owner, name, scopes, expiresInSecs?, bind, keyIdBind? }` émet `sbk_<id>_<secret>` : un préfixe lisible (un
+    scanner de secrets reconnaît une clé qui fuit), l'**id** (16 caractères hexadécimaux : ce que les listes et la révocation
+    nomment, pas un secret) et le **secret** (256 bits aléatoires). **Seul le SHA-256 du secret est stocké** (assez aléatoire pour
+    se passer d'un hachage lent) : la table, si elle fuit, ne donne aucune clé. `bind` reçoit la clé entière, **qu'on ne
+    retrouve plus** : elle est montrée une fois, dans la réponse. `owner` (société, compte) est ce pour quoi la route agit ensuite ;
+    `scopes` ce que la clé peut faire (`orders:read` : minuscules, chiffres, `_.:-`, `E_API_KEY_SCOPE`) ; `expiresInSecs` (`int64`
+    strictement positif, sinon 400) la validité.
+  - `apiKeyVerify { key, scope?, bind, keyIdBind? }`, **première étape** d'une route machine, lit la clé (le champ de la requête la
+    prend dans un en-tête, `X-API-Key` ou `Authorization` : un `Bearer ` est retiré). Une clé absente, mal formée, inconnue,
+    fausse, révoquée ou expirée donne **le même 401** (la raison reste dans le journal) ; le secret est comparé en temps
+    constant et un id inconnu coûte autant qu'un secret faux ; une bonne clé sans la `scope` demandée donne un 403. `bind`
+    reçoit le propriétaire. La date du dernier usage est écrite au plus **une fois par minute** et par clé.
+  - `apiKeyRevoke { keyId, owner? }` révoque, définitivement. Un 404, le même, pour une clé inconnue, déjà révoquée ou, avec
+    `owner`, d'un autre propriétaire : une société révoque ses clés et pas celles des autres. **Rotation** : émettre la nouvelle
+    clé, puis révoquer l'ancienne.
+  - `apiKeyVerify` et `apiKeyRevoke` : routes seulement (`E_API_KEY_OUTSIDE_ROUTE`). Limites : pas d'étape « lister » (la table
+    n'est pas une table du modèle, les étapes `sql` ne la voient pas : à garder si on veut afficher les clés d'une société), pas
+    de limite de débit propre à une clé (utiliser `rateLimit` ou `checkQuota` avec le propriétaire en clé).
+- **Compression des réponses HTTP** : réglage `compression` du service (faux par défaut, absent du fichier du projet tant qu'il
+  l'est). Les réponses de l'API HTTP sont compressées en **gzip, brotli ou zstd**, celui que préfère l'`Accept-Encoding` du client
+  (`Vary` prévient les caches) : le JSON en pèse une fraction. Posé par `tower-http` (MIT) : `CompressionLayer` avec le
+  prédicat par défaut (jamais un flux `text/event-stream`, un message gRPC ni une image, déjà compressée) **et** une taille d'au
+  moins 256 octets (en dessous, l'en-tête coûte plus que le gain). La couche est posée **après** celle de CORS, dont les en-têtes
+  restent sur la réponse compressée. Seul le service qui la demande compile les codecs (`compression-full`, dont zstd, qui
+  compile du C). Sans effet, avec un avertissement (`W_COMPRESSION_UNUSED`), pour un service sans route ou prêt à l'emploi (mail,
+  temps réel). Le flux du service temps réel n'est jamais compressé.
+- **Nettoyage de HTML** : l'opération d'expression `sanitizeHtml(texte)` rend le HTML saisi par un utilisateur sûr à stocker et à
+  réafficher (ou à mettre dans un mail), avec [Ammonia](https://github.com/rust-ammonia/ammonia) (MIT ou Apache-2.0) et ses
+  règles par défaut : une **liste blanche**, pas une liste de ce qui est interdit, donc une balise inconnue disparaît. Les
+  scripts, styles, cadres, formulaires, objets et `svg` sont retirés, ainsi que tout attribut qui exécute du code (`onclick`,
+  `onerror`…) ou qui n'est pas sur la liste ; les liens et les images ne gardent qu'une adresse `http`, `https`, `mailto`… (jamais
+  `javascript:` ni `data:`) ; chaque lien reçoit `rel="noopener noreferrer"` et perd son `target`. Reste la mise en forme d'un
+  éditeur de texte : paragraphes, emphases, listes, titres, citations, code, tableaux, liens, images. Idempotent (nettoyer du
+  HTML propre ne change rien). Un texte en entrée, un texte en sortie (`int64` ou nombre refusé : `E_TYPE_MISMATCH`). **Il rend le
+  HTML sûr comme contenu d'un élément** : placé dans un attribut, un script ou un style d'une autre page, il ne l'est pas. Seul
+  le service qui l'utilise compile l'analyseur HTML (feature `html`). Pas de liste blanche réglable pour l'instant.
+- **Disjoncteur et cloison** : options `circuit` et `maxConcurrent` des étapes `httpCall` et `callRpc`, pour qu'un service lent ou
+  tombé n'entraîne pas ceux qui l'appellent. Modèle de [Resilience4j](https://resilience4j.readme.io) (Apache-2.0), écrit en
+  Rust sans en reprendre de code.
+  - `circuit { failures, windowSecs, openSecs }` (5, 30, 30 par défaut ; `E_CIRCUIT_FAILURES` 1 à 1000, `E_CIRCUIT_WINDOW` et
+    `E_CIRCUIT_OPEN` 1 s à 1 h). **Fermé** : les appels passent, leurs échecs sont comptés ; `failures` échecs dans les `windowSecs`
+    dernières secondes (fenêtre **glissante** : un succès n'efface rien) l'**ouvrent**. **Ouvert** : pendant `openSecs`, tout appel
+    est refusé sans être fait (on ne martèle pas un service qui se relève, et l'appelant n'attend pas un délai d'attente).
+    **Semi-ouvert** ensuite : **un seul** appel essaie (les autres sont refusés pendant ce temps) ; réussi, le circuit se ferme,
+    raté, il se rouvre pour `openSecs`. Un appel abandonné sans verdict (le futur est annulé) rend l'essai : un circuit ne reste
+    jamais bloqué en semi-ouvert. Est un **échec** ce qui dit que la dépendance va mal : délai dépassé, pas de réponse, `429`,
+    `5xx` ; pour gRPC `unavailable`, `deadline exceeded`, `internal`, `unknown`, `resource exhausted` ; un `4xx` est le fait
+    de l'appelant, de même qu'un appel faux en soi (valeur non envoyable, réglage manquant). Pour `httpCall` le verdict est
+    porté sur l'appel entier, reprises comprises.
+  - `maxConcurrent` (1 à 10 000, `E_MAX_CONCURRENT`) : au plus autant d'appels de **l'étape** en même temps ; le suivant est
+    **refusé tout de suite**, pas mis en file derrière un service lent (une file ne ferait que déplacer l'attente en retenant les
+    ressources de l'appelant). Un appel refusé par le circuit ne prend pas de place ; une place refusée rend l'essai au circuit.
+  - **Ce que voit le flux** : pour `httpCall`, un appel refusé est un appel **sans réponse** (statut `0`), donc `onError` décide :
+    `fail` répond `errorStatus`, `continue` laisse le flux lire le statut. Pour `callRpc`, un refus est un `503` avec
+    `Retry-After` (le temps avant le prochain essai), qui devient un échec du consumer (donc une reprise, puis la DLQ) hors route.
+  - Le **circuit est celui de la dépendance** (l'adresse de base de l'appel sortant, le service appelé) et partagé par toutes les
+    étapes de l'instance qui l'appellent ; la **cloison est celle de l'étape**. L'état est **en mémoire de chaque instance** :
+    chaque réplica apprend pour lui-même. Chaque changement d'état est écrit dans le journal (`circuit breaker changed state`) et
+    `eda_runtime::resilience::snapshot()` liste les circuits. Limite : l'état n'est **pas** exposé dans `/metrics` (les services
+    ordinaires n'en ont pas) ; c'est un prochain pas, avec une route de métriques.
 - **Règles de champ** : un champ texte (`string`, `uuid`) d'un schéma API peut porter des règles (`rules`), vérifiées par le
   handler généré **avant toute étape**, dans l'ordre des champs ; la première qui échoue répond `400 { "error": "champ : … " }`.
   - `length` (`min`, `max`) : entre `min` et `max` **caractères** (pas octets), texte rogné avant d'être compté ; la borne

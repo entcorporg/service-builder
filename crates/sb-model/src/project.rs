@@ -44,6 +44,65 @@ pub struct Project {
     pub openapi: OpenApiConfig,
 }
 
+/// A challenge in the manner of [ALTCHA](https://altcha.org): a proof of work, with no third-party service and no tracking. The
+/// service answers `GET <path>` with a new challenge (`algorithm`, `challenge`, `maxnumber`, `salt`, `signature`: what the ALTCHA
+/// widget reads); the widget finds the secret number whose SHA-256 with the salt is the challenge, which costs the visitor a moment
+/// of computing and a robot the same moment, at the scale of its volume; the form is sent with the solution, and a
+/// `verifyChallenge` step of the route checks it before anything else runs. A challenge is signed (HMAC-SHA256, key in the
+/// environment variable `key_env`, the same on every replica), expires, and is accepted once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChallengeConfig {
+    /// Where the challenge is served: a path of the HTTP API that no route uses.
+    #[serde(default = "default_challenge_path")]
+    pub path: String,
+    /// The environment variable that holds the key the challenges are signed with (at least 16 characters; in production the
+    /// service does not start without it).
+    #[serde(default = "default_challenge_key_env")]
+    pub key_env: String,
+    /// The secret number is drawn in `0..=max_number`: the work asked of the visitor is about `max_number / 2` hashes.
+    #[serde(default = "default_challenge_max_number")]
+    pub max_number: u32,
+    /// How long a challenge can be solved and sent, in seconds.
+    #[serde(default = "default_challenge_ttl")]
+    pub ttl_secs: u32,
+}
+
+pub const DEFAULT_CHALLENGE_PATH: &str = "/challenge";
+pub const DEFAULT_CHALLENGE_KEY_ENV: &str = "CHALLENGE_HMAC_KEY";
+pub const DEFAULT_CHALLENGE_MAX_NUMBER: u32 = 1_000_000;
+pub const DEFAULT_CHALLENGE_TTL_SECS: u32 = 300;
+/// The most work a challenge can ask for: a few seconds in a browser, more on a phone.
+pub const MAX_CHALLENGE_NUMBER: u32 = 10_000_000;
+
+fn default_challenge_path() -> String {
+    DEFAULT_CHALLENGE_PATH.to_string()
+}
+fn default_challenge_key_env() -> String {
+    DEFAULT_CHALLENGE_KEY_ENV.to_string()
+}
+fn default_challenge_max_number() -> u32 {
+    DEFAULT_CHALLENGE_MAX_NUMBER
+}
+fn default_challenge_ttl() -> u32 {
+    DEFAULT_CHALLENGE_TTL_SECS
+}
+
+impl Default for ChallengeConfig {
+    fn default() -> Self {
+        Self {
+            path: default_challenge_path(),
+            key_env: default_challenge_key_env(),
+            max_number: default_challenge_max_number(),
+            ttl_secs: default_challenge_ttl(),
+        }
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// The OpenAPI 3.1 document of each service is always written with the export; this decides whether the service
 /// also serves it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -334,6 +393,15 @@ pub struct Service {
     /// token is read. Required for that kind, refused for the others.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub realtime: Option<RealtimeConfig>,
+    /// A proof-of-work challenge the service hands out (`GET <path>`) for its `verifyChallenge` steps to check, against the
+    /// robots that fill in a form: see [`ChallengeConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub challenge: Option<ChallengeConfig>,
+    /// Compress the answers of the HTTP API (gzip, brotli or zstd, whichever the client's `Accept-Encoding` prefers): JSON
+    /// shrinks to a fraction. Only answers of 256 bytes or more are, never an event stream, a gRPC message or an image (already
+    /// compressed). `Vary: Accept-Encoding` tells the caches. A service with no route has nothing to compress.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub compression: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -976,6 +1044,13 @@ pub enum Step {
         /// Variable receiving the response message.
         #[serde(default)]
         bind: Option<String>,
+        /// Cut the calls to this service while it fails: see [`CircuitConfig`]. Shared by every step that calls it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        circuit: Option<CircuitConfig>,
+        /// At most this many calls of this step at the same time (a bulkhead): the next one is refused at once with a 503, not
+        /// queued behind a slow service.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_concurrent: Option<u32>,
     },
     #[serde(rename_all = "camelCase")]
     Branch {
@@ -1003,13 +1078,62 @@ pub enum Step {
         headers: Vec<ResponseHeader>,
     },
     /// Counts this attempt under `key` and, past `max` attempts in the last `window_secs`, ends the route
-    /// with a 429 and a `Retry-After`. A sliding window per key, kept in the memory of the process.
+    /// with a 429 and a `Retry-After`. A sliding window per key, kept in the memory of the process, or, with
+    /// `shared`, in the key-value server of the project, so that the limit is the same whatever the number of replicas.
     #[serde(rename_all = "camelCase")]
     RateLimit {
         id: String,
         key: Expr,
         max: u32,
         window_secs: u32,
+        /// Count in DragonflyDB (or Valkey, Redis: `DRAGONFLY_URL`) instead of in the memory of each instance. When the server
+        /// cannot be reached the step counts in memory, as it would without this option: it never refuses a request for that.
+        #[serde(default)]
+        shared: bool,
+    },
+    /// Checks the solution of a proof-of-work challenge (see [`ChallengeConfig`]) before the rest of the route runs: the form
+    /// the visitor filled in is read for what it is only once a browser has spent a moment computing. `payload` is what the
+    /// ALTCHA widget sends (a text: base64 of a JSON). A solution that is missing, malformed, wrong, expired or already used
+    /// ends the route with a 400. A solution is accepted once, for all the replicas, in the transaction of the handler.
+    /// Routes only, in a service that serves a challenge.
+    #[serde(rename_all = "camelCase")]
+    VerifyChallenge { id: String, payload: Expr },
+    /// Records a use of a meter for a tenant: `amount` units of `key` (API calls, seats, megabytes) in the table
+    /// `usage_events` of the service's database, in the transaction of the handler, so that the use and what it pays for commit
+    /// together. A negative amount gives units back (a seat released). With `idempotency_key`, a second use with the same text
+    /// is ignored, so that a retried request or a redelivered event counts once.
+    #[serde(rename_all = "camelCase")]
+    Meter {
+        id: String,
+        /// The meter: `api_calls`, `seats`, `storage_mb`.
+        key: String,
+        /// Who is metered, as text: a company, an account.
+        tenant: Expr,
+        /// How many units (an `int64`).
+        amount: Expr,
+        #[serde(default)]
+        idempotency_key: Option<Expr>,
+    },
+    /// Refuses the request, with a 429 and a `Retry-After` (the seconds until the period ends), when the tenant's use of the
+    /// meter over the period, plus `wanted`, would pass `limit`. The limit comes from the plan: a literal, or a value the flow
+    /// read. Two requests of the same tenant cannot both take the last unit: the check holds a lock on the meter and the tenant
+    /// until the transaction ends, so put the `meter` that follows it in the same run. Routes only.
+    #[serde(rename_all = "camelCase")]
+    CheckQuota {
+        id: String,
+        key: String,
+        tenant: Expr,
+        /// The ceiling over the period (an `int64`).
+        limit: Expr,
+        /// The period the use is added up over: calendar periods in UTC, or everything since the start.
+        #[serde(default)]
+        period: UsagePeriod,
+        /// How many units this request is about to use (an `int64`, 1 when it is left out).
+        #[serde(default)]
+        wanted: Option<Expr>,
+        /// Receives what is left after this request (an `int64`): for a header, or a message.
+        #[serde(default)]
+        bind: Option<String>,
     },
     /// A query on a table of the service's database, in the transaction of the handler. A
     /// `Select` binds `bind`, typed after the ticked columns: that is what the next steps read.
@@ -1093,6 +1217,73 @@ pub enum Step {
         password: Expr,
         stored: Expr,
         bind: String,
+    },
+    /// Issues an API key to a client that is a machine, not a person: `sbk_<id>_<secret>`, a readable prefix and an id (what the
+    /// client and the lists name), then 256 random bits. Only the SHA-256 of the secret is stored (it is random enough for a fast
+    /// hash), in the table `api_keys` of the service's database, in the transaction of the handler, with who the key is for
+    /// (`owner`: a company, an account), a name, its `scopes` and, if asked, when it expires. `bind` receives the whole key, **which
+    /// cannot be found again**: it is shown once, in the answer. `keyIdBind` receives the id, to name the key afterwards.
+    #[serde(rename_all = "camelCase")]
+    ApiKeyCreate {
+        id: String,
+        owner: Expr,
+        /// What the key is called: « invoicing robot ».
+        name: Expr,
+        /// What the key may do: names the routes that check it ask for (`orders:read`). Lowercase letters, digits, `_.:-`.
+        #[serde(default)]
+        scopes: Vec<String>,
+        /// Seconds the key is valid from now (an `int64`); left out, it does not expire.
+        #[serde(default)]
+        expires_in_secs: Option<Expr>,
+        bind: String,
+        #[serde(default)]
+        key_id_bind: Option<String>,
+    },
+    /// Authenticates a client by its API key (`key`: the text it sent, in a header: the field of the request reads it; a
+    /// `Bearer ` in front is taken off). A key that is missing, malformed, unknown, wrong, revoked or expired is a 401, the same
+    /// whichever it is (what is wrong stays in the logs); a good key without the `scope` asked is a 403. `bind` receives the
+    /// owner of the key (text), what the route then acts for; `keyIdBind` the id. The time of the last use is kept, at most once
+    /// a minute per key. Routes only.
+    #[serde(rename_all = "camelCase")]
+    ApiKeyVerify {
+        id: String,
+        key: Expr,
+        /// What the route needs the key to be allowed: one of its scopes.
+        #[serde(default)]
+        scope: Option<String>,
+        bind: String,
+        #[serde(default)]
+        key_id_bind: Option<String>,
+    },
+    /// Revokes a key: from then on it is a 401. A key is revoked once (a 404 for one that is unknown or already revoked). With
+    /// `owner`, only a key of that owner can be: a company revokes its own keys and no one else's. Routes only.
+    #[serde(rename_all = "camelCase")]
+    ApiKeyRevoke {
+        id: String,
+        key_id: Expr,
+        #[serde(default)]
+        owner: Option<Expr>,
+    },
+    /// Judges a password before it is hashed: how easy it is to guess (zxcvbn: dictionaries, keyboard patterns, dates, repeats,
+    /// l33t, and the `inputs` of this account: the e-mail, the name) and, with `refuseBreached`, whether it is in a known data
+    /// breach (the first five characters of its SHA-1 are sent to the Pwned Passwords range API, never the password). Under
+    /// `minScore` (0 to 4, 3 by default) or breached, the route ends with a 400. `bind` receives the score (an `int32`). Routes only.
+    #[serde(rename_all = "camelCase")]
+    PasswordStrength {
+        id: String,
+        password: Expr,
+        /// The lowest score accepted: 0 too guessable, 1 very guessable, 2 somewhat, 3 safely unguessable, 4 very unguessable.
+        #[serde(default = "default_min_score")]
+        min_score: u8,
+        /// Texts the password must not be made of: the e-mail address, the name of the account.
+        #[serde(default)]
+        inputs: Vec<Expr>,
+        /// Refuse a password found in a known breach. If the range API cannot be reached the password is let through (and the
+        /// log says so): a service must not stop signing people up because another one is down.
+        #[serde(default)]
+        refuse_breached: bool,
+        #[serde(default)]
+        bind: Option<String>,
     },
     /// 256 random bits as 64 hexadecimal characters: a session, e-mail or reset token.
     #[serde(rename_all = "camelCase")]
@@ -1428,6 +1619,14 @@ pub enum Step {
         /// With `on_error` = `fail`: the fixed text the client is told (a 5xx answers a generic one and logs this).
         #[serde(default = "default_http_error_message")]
         error_message: String,
+        /// Cut the calls to this external service while it fails: see [`CircuitConfig`]. Shared by every step that calls the
+        /// same base address. An open circuit answers like a call nobody answered (status `0`, so `on_error` decides).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        circuit: Option<CircuitConfig>,
+        /// At most this many calls of this step at the same time (a bulkhead): the next one is refused at once, like a call
+        /// nobody answered, not queued behind a slow service.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_concurrent: Option<u32>,
     },
     /// Ends an HTTP route early with an error status (400..=599) and `{ "error": message }`.
     /// The message is a fixed text: a 5xx answers a generic one and keeps this in the logs.
@@ -1819,6 +2018,9 @@ impl Step {
             | Step::Sql { id, .. }
             | Step::Fail { id, .. }
             | Step::RateLimit { id, .. }
+            | Step::Meter { id, .. }
+            | Step::CheckQuota { id, .. }
+            | Step::VerifyChallenge { id, .. }
             | Step::VerifyHmac { id, .. }
             | Step::HttpCall { id, .. }
             | Step::Encrypt { id, .. }
@@ -1843,6 +2045,10 @@ impl Step {
             | Step::HashPassword { id, .. }
             | Step::VerifyPassword { id, .. }
             | Step::RandomToken { id, .. }
+            | Step::PasswordStrength { id, .. }
+            | Step::ApiKeyCreate { id, .. }
+            | Step::ApiKeyVerify { id, .. }
+            | Step::ApiKeyRevoke { id, .. }
             | Step::Sha256 { id, .. }
             | Step::ForEach { id, .. }
             | Step::Code { id, .. } => id,
@@ -1864,6 +2070,85 @@ impl Step {
             for s in steps {
                 s.walk(f);
             }
+        }
+    }
+}
+
+/// A circuit breaker on a dependency (an external service, another service of the project), in the manner of Resilience4j.
+/// **Closed**: the calls go through and their failures are counted. When `failures` of them happen within `windowSecs` (a sliding
+/// window), the circuit **opens**: for `openSecs` every call is refused at once, without being made (a service that is down is not
+/// asked, so it is not hammered while it recovers, and the caller does not wait for a timeout). Then it is **half-open**: one
+/// call is let through to try; if it succeeds the circuit closes, if it fails it opens again for another `openSecs`. A failure is
+/// what means the dependency is unwell: a timeout, no answer, a 429, a 5xx (or, for gRPC, `unavailable`, `deadline exceeded`,
+/// `internal`, `unknown`, `resource exhausted`); a 4xx is the caller's fault and counts for nothing. The state is kept in the
+/// memory of each instance, and shared by every step that calls the same dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CircuitConfig {
+    /// How many failures within the window open the circuit.
+    #[serde(default = "default_circuit_failures")]
+    pub failures: u32,
+    /// The sliding window the failures are counted in, in seconds.
+    #[serde(default = "default_circuit_window")]
+    pub window_secs: u32,
+    /// How long the circuit stays open before it lets one call try, in seconds.
+    #[serde(default = "default_circuit_open")]
+    pub open_secs: u32,
+}
+
+pub const DEFAULT_CIRCUIT_FAILURES: u32 = 5;
+pub const DEFAULT_CIRCUIT_WINDOW_SECS: u32 = 30;
+pub const DEFAULT_CIRCUIT_OPEN_SECS: u32 = 30;
+
+fn default_circuit_failures() -> u32 {
+    DEFAULT_CIRCUIT_FAILURES
+}
+fn default_circuit_window() -> u32 {
+    DEFAULT_CIRCUIT_WINDOW_SECS
+}
+fn default_circuit_open() -> u32 {
+    DEFAULT_CIRCUIT_OPEN_SECS
+}
+
+impl Default for CircuitConfig {
+    fn default() -> Self {
+        Self {
+            failures: DEFAULT_CIRCUIT_FAILURES,
+            window_secs: DEFAULT_CIRCUIT_WINDOW_SECS,
+            open_secs: DEFAULT_CIRCUIT_OPEN_SECS,
+        }
+    }
+}
+
+/// The score under which `passwordStrength` refuses a password: "safely unguessable".
+pub const DEFAULT_MIN_PASSWORD_SCORE: u8 = 3;
+
+fn default_min_score() -> u8 {
+    DEFAULT_MIN_PASSWORD_SCORE
+}
+
+/// What a quota adds the use up over.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum UsagePeriod {
+    Hour,
+    Day,
+    #[default]
+    Month,
+    Year,
+    /// Everything since the first use: a stock (seats, storage) more than a flow.
+    Forever,
+}
+
+impl UsagePeriod {
+    /// The unit `date_trunc` cuts the calendar at; none for `forever`.
+    pub fn unit(self) -> Option<&'static str> {
+        match self {
+            UsagePeriod::Hour => Some("hour"),
+            UsagePeriod::Day => Some("day"),
+            UsagePeriod::Month => Some("month"),
+            UsagePeriod::Year => Some("year"),
+            UsagePeriod::Forever => None,
         }
     }
 }
@@ -1926,6 +2211,11 @@ pub enum Func {
     Upper,
     /// A text without the spaces around it.
     Trim,
+    /// A user's HTML made safe to store and show again (or to put in a mail): the scripts, the styles, the frames, the event
+    /// attributes (`onclick`) and the links that run code (`javascript:`) are removed, what is left is the formatting (`p`, `b`,
+    /// `a`, lists, headings, tables, quotes, images...), and the links get `rel="noopener noreferrer"`. An allow-list (Ammonia),
+    /// not a list of what is forbidden: a tag it does not know is dropped. A text, as text.
+    SanitizeHtml,
     /// Number of characters of a text (int64).
     Length,
     /// Whether a text contains another one (bool).
@@ -2063,6 +2353,14 @@ impl Project {
             pods: Default::default(),
             openapi: Default::default(),
         }
+    }
+
+    /// Whether the stack holds a key-value server (DragonflyDB): there is a real-time service, or a service counts its rate
+    /// limits in it.
+    pub fn uses_store(&self) -> bool {
+        self.services
+            .iter()
+            .any(|s| s.kind == ServiceKind::Realtime || s.uses_shared_limit())
     }
 
     /// Whether the stack of the Pods page holds Garage: it is asked for, and a service has an object step.
@@ -2285,6 +2583,88 @@ impl Service {
             .chain(self.routes.iter().flat_map(|r| &r.steps))
             .chain(self.consumers.iter().flat_map(|c| &c.steps))
             .chain(self.jobs.iter().flat_map(|j| &j.steps))
+    }
+
+    /// Whether a step of the service issues, checks or revokes an API key: its database then holds `api_keys`.
+    pub fn uses_api_keys(&self) -> bool {
+        let mut used = false;
+        for step in self.handler_steps() {
+            step.walk(&mut |s| {
+                used |= matches!(
+                    s,
+                    Step::ApiKeyCreate { .. }
+                        | Step::ApiKeyVerify { .. }
+                        | Step::ApiKeyRevoke { .. }
+                )
+            });
+        }
+        used
+    }
+
+    /// Whether an expression of the service cleans an HTML text: the runtime then brings the sanitizer in (`html`). Looked for in
+    /// the project's own JSON, which is where every expression of every step is, nested or not.
+    pub fn uses_html_sanitizer(&self) -> bool {
+        serde_json::to_string(self).is_ok_and(|json| json.contains("\"func\":\"sanitizeHtml\""))
+    }
+
+    /// Whether a call of the service has a circuit or a bulkhead: nothing is needed to build it (the runtime always holds it), but
+    /// the generated code names the policy.
+    pub fn uses_resilience(&self) -> bool {
+        let mut used = false;
+        for step in self.handler_steps() {
+            step.walk(&mut |s| match s {
+                Step::HttpCall {
+                    circuit,
+                    max_concurrent,
+                    ..
+                }
+                | Step::CallRpc {
+                    circuit,
+                    max_concurrent,
+                    ..
+                } => {
+                    used |= circuit.is_some() || max_concurrent.is_some();
+                }
+                _ => {}
+            });
+        }
+        used
+    }
+
+    /// Whether a step of the service judges a password: the runtime then brings the estimator in (`password-strength`).
+    pub fn uses_password_strength(&self) -> bool {
+        let mut used = false;
+        for step in self.handler_steps() {
+            step.walk(&mut |s| used |= matches!(s, Step::PasswordStrength { .. }));
+        }
+        used
+    }
+
+    /// Whether a route of the service checks the solution of a challenge: its database then holds `challenge_uses`.
+    pub fn uses_challenge_check(&self) -> bool {
+        let mut used = false;
+        for step in self.handler_steps() {
+            step.walk(&mut |s| used |= matches!(s, Step::VerifyChallenge { .. }));
+        }
+        used
+    }
+
+    /// Whether a step of the service meters a use or checks a quota: its database then holds `usage_events`.
+    pub fn uses_usage(&self) -> bool {
+        let mut used = false;
+        for step in self.handler_steps() {
+            step.walk(&mut |s| used |= matches!(s, Step::Meter { .. } | Step::CheckQuota { .. }));
+        }
+        used
+    }
+
+    /// Whether a `rateLimit` of the service counts in the key-value server (`shared`): it then needs `DRAGONFLY_URL`.
+    pub fn uses_shared_limit(&self) -> bool {
+        let mut used = false;
+        for step in self.handler_steps() {
+            step.walk(&mut |s| used |= matches!(s, Step::RateLimit { shared: true, .. }));
+        }
+        used
     }
 
     /// The environment variables that name the buckets the object steps of the service use, once each.

@@ -312,11 +312,12 @@ pub fn parse_template(template: &str) -> Result<Vec<TemplatePart>, String> {
 
 impl Func {
     /// Every operation, in the order the editors list them.
-    pub const ALL: [Func; 30] = [
+    pub const ALL: [Func; 31] = [
         Func::Concat,
         Func::Lower,
         Func::Upper,
         Func::Trim,
+        Func::SanitizeHtml,
         Func::Length,
         Func::Contains,
         Func::StartsWith,
@@ -363,8 +364,8 @@ impl Func {
         match self {
             NewUuid => (0, Some(0)),
             Concat => (1, None),
-            Lower | Upper | Trim | Length | Round | Floor | Ceil | ToInt32 | ToInt64 | ToDouble
-            | ToText | ParseInt64 | ParseDouble | ListLength => (1, Some(1)),
+            Lower | Upper | Trim | SanitizeHtml | Length | Round | Floor | Ceil | ToInt32
+            | ToInt64 | ToDouble | ToText | ParseInt64 | ParseDouble | ListLength => (1, Some(1)),
             Replace => (3, Some(3)),
             _ => (2, Some(2)),
         }
@@ -464,8 +465,8 @@ fn call_type(
     };
     let result = |ty: FieldType| Ok(Some(TypeRef::scalar(ty)));
     match func {
-        Concat | Lower | Upper | Trim | Replace | Length | Contains | StartsWith | EndsWith
-        | Split | ParseInt64 | ParseDouble => {
+        Concat | Lower | Upper | Trim | SanitizeHtml | Replace | Length | Contains | StartsWith
+        | EndsWith | Split | ParseInt64 | ParseDouble => {
             for i in 0..args.len() {
                 check(i, &text)?;
             }

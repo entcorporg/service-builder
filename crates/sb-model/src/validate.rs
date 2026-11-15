@@ -81,6 +81,23 @@ struct Env<'a> {
     handler: Handler<'a>,
 }
 
+/// What the meter and quota steps keep in the database of the service: the table of the uses and the view that adds them up.
+pub const USAGE_TABLES: [&str; 2] = ["usage_events", "usage_daily"];
+
+/// What the API key steps keep in the database of the service: the keys.
+pub const API_KEYS_TABLE: &str = "api_keys";
+
+/// What `verifyChallenge` keeps in the database of the service: the solutions already accepted.
+pub const CHALLENGE_TABLE: &str = "challenge_uses";
+
+/// What a circuit and a bulkhead can be set to: wide enough for any real dependency, narrow enough to be a mistake when exceeded.
+pub const MAX_CIRCUIT_FAILURES: u32 = 1_000;
+pub const MAX_CIRCUIT_SECS: u32 = 3_600;
+pub const MAX_CONCURRENT_CALLS: u32 = 10_000;
+
+/// The most attempts a `rateLimit` counted in the shared store can allow: the store keeps one entry per attempt of the window.
+pub const SHARED_RATE_LIMIT_MAX: u32 = 10_000;
+
 fn kind_label(kind: MessageKind) -> &'static str {
     match kind {
         MessageKind::Event => "an event schema",
@@ -764,6 +781,14 @@ impl<'a> Checker<'a> {
             self.table_constraints(s, &base);
             self.mta_service(s, &base);
             self.realtime_service(s, &base);
+            self.challenge_service(s, &base);
+            if s.compression && (s.kind != ServiceKind::Standard || s.routes.is_empty()) {
+                self.warn(
+                    "W_COMPRESSION_UNUSED",
+                    format!("{base}/compression"),
+                    "only the HTTP API of a service with routes is compressed: this setting changes nothing here",
+                );
+            }
 
             let mut rpc_names = HashSet::new();
             for (j, r) in s.rpcs.iter().enumerate() {
@@ -1751,6 +1776,19 @@ impl<'a> Checker<'a> {
                     "E_TABLE_RESERVED",
                     format!("{tp}/name"),
                     "`outbox` is the table of the published events, pick another name",
+                );
+            }
+            if (s.uses_usage() && USAGE_TABLES.contains(&t.name.as_str()))
+                || (s.uses_challenge_check() && t.name == CHALLENGE_TABLE)
+                || (s.uses_api_keys() && t.name == API_KEYS_TABLE)
+            {
+                self.error(
+                    "E_TABLE_RESERVED",
+                    format!("{tp}/name"),
+                    format!(
+                        "`{}` is kept by the meter, quota, challenge or API key steps of this service, pick another name",
+                        t.name
+                    ),
                 );
             }
             if !names.insert(t.name.as_str()) {
@@ -2959,8 +2997,11 @@ impl<'a> Checker<'a> {
                 method,
                 request,
                 bind,
+                circuit,
+                max_concurrent,
                 ..
             } => {
+                self.resilience(path, circuit, max_concurrent);
                 if let Some(b) = bind {
                     self.check_var_name(b, &format!("{path}/bind"));
                 }
@@ -3593,6 +3634,7 @@ impl<'a> Checker<'a> {
                 key,
                 max,
                 window_secs,
+                shared,
                 ..
             } => {
                 if !matches!(env.handler, Handler::Route { .. }) {
@@ -3609,6 +3651,15 @@ impl<'a> Checker<'a> {
                         "at least one attempt must be allowed",
                     );
                 }
+                if *shared && *max > SHARED_RATE_LIMIT_MAX {
+                    self.error(
+                        "E_RATE_LIMIT_SHARED_MAX",
+                        format!("{path}/max"),
+                        format!(
+                            "a limit counted in the shared store keeps one entry per attempt of the window: {SHARED_RATE_LIMIT_MAX} attempts at most"
+                        ),
+                    );
+                }
                 if !(1..=86_400).contains(window_secs) {
                     self.error(
                         "E_RATE_LIMIT_WINDOW",
@@ -3618,6 +3669,191 @@ impl<'a> Checker<'a> {
                 }
                 let text = TypeRef::scalar(FieldType::String);
                 self.check_expr(scope, key, Some(&text), &format!("{path}/key"));
+                false
+            }
+            Step::ApiKeyCreate {
+                owner,
+                name,
+                scopes,
+                expires_in_secs,
+                bind,
+                key_id_bind,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, owner, Some(&text), &format!("{path}/owner"));
+                self.check_expr(scope, name, Some(&text), &format!("{path}/name"));
+                for (i, name) in scopes.iter().enumerate() {
+                    self.check_api_scope(name, &format!("{path}/scopes/{i}"));
+                }
+                if let Some(seconds) = expires_in_secs {
+                    let seconds_type = TypeRef::scalar(FieldType::Int64);
+                    self.check_expr(
+                        scope,
+                        seconds,
+                        Some(&seconds_type),
+                        &format!("{path}/expiresInSecs"),
+                    );
+                }
+                self.check_var_name(bind, &format!("{path}/bind"));
+                scope.bind(bind.clone(), text.clone());
+                if let Some(kid) = key_id_bind {
+                    self.check_var_name(kid, &format!("{path}/keyIdBind"));
+                    if kid == bind {
+                        self.error(
+                            "E_API_KEY_BIND",
+                            format!("{path}/keyIdBind"),
+                            "the key and its id are two variables",
+                        );
+                    }
+                    scope.bind(kid.clone(), text);
+                }
+                false
+            }
+            Step::ApiKeyVerify {
+                key,
+                scope: needed,
+                bind,
+                key_id_bind,
+                ..
+            } => {
+                if !matches!(env.handler, Handler::Route { .. }) {
+                    self.error(
+                        "E_API_KEY_OUTSIDE_ROUTE",
+                        path,
+                        "a bad key is answered with a 401: it only makes sense in an HTTP route",
+                    );
+                }
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, key, Some(&text), &format!("{path}/key"));
+                if let Some(needed) = needed {
+                    self.check_api_scope(needed, &format!("{path}/scope"));
+                }
+                self.check_var_name(bind, &format!("{path}/bind"));
+                scope.bind(bind.clone(), text.clone());
+                if let Some(kid) = key_id_bind {
+                    self.check_var_name(kid, &format!("{path}/keyIdBind"));
+                    if kid == bind {
+                        self.error(
+                            "E_API_KEY_BIND",
+                            format!("{path}/keyIdBind"),
+                            "the owner and the id of the key are two variables",
+                        );
+                    }
+                    scope.bind(kid.clone(), text);
+                }
+                false
+            }
+            Step::ApiKeyRevoke { key_id, owner, .. } => {
+                if !matches!(env.handler, Handler::Route { .. }) {
+                    self.error(
+                        "E_API_KEY_OUTSIDE_ROUTE",
+                        path,
+                        "an unknown key is answered with a 404: it only makes sense in an HTTP route",
+                    );
+                }
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, key_id, Some(&text), &format!("{path}/keyId"));
+                if let Some(owner) = owner {
+                    self.check_expr(scope, owner, Some(&text), &format!("{path}/owner"));
+                }
+                false
+            }
+            Step::PasswordStrength {
+                password,
+                min_score,
+                inputs,
+                bind,
+                ..
+            } => {
+                if !matches!(env.handler, Handler::Route { .. }) {
+                    self.error(
+                        "E_PASSWORD_OUTSIDE_ROUTE",
+                        path,
+                        "a weak password is answered with a 400: it only makes sense in an HTTP route",
+                    );
+                }
+                if *min_score > 4 {
+                    self.error(
+                        "E_PASSWORD_SCORE",
+                        format!("{path}/minScore"),
+                        "the score goes from 0 to 4",
+                    );
+                }
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, password, Some(&text), &format!("{path}/password"));
+                for (i, input) in inputs.iter().enumerate() {
+                    self.check_expr(scope, input, Some(&text), &format!("{path}/inputs/{i}"));
+                }
+                if let Some(bind) = bind {
+                    self.check_var_name(bind, &format!("{path}/bind"));
+                    scope.bind(bind.clone(), TypeRef::scalar(FieldType::Int32));
+                }
+                false
+            }
+            Step::VerifyChallenge { payload, .. } => {
+                if !matches!(env.handler, Handler::Route { .. }) {
+                    self.error(
+                        "E_CHALLENGE_OUTSIDE_ROUTE",
+                        path,
+                        "a challenge answers 400 to the visitor: it only makes sense in an HTTP route",
+                    );
+                }
+                if env.service.challenge.is_none() {
+                    self.error(
+                        "E_CHALLENGE_NOT_SERVED",
+                        path,
+                        "this service hands out no challenge: turn it on in the service (`challenge`), with the key and the path",
+                    );
+                }
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, payload, Some(&text), &format!("{path}/payload"));
+                false
+            }
+            Step::Meter {
+                key,
+                tenant,
+                amount,
+                idempotency_key,
+                ..
+            } => {
+                self.check_meter_name(key, &format!("{path}/key"));
+                let text = TypeRef::scalar(FieldType::String);
+                let units = TypeRef::scalar(FieldType::Int64);
+                self.check_expr(scope, tenant, Some(&text), &format!("{path}/tenant"));
+                self.check_expr(scope, amount, Some(&units), &format!("{path}/amount"));
+                if let Some(once) = idempotency_key {
+                    self.check_expr(scope, once, Some(&text), &format!("{path}/idempotencyKey"));
+                }
+                false
+            }
+            Step::CheckQuota {
+                key,
+                tenant,
+                limit,
+                wanted,
+                bind,
+                ..
+            } => {
+                if !matches!(env.handler, Handler::Route { .. }) {
+                    self.error(
+                        "E_QUOTA_OUTSIDE_ROUTE",
+                        path,
+                        "a quota answers 429 and `Retry-After`: it only makes sense in an HTTP route",
+                    );
+                }
+                self.check_meter_name(key, &format!("{path}/key"));
+                let text = TypeRef::scalar(FieldType::String);
+                let units = TypeRef::scalar(FieldType::Int64);
+                self.check_expr(scope, tenant, Some(&text), &format!("{path}/tenant"));
+                self.check_expr(scope, limit, Some(&units), &format!("{path}/limit"));
+                if let Some(wanted) = wanted {
+                    self.check_expr(scope, wanted, Some(&units), &format!("{path}/wanted"));
+                }
+                if let Some(bind) = bind {
+                    self.check_var_name(bind, &format!("{path}/bind"));
+                    scope.bind(bind.clone(), units);
+                }
                 false
             }
             Step::HashPassword { input, bind, .. } => {
@@ -3708,6 +3944,80 @@ impl<'a> Checker<'a> {
                 }
                 false
             }
+        }
+    }
+
+    /// The circuit and the bulkhead of a call to a dependency: counts, windows and delays that mean something.
+    fn resilience(
+        &mut self,
+        path: &str,
+        circuit: &Option<CircuitConfig>,
+        max_concurrent: &Option<u32>,
+    ) {
+        if let Some(c) = circuit {
+            if !(1..=MAX_CIRCUIT_FAILURES).contains(&c.failures) {
+                self.error(
+                    "E_CIRCUIT_FAILURES",
+                    format!("{path}/circuit/failures"),
+                    format!("the circuit opens after 1 to {MAX_CIRCUIT_FAILURES} failures"),
+                );
+            }
+            if !(1..=MAX_CIRCUIT_SECS).contains(&c.window_secs) {
+                self.error(
+                    "E_CIRCUIT_WINDOW",
+                    format!("{path}/circuit/windowSecs"),
+                    format!("the window the failures are counted in is 1 second to 1 hour ({MAX_CIRCUIT_SECS})"),
+                );
+            }
+            if !(1..=MAX_CIRCUIT_SECS).contains(&c.open_secs) {
+                self.error(
+                    "E_CIRCUIT_OPEN",
+                    format!("{path}/circuit/openSecs"),
+                    format!("the circuit stays open for 1 second to 1 hour ({MAX_CIRCUIT_SECS})"),
+                );
+            }
+        }
+        if let Some(n) = max_concurrent
+            && !(1..=MAX_CONCURRENT_CALLS).contains(n)
+        {
+            self.error(
+                "E_MAX_CONCURRENT",
+                format!("{path}/maxConcurrent"),
+                format!("a bulkhead lets 1 to {MAX_CONCURRENT_CALLS} calls through at a time"),
+            );
+        }
+    }
+
+    /// The name of what an API key may do: the same spelling in the key and in the route that asks for it.
+    fn check_api_scope(&mut self, name: &str, path: &str) {
+        let ok = !name.is_empty()
+            && name.len() <= 64
+            && name.chars().all(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '.' | ':' | '-')
+            });
+        if !ok {
+            self.error(
+                "E_API_KEY_SCOPE",
+                path,
+                "a scope is named with lowercase letters, digits and `_.:-` (64 characters at most): `orders:read`",
+            );
+        }
+    }
+
+    /// The name of a meter: what the uses are added up under, so it is spelled the same everywhere.
+    fn check_meter_name(&mut self, key: &str, path: &str) {
+        let ok = !key.is_empty()
+            && key.len() <= 64
+            && key.starts_with(|c: char| c.is_ascii_lowercase())
+            && key.chars().all(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '.' | '-')
+            });
+        if !ok {
+            self.error(
+                "E_METER_NAME",
+                path,
+                "a meter is named with lowercase letters, digits, `_`, `.` and `-`, starting with a letter (64 characters at most): `api_calls`, `seats`",
+            );
         }
     }
 
@@ -3941,6 +4251,75 @@ impl<'a> Checker<'a> {
                 );
             }
             self.check_expr(scope, &c.value, Some(&text), &format!("{cp}/value"));
+        }
+    }
+
+    /// The challenge a service hands out: where, with which key, how much work and for how long. Checked wherever it is set,
+    /// served or not.
+    fn challenge_service(&mut self, s: &Service, base: &str) {
+        let Some(cfg) = &s.challenge else {
+            return;
+        };
+        let path = cfg.path.as_str();
+        let plain = path.starts_with('/')
+            && path.len() > 1
+            && path.len() <= 100
+            && path
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"/-_.".contains(&b))
+            && !path.contains("//");
+        if !plain {
+            self.error(
+                "E_CHALLENGE_PATH",
+                format!("{base}/challenge/path"),
+                "the path of the challenge starts with `/` and holds letters, digits, `/`, `-`, `_` and `.` only (e.g. `/challenge`)",
+            );
+        } else if let Some(r) = s
+            .routes
+            .iter()
+            .find(|r| r.method == HttpMethod::Get && r.path == path)
+        {
+            self.error(
+                "E_CHALLENGE_PATH",
+                format!("{base}/challenge/path"),
+                format!("`{path}` is already the route `{}` of `{}`", r.name, s.name),
+            );
+        } else if self.project.openapi.serve && self.project.openapi.path == path {
+            self.error(
+                "E_CHALLENGE_PATH",
+                format!("{base}/challenge/path"),
+                format!("`{path}` is where the OpenAPI document is served"),
+            );
+        }
+        if !is_env_name(&cfg.key_env) {
+            self.error(
+                "E_CHALLENGE_KEY_ENV",
+                format!("{base}/challenge/keyEnv"),
+                "the key of the challenge is read from an environment variable: capital letters, digits and `_`, not starting with a digit",
+            );
+        }
+        if !(1..=MAX_CHALLENGE_NUMBER).contains(&cfg.max_number) {
+            self.error(
+                "E_CHALLENGE_WORK",
+                format!("{base}/challenge/maxNumber"),
+                format!(
+                    "the work asked of the visitor is between 1 and {MAX_CHALLENGE_NUMBER} (about half of it in hashes: a second or two in a browser at the top)"
+                ),
+            );
+        }
+        if !(10..=86_400).contains(&cfg.ttl_secs) {
+            self.error(
+                "E_CHALLENGE_TTL",
+                format!("{base}/challenge/ttlSecs"),
+                "a challenge stays valid for 10 seconds to 24 hours (86400)",
+            );
+        }
+        if s.routes.is_empty() {
+            self.error(
+                "E_CHALLENGE_NO_HTTP",
+                format!("{base}/challenge"),
+                "a challenge is served by the HTTP API of the service, and this service has no route",
+            );
         }
     }
 
@@ -5084,6 +5463,12 @@ mod tests {
         &mut p.services[0].routes[0]
     }
 
+    fn has_warning(p: &Project, code: &str) -> bool {
+        validate(p)
+            .into_iter()
+            .any(|d| d.severity == Severity::Warning && d.code == code)
+    }
+
     #[test]
     fn the_sample_routes_are_valid() {
         assert!(errors(&sample::orders()).is_empty());
@@ -5988,6 +6373,726 @@ mod tests {
         );
     }
 
+    /// The showcase, which has a metered route, and where that route is.
+    fn with_usage() -> Project {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_usage(&mut p);
+        p
+    }
+
+    fn usage_route(p: &mut Project) -> &mut Route {
+        p.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == "usage_report")
+            .unwrap()
+    }
+
+    #[test]
+    fn a_metered_route_is_valid_and_its_quota_binds_what_is_left() {
+        let mut p = with_usage();
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        // What is left is a number the route can answer; a text is not what the response field holds.
+        if let Step::Respond { fields, .. } = usage_route(&mut p).steps.last_mut().unwrap() {
+            fields[0].value = Expr::Literal {
+                value: "many".into(),
+            };
+        }
+        assert!(!errors(&p).is_empty());
+    }
+
+    #[test]
+    fn the_steps_of_a_meter_and_a_quota_are_checked() {
+        let lit = |v: serde_json::Value| Expr::Literal { value: v };
+        let meter = |key: &str, tenant: Expr, amount: Expr| Step::Meter {
+            id: "m".into(),
+            key: key.into(),
+            tenant,
+            amount,
+            idempotency_key: None,
+        };
+        let quota = |limit: Expr, wanted: Option<Expr>| Step::CheckQuota {
+            id: "q".into(),
+            key: "calls".into(),
+            tenant: lit("t".into()),
+            limit,
+            period: UsagePeriod::Month,
+            wanted,
+            bind: None,
+        };
+        let mut p = sample::orders();
+        let mut check = |step: Step, code: Option<&str>| {
+            route_of(&mut p).steps.insert(0, step);
+            let found = errors(&p);
+            route_of(&mut p).steps.remove(0);
+            match code {
+                None => assert!(found.is_empty(), "{found:?}"),
+                Some(c) => assert!(found.contains(&c.to_string()), "{c}: {found:?}"),
+            }
+        };
+        check(meter("calls", lit("t".into()), lit(1.into())), None);
+        check(quota(lit(10.into()), Some(lit(2.into()))), None);
+        // A meter is spelled the same everywhere: lowercase, digits and `_.-`, starting with a letter.
+        for bad in ["", "Calls", "1calls", "api calls", "a/b", &"x".repeat(65)] {
+            check(
+                meter(bad, lit("t".into()), lit(1.into())),
+                Some("E_METER_NAME"),
+            );
+        }
+        for good in ["calls", "api_calls", "storage.mb", "seats-pro"] {
+            check(meter(good, lit("t".into()), lit(1.into())), None);
+        }
+        // The tenant is text, the amount, the limit and the wanted units are whole numbers.
+        check(
+            meter("calls", lit(1.into()), lit(1.into())),
+            Some("E_TYPE_MISMATCH"),
+        );
+        check(
+            meter("calls", lit("t".into()), lit("one".into())),
+            Some("E_TYPE_MISMATCH"),
+        );
+        check(quota(lit("ten".into()), None), Some("E_TYPE_MISMATCH"));
+        check(
+            quota(lit(10.into()), Some(lit("two".into()))),
+            Some("E_TYPE_MISMATCH"),
+        );
+    }
+
+    #[test]
+    fn a_quota_answers_429_so_it_belongs_to_a_route_and_the_usage_tables_are_the_generator_s() {
+        let mut p = with_usage();
+        // In a job there is no one to answer: a meter is fine, a quota is not.
+        let mut quota = usage_route(&mut p).steps[1].clone();
+        let mut meter = usage_route(&mut p).steps[2].clone();
+        // The claims are the route's own: the job names the tenant itself.
+        let tenant = Expr::Literal {
+            value: "acme".into(),
+        };
+        match (&mut quota, &mut meter) {
+            (
+                Step::CheckQuota {
+                    tenant: t, bind, ..
+                },
+                Step::Meter { tenant: m, .. },
+            ) => {
+                (*t, *m, *bind) = (tenant.clone(), tenant, None);
+            }
+            _ => unreachable!(),
+        }
+        p.services[0].jobs[0].steps.push(meter);
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        p.services[0].jobs[0].steps.push(quota);
+        assert!(
+            errors(&p).contains(&"E_QUOTA_OUTSIDE_ROUTE".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+        // The service keeps `usage_events` and `usage_daily`: a table of the author cannot take their names.
+        let mut p = with_usage();
+        for name in USAGE_TABLES {
+            let mut table = Table::new(name, vec![Column::new("id", ColumnType::String)]);
+            table.columns[0].primary_key = true;
+            p.services[0].tables.push(table);
+        }
+        assert_eq!(
+            errors(&p)
+                .iter()
+                .filter(|c| *c == "E_TABLE_RESERVED")
+                .count(),
+            2,
+            "{:?}",
+            errors(&p)
+        );
+        // Without a meter, the names are free.
+        let mut p = sample::orders();
+        let mut table = Table::new("usage_events", vec![Column::new("id", ColumnType::String)]);
+        table.columns[0].primary_key = true;
+        p.services[0].tables.push(table);
+        assert!(!errors(&p).contains(&"E_TABLE_RESERVED".to_string()));
+    }
+
+    #[test]
+    fn a_challenge_is_served_by_a_service_and_checked_by_a_route_of_it() {
+        let mut p = sample::orders();
+        sample::add_challenge(&mut p);
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        // A route that checks a challenge in a service that hands none out.
+        let verify = Step::VerifyChallenge {
+            id: "v".into(),
+            payload: Expr::Literal { value: "x".into() },
+        };
+        let mut q = sample::orders();
+        route_of(&mut q).steps.insert(0, verify.clone());
+        assert!(
+            errors(&q).contains(&"E_CHALLENGE_NOT_SERVED".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        // The solution is text.
+        let mut q = p.clone();
+        if let Step::VerifyChallenge { payload, .. } =
+            &mut q.services[0].routes.last_mut().unwrap().steps[0]
+        {
+            *payload = Expr::Literal { value: 5.into() };
+        }
+        assert!(
+            errors(&q).contains(&"E_TYPE_MISMATCH".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        // Only a route answers 400 to a visitor.
+        let mut q = p.clone();
+        q.services[0].jobs[0].steps.push(verify);
+        assert!(
+            errors(&q).contains(&"E_CHALLENGE_OUTSIDE_ROUTE".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        // The table of the solutions already accepted is the generator's.
+        let mut q = p.clone();
+        let mut table = Table::new(CHALLENGE_TABLE, vec![Column::new("id", ColumnType::String)]);
+        table.columns[0].primary_key = true;
+        q.services[0].tables.push(table);
+        assert!(
+            errors(&q).contains(&"E_TABLE_RESERVED".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+    }
+
+    #[test]
+    fn the_settings_of_a_challenge_are_checked() {
+        let mut p = sample::orders();
+        sample::add_challenge(&mut p);
+        let existing_route = p.services[0].routes[0].path.clone();
+        let existing_method = p.services[0].routes[0].method;
+        type Change = Box<dyn Fn(&mut ChallengeConfig)>;
+        let cases: Vec<(&str, Change)> = vec![
+            (
+                "E_CHALLENGE_PATH",
+                Box::new(|c| c.path = "challenge".into()),
+            ),
+            ("E_CHALLENGE_PATH", Box::new(|c| c.path = "/".into())),
+            ("E_CHALLENGE_PATH", Box::new(|c| c.path = "/a b".into())),
+            ("E_CHALLENGE_PATH", Box::new(|c| c.path = "/a//b".into())),
+            (
+                "E_CHALLENGE_KEY_ENV",
+                Box::new(|c| c.key_env = "lower".into()),
+            ),
+            (
+                "E_CHALLENGE_KEY_ENV",
+                Box::new(|c| c.key_env = "1KEY".into()),
+            ),
+            ("E_CHALLENGE_WORK", Box::new(|c| c.max_number = 0)),
+            (
+                "E_CHALLENGE_WORK",
+                Box::new(|c| c.max_number = MAX_CHALLENGE_NUMBER + 1),
+            ),
+            ("E_CHALLENGE_TTL", Box::new(|c| c.ttl_secs = 9)),
+            ("E_CHALLENGE_TTL", Box::new(|c| c.ttl_secs = 86_401)),
+        ];
+        for (code, change) in cases {
+            let mut q = p.clone();
+            change(q.services[0].challenge.as_mut().unwrap());
+            assert!(
+                errors(&q).contains(&code.to_string()),
+                "{code}: {:?}",
+                errors(&q)
+            );
+        }
+        // The edges are fine.
+        for change in [
+            (|c: &mut ChallengeConfig| c.max_number = MAX_CHALLENGE_NUMBER)
+                as fn(&mut ChallengeConfig),
+            |c| c.max_number = 1,
+            |c| c.ttl_secs = 10,
+            |c| c.ttl_secs = 86_400,
+            |c| c.path = "/api/v1/altcha.json".into(),
+        ] {
+            let mut q = p.clone();
+            change(q.services[0].challenge.as_mut().unwrap());
+            assert!(errors(&q).is_empty(), "{:?}", errors(&q));
+        }
+        // A path a route already answers (a `GET`: a `POST` of the same path is another thing).
+        if existing_method == HttpMethod::Get {
+            let mut q = p.clone();
+            q.services[0].challenge.as_mut().unwrap().path = existing_route;
+            assert!(errors(&q).contains(&"E_CHALLENGE_PATH".to_string()));
+        }
+        let mut q = p.clone();
+        q.openapi.serve = true;
+        q.openapi.path = "/challenge".into();
+        assert!(
+            errors(&q).contains(&"E_CHALLENGE_PATH".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        // A service with no route serves no HTTP: the challenge would never be handed out.
+        let mut q = sample::orders();
+        q.services[1].routes.clear();
+        q.services[1].challenge = Some(ChallengeConfig::default());
+        assert!(
+            errors(&q).contains(&"E_CHALLENGE_NO_HTTP".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+    }
+
+    #[test]
+    fn a_password_is_judged_in_a_route_on_a_text_with_a_score_from_0_to_4() {
+        let strength = |min_score: u8, password: Expr, bind: Option<&str>| Step::PasswordStrength {
+            id: "ps".into(),
+            password,
+            min_score,
+            inputs: vec![],
+            refuse_breached: false,
+            bind: bind.map(String::from),
+        };
+        let lit = |v: &str| Expr::Literal { value: v.into() };
+        let mut p = sample::orders();
+        let mut check = |step: Step, code: Option<&str>| {
+            route_of(&mut p).steps.insert(0, step);
+            let found = errors(&p);
+            route_of(&mut p).steps.remove(0);
+            match code {
+                None => assert!(found.is_empty(), "{found:?}"),
+                Some(c) => assert!(found.contains(&c.to_string()), "{c}: {found:?}"),
+            }
+        };
+        check(
+            strength(DEFAULT_MIN_PASSWORD_SCORE, lit("x"), Some("score")),
+            None,
+        );
+        check(strength(0, lit("x"), None), None);
+        check(strength(4, lit("x"), None), None);
+        check(strength(5, lit("x"), None), Some("E_PASSWORD_SCORE"));
+        check(
+            strength(3, Expr::Literal { value: 5.into() }, None),
+            Some("E_TYPE_MISMATCH"),
+        );
+        check(
+            strength(3, lit("x"), Some("input")),
+            Some("E_RESERVED_NAME"),
+        );
+        // The inputs are text too.
+        let mut with_input = strength(3, lit("x"), None);
+        if let Step::PasswordStrength { inputs, .. } = &mut with_input {
+            inputs.push(Expr::Literal { value: 1.into() });
+        }
+        check(with_input, Some("E_TYPE_MISMATCH"));
+        // Only a route answers 400 to a visitor.
+        let mut q = sample::orders();
+        q.services[0].jobs[0]
+            .steps
+            .push(strength(3, lit("x"), None));
+        assert!(
+            errors(&q).contains(&"E_PASSWORD_OUTSIDE_ROUTE".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+    }
+
+    fn with_api_keys() -> Project {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_api_keys(&mut p);
+        p
+    }
+
+    fn api_route<'a>(p: &'a mut Project, name: &str) -> &'a mut Route {
+        p.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == name)
+            .unwrap()
+    }
+
+    #[test]
+    fn the_api_key_steps_are_valid_and_checked() {
+        let mut p = with_api_keys();
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        // A scope is spelled the same in the key and in the route that asks for it.
+        for bad in ["", "Orders", "orders read", "a/b", &"x".repeat(65)] {
+            let mut q = p.clone();
+            if let Step::ApiKeyVerify { scope, .. } =
+                &mut api_route(&mut q, "machine_orders").steps[0]
+            {
+                *scope = Some(bad.into());
+            }
+            assert!(
+                errors(&q).contains(&"E_API_KEY_SCOPE".to_string()),
+                "{bad:?}: {:?}",
+                errors(&q)
+            );
+            let mut q = p.clone();
+            if let Step::ApiKeyCreate { scopes, .. } =
+                &mut api_route(&mut q, "issue_api_key").steps[1]
+            {
+                scopes.push(bad.into());
+            }
+            assert!(
+                errors(&q).contains(&"E_API_KEY_SCOPE".to_string()),
+                "{bad:?}: {:?}",
+                errors(&q)
+            );
+        }
+        // The key and its id are two variables, and neither is a reserved name.
+        let mut q = p.clone();
+        if let Step::ApiKeyCreate {
+            bind, key_id_bind, ..
+        } = &mut api_route(&mut q, "issue_api_key").steps[1]
+        {
+            *key_id_bind = Some(bind.clone());
+        }
+        assert!(
+            errors(&q).contains(&"E_API_KEY_BIND".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        let mut q = p.clone();
+        if let Step::ApiKeyVerify { bind, .. } = &mut api_route(&mut q, "machine_orders").steps[0] {
+            *bind = "input".into();
+        }
+        assert!(
+            errors(&q).contains(&"E_RESERVED_NAME".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        // The owner, the name and the key are text; the lifetime is a whole number.
+        let mut q = p.clone();
+        if let Step::ApiKeyCreate {
+            expires_in_secs,
+            name,
+            ..
+        } = &mut api_route(&mut q, "issue_api_key").steps[1]
+        {
+            *expires_in_secs = Some(Expr::Literal {
+                value: "soon".into(),
+            });
+            *name = Expr::Literal { value: 1.into() };
+        }
+        assert_eq!(
+            errors(&q)
+                .iter()
+                .filter(|c| *c == "E_TYPE_MISMATCH")
+                .count(),
+            2,
+            "{:?}",
+            errors(&q)
+        );
+        let mut q = p.clone();
+        if let Step::ApiKeyVerify { key, .. } = &mut api_route(&mut q, "machine_orders").steps[0] {
+            *key = Expr::Literal { value: 1.into() };
+        }
+        assert!(
+            errors(&q).contains(&"E_TYPE_MISMATCH".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        // What the key step binds can be read after it.
+        if let Step::Respond { fields, .. } = api_route(&mut p, "machine_orders")
+            .steps
+            .last_mut()
+            .unwrap()
+        {
+            fields[0].value = Expr::Path {
+                path: "nobody".into(),
+            };
+        }
+        assert!(
+            errors(&p).contains(&"E_UNKNOWN_PATH".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+    }
+
+    #[test]
+    fn a_bad_key_is_answered_so_the_check_and_the_revocation_belong_to_a_route_and_the_table_is_reserved()
+     {
+        let p = with_api_keys();
+        // A job has no one to answer 401 or 404: issuing a key is fine, checking or revoking one is not.
+        let mut q = p.clone();
+        let create = api_route(&mut q, "issue_api_key").steps[1].clone();
+        let verify = api_route(&mut q, "machine_orders").steps[0].clone();
+        let revoke = api_route(&mut q, "revoke_api_key").steps[1].clone();
+        let lit = |v: &str| Expr::Literal { value: v.into() };
+        let mut create = create;
+        if let Step::ApiKeyCreate {
+            owner,
+            name,
+            key_id_bind,
+            ..
+        } = &mut create
+        {
+            (*owner, *name, *key_id_bind) = (lit("acme"), lit("robot"), None);
+        }
+        q.services[0].jobs[0].steps.push(create);
+        assert!(errors(&q).is_empty(), "{:?}", errors(&q));
+        let (mut verify, mut revoke) = (verify, revoke);
+        if let Step::ApiKeyVerify { key, .. } = &mut verify {
+            *key = lit("sbk");
+        }
+        if let Step::ApiKeyRevoke { key_id, owner, .. } = &mut revoke {
+            (*key_id, *owner) = (lit("x"), None);
+        }
+        q.services[0].jobs[0].steps.extend([verify, revoke]);
+        assert_eq!(
+            errors(&q)
+                .iter()
+                .filter(|c| *c == "E_API_KEY_OUTSIDE_ROUTE")
+                .count(),
+            2,
+            "{:?}",
+            errors(&q)
+        );
+        // The service keeps `api_keys`.
+        let mut q = p.clone();
+        let mut table = Table::new(API_KEYS_TABLE, vec![Column::new("id", ColumnType::String)]);
+        table.columns[0].primary_key = true;
+        q.services[0].tables.push(table);
+        assert!(
+            errors(&q).contains(&"E_TABLE_RESERVED".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+    }
+
+    #[test]
+    fn compression_is_a_setting_of_a_service_that_has_routes() {
+        let mut p = sample::orders();
+        p.services[0].compression = true;
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        assert!(!has_warning(&p, "W_COMPRESSION_UNUSED"));
+        // A service with no HTTP API has nothing to compress.
+        p.services[1].routes.clear();
+        p.services[1].compression = true;
+        assert!(has_warning(&p, "W_COMPRESSION_UNUSED"));
+        assert!(
+            errors(&p).is_empty(),
+            "a warning, not an error: {:?}",
+            errors(&p)
+        );
+        // Left out, it is not written: a project without it is the same file as before.
+        let mut q = sample::orders();
+        q.services[0].compression = false;
+        assert!(!serde_json::to_string(&q).unwrap().contains("compression"));
+        q.services[0].compression = true;
+        assert!(
+            serde_json::to_string(&q)
+                .unwrap()
+                .contains("\"compression\":true")
+        );
+    }
+
+    #[test]
+    fn cleaning_html_takes_one_text_and_gives_one() {
+        let clean = |arg: Expr| call(Func::SanitizeHtml, vec![arg]);
+        let mut p = sample::orders();
+        let mut check = |value: Expr, ok: bool| {
+            route_of(&mut p).steps.insert(
+                0,
+                Step::Let {
+                    id: "h".into(),
+                    name: "cleaned".into(),
+                    value_type: FieldType::String,
+                    optional: false,
+                    repeated: false,
+                    value,
+                },
+            );
+            let found = errors(&p);
+            route_of(&mut p).steps.remove(0);
+            assert_eq!(found.is_empty(), ok, "{found:?}");
+        };
+        check(
+            clean(Expr::Literal {
+                value: "<b>x</b>".into(),
+            }),
+            true,
+        );
+        // A number is not text; two texts are one too many; none is one too few.
+        check(clean(Expr::Literal { value: 5.into() }), false);
+        check(call(Func::SanitizeHtml, vec![]), false);
+        check(
+            call(
+                Func::SanitizeHtml,
+                vec![
+                    Expr::Literal { value: "a".into() },
+                    Expr::Literal { value: "b".into() },
+                ],
+            ),
+            false,
+        );
+        // Its name is the one the compact syntax and the JSON use.
+        assert_eq!(Func::SanitizeHtml.name(), "sanitizeHtml");
+        assert_eq!(Func::from_name("sanitizeHtml"), Some(Func::SanitizeHtml));
+        // A project that does not clean HTML says nothing of it.
+        assert!(!sample::orders().services[0].uses_html_sanitizer());
+    }
+
+    #[test]
+    fn a_circuit_and_a_bulkhead_keep_to_values_that_mean_something() {
+        let mut p = sample::showcase();
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        // The same settings on a call to a service of the project (`callRpc`) and on an outbound call (`httpCall`).
+        let set = |p: &mut Project, circuit: Option<CircuitConfig>, max: Option<u32>| {
+            let mut touched = 0;
+            for s in &mut p.services {
+                for c in &mut s.consumers {
+                    for step in &mut c.steps {
+                        if let Step::CallRpc {
+                            circuit: ci,
+                            max_concurrent,
+                            ..
+                        } = step
+                        {
+                            (*ci, *max_concurrent) = (circuit, max);
+                            touched += 1;
+                        }
+                    }
+                }
+                for r in &mut s.routes {
+                    for step in &mut r.steps {
+                        if let Step::HttpCall {
+                            circuit: ci,
+                            max_concurrent,
+                            ..
+                        } = step
+                        {
+                            (*ci, *max_concurrent) = (circuit, max);
+                            touched += 1;
+                        }
+                    }
+                }
+            }
+            assert!(
+                touched >= 3,
+                "the showcase has two outbound calls and a call to a service"
+            );
+        };
+        let ok = CircuitConfig {
+            failures: 1,
+            window_secs: 1,
+            open_secs: 1,
+        };
+        set(&mut p, Some(ok), Some(1));
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        let top = CircuitConfig {
+            failures: MAX_CIRCUIT_FAILURES,
+            window_secs: MAX_CIRCUIT_SECS,
+            open_secs: MAX_CIRCUIT_SECS,
+        };
+        set(&mut p, Some(top), Some(MAX_CONCURRENT_CALLS));
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        for (code, circuit, max) in [
+            (
+                "E_CIRCUIT_FAILURES",
+                CircuitConfig { failures: 0, ..ok },
+                None,
+            ),
+            (
+                "E_CIRCUIT_FAILURES",
+                CircuitConfig {
+                    failures: MAX_CIRCUIT_FAILURES + 1,
+                    ..ok
+                },
+                None,
+            ),
+            (
+                "E_CIRCUIT_WINDOW",
+                CircuitConfig {
+                    window_secs: 0,
+                    ..ok
+                },
+                None,
+            ),
+            (
+                "E_CIRCUIT_WINDOW",
+                CircuitConfig {
+                    window_secs: MAX_CIRCUIT_SECS + 1,
+                    ..ok
+                },
+                None,
+            ),
+            ("E_CIRCUIT_OPEN", CircuitConfig { open_secs: 0, ..ok }, None),
+            (
+                "E_CIRCUIT_OPEN",
+                CircuitConfig {
+                    open_secs: MAX_CIRCUIT_SECS + 1,
+                    ..ok
+                },
+                None,
+            ),
+        ] {
+            let mut q = p.clone();
+            set(&mut q, Some(circuit), max);
+            assert!(
+                errors(&q).contains(&code.to_string()),
+                "{code}: {:?}",
+                errors(&q)
+            );
+        }
+        for bad in [0, MAX_CONCURRENT_CALLS + 1] {
+            let mut q = p.clone();
+            set(&mut q, None, Some(bad));
+            assert!(
+                errors(&q).contains(&"E_MAX_CONCURRENT".to_string()),
+                "{bad}: {:?}",
+                errors(&q)
+            );
+        }
+        // Left out, they are not written: a project without them is the same file as before.
+        let mut q = sample::orders();
+        set_none(&mut q);
+        assert!(!serde_json::to_string(&q).unwrap().contains("circuit"));
+        assert!(!serde_json::to_string(&q).unwrap().contains("maxConcurrent"));
+    }
+
+    /// Takes the circuits and the bulkheads off every call of a project.
+    fn set_none(p: &mut Project) {
+        for s in &mut p.services {
+            for step in s.consumers.iter_mut().flat_map(|c| c.steps.iter_mut()) {
+                if let Step::CallRpc {
+                    circuit,
+                    max_concurrent,
+                    ..
+                } = step
+                {
+                    (*circuit, *max_concurrent) = (None, None);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_shared_rate_limit_keeps_to_what_the_store_can_count() {
+        let mut p = sample::orders();
+        let limit = |max: u32, shared: bool| Step::RateLimit {
+            id: "rl".into(),
+            key: Expr::Literal { value: "k".into() },
+            max,
+            window_secs: 60,
+            shared,
+        };
+        let mut check = |step: Step, code: Option<&str>| {
+            route_of(&mut p).steps.insert(0, step);
+            let found = errors(&p);
+            route_of(&mut p).steps.remove(0);
+            match code {
+                None => assert!(found.is_empty(), "{found:?}"),
+                Some(c) => assert!(found.contains(&c.to_string()), "{c}: {found:?}"),
+            }
+        };
+        check(limit(SHARED_RATE_LIMIT_MAX, true), None);
+        check(
+            limit(SHARED_RATE_LIMIT_MAX + 1, true),
+            Some("E_RATE_LIMIT_SHARED_MAX"),
+        );
+        // In memory the entries are cheap: no such ceiling.
+        check(limit(SHARED_RATE_LIMIT_MAX + 1, false), None);
+    }
+
     #[test]
     fn a_rate_limit_is_checked() {
         let mut p = sample::orders();
@@ -5996,6 +7101,7 @@ mod tests {
             key,
             max,
             window_secs,
+            shared: false,
         };
         let lit = |v: &str| Expr::Literal { value: v.into() };
         let mut check = |step: Step, code: Option<&str>| {
@@ -6247,6 +7353,7 @@ mod tests {
                 key: Expr::Literal { value: "k".into() },
                 max: 1,
                 window_secs: 60,
+                shared: false,
             },
         ] {
             p.services[0].jobs[0].steps.push(step);
@@ -7965,6 +9072,8 @@ mod tests {
             method: "X".into(),
             request: vec![],
             bind: None,
+            circuit: None,
+            max_concurrent: None,
         });
         p.services[2].consumers[1].steps.push(Step::CallRpc {
             id: "d".into(),
@@ -7972,6 +9081,8 @@ mod tests {
             method: "Missing".into(),
             request: vec![],
             bind: None,
+            circuit: None,
+            max_concurrent: None,
         });
         let e = errors(&p);
         assert!(e.contains(&"E_SELF_CALL".into()));

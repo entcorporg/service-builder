@@ -80,13 +80,22 @@ fn bind(project: &Project, scope: &mut BTreeMap<String, Ty>, step: &Step) {
         }
         return;
     }
+    // An API key's id comes apart from what `bind` holds (the key, or its owner).
+    if matches!(kind, "apiKeyCreate" | "apiKeyVerify")
+        && let Some(var) = text("keyIdBind")
+    {
+        scope.insert(var.into(), scalar("string"));
+    }
     let Some(var) = text("bind") else { return };
     let ty = match kind {
         "verifyPassword" => scalar("bool"),
+        // What is left of the quota after this request.
+        "checkQuota" => scalar("int64"),
+        // The score of the password, 0 to 4.
+        "passwordStrength" => scalar("int32"),
         "hashPassword" | "randomToken" | "sha256" | "encrypt" | "decrypt" | "signJwt"
-        | "passkeyLoginFinish" | "imageSniff" | "objectPresignGet" | "objectPresignPut" => {
-            scalar("string")
-        }
+        | "apiKeyCreate" | "apiKeyVerify" | "passkeyLoginFinish" | "imageSniff"
+        | "objectPresignGet" | "objectPresignPut" => scalar("string"),
         "verifyJwt" => message(text("schema").unwrap_or_default()),
         "totpGenerate" => message("TotpSetup"),
         "recoveryCodes" => Ty {
@@ -214,6 +223,23 @@ mod tests {
                 .any(|v| v.path == "order_id" && v.ty == "string"),
             "{after:?}"
         );
+    }
+
+    #[test]
+    fn what_is_left_of_a_quota_is_offered_to_the_steps_after_it() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_usage(&mut p);
+        let route = p.services[0]
+            .routes
+            .iter()
+            .find(|r| r.name == "usage_report")
+            .unwrap();
+        let before = variables(&p, Some(&route.request), &route.steps[..1]);
+        assert!(!before.iter().any(|v| v.path == "calls_left"));
+        let after = variables(&p, Some(&route.request), &route.steps[..2]);
+        let left = after.iter().find(|v| v.path == "calls_left").unwrap();
+        assert_eq!(left.ty, "int64");
     }
 
     #[test]

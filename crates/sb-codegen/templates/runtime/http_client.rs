@@ -106,6 +106,8 @@ pub struct Call<'a> {
     pub timeout_secs: u64,
     pub retries: u32,
     pub idempotency_key: Option<String>,
+    /// The circuit breaker and the bulkhead of the step (see `resilience`): none by default.
+    pub resilience: crate::resilience::Policy,
 }
 
 /// What came back. `status` is `0` when nobody answered (timeout, host unreachable, an answer that is too large).
@@ -237,7 +239,27 @@ fn client() -> &'static reqwest::Client {
 /// answer) is the [`Answer`].
 pub async fn send(call: Call<'_>) -> Result<Answer> {
     let base = base_url(call.base_url_env)?;
-    send_to(base, call).await
+    send_guarded(base, call).await
+}
+
+/// The call, through the circuit and the bulkhead of its step. A call they refuse is not made: it is answered like a call nobody
+/// answered (status `0`), so that `on_error` decides what the flow does. Whether the dependency is unwell is judged on the whole
+/// call, retries included: a timeout, no answer, a 429 or a 5xx; a 4xx is the caller's doing, and so is a call that was wrong in
+/// itself (a value that cannot be sent, a setting that is missing), which says nothing of the dependency.
+async fn send_guarded(base: reqwest::Url, call: Call<'_>) -> Result<Answer> {
+    let guard = match crate::resilience::enter(call.resilience, call.base_url_env, call.id) {
+        Ok(guard) => guard,
+        Err(rejected) => {
+            tracing::warn!(step = call.id, reason = rejected.reason, retry_after = rejected.retry_after, "outbound call not made");
+            return Ok(Answer { status: 0, body: vec![] });
+        }
+    };
+    let answer = send_to(base, call).await;
+    match &answer {
+        Ok(a) => guard.finish(!(a.status == 0 || a.status == 429 || a.status >= 500)),
+        Err(_) => drop(guard),
+    }
+    answer
 }
 
 async fn send_to(base: reqwest::Url, call: Call<'_>) -> Result<Answer> {
@@ -432,6 +454,7 @@ mod tests {
             timeout_secs: 2,
             retries: 0,
             idempotency_key: None,
+            resilience: Default::default(),
         }
     }
 
@@ -660,5 +683,83 @@ mod tests {
         let err = send_to(base, c).await.unwrap_err();
         assert!(err.downcast_ref::<HttpError>().is_none(), "a 500, not something the client did");
         assert!(fake.seen.lock().unwrap().is_empty());
+    }
+
+    fn guarded<'a>(path: &'a str, id: &'a str, base_env: &'a str, policy: crate::resilience::Policy) -> Call<'a> {
+        let mut c = call("GET", path);
+        (c.id, c.base_url_env, c.resilience) = (id, base_env, policy);
+        c
+    }
+
+    #[tokio::test]
+    async fn a_dependency_that_keeps_failing_is_not_asked_any_more_and_a_refusal_of_the_caller_is_not_its_failure() {
+        use crate::resilience::{Circuit, Policy};
+        let (fake, base) = spawn().await;
+        let policy = Policy { circuit: Some(Circuit { failures: 2, window_secs: 30, open_secs: 30 }), max_concurrent: None };
+        let (id, env) = ("circuit-503", "EDA_TEST_CIRCUIT_API_URL");
+        // Two 503s open the circuit: the third call is not made, and is answered like a call nobody answered.
+        for _ in 0..2 {
+            assert_eq!(send_guarded(base.clone(), guarded("/status/503", id, env, policy)).await.unwrap().status, 503);
+        }
+        assert_eq!(fake.seen.lock().unwrap().len(), 2);
+        let refused = send_guarded(base.clone(), guarded("/status/503", id, env, policy)).await.unwrap();
+        assert_eq!(refused.status, 0);
+        assert_eq!(fake.seen.lock().unwrap().len(), 2, "the dependency was not asked");
+        // Another step that calls the same dependency is cut off too: the circuit is the dependency's.
+        let other = send_guarded(base.clone(), guarded("/ok", "circuit-other-step", env, policy)).await.unwrap();
+        assert_eq!(other.status, 0);
+        assert_eq!(fake.seen.lock().unwrap().len(), 2);
+        // Without a circuit the same call goes through: the options are the step's.
+        let plain = send_guarded(base, guarded("/ok", "circuit-plain", env, Policy::default())).await.unwrap();
+        assert!(plain.ok());
+    }
+
+    #[tokio::test]
+    async fn a_400_or_a_call_that_was_wrong_in_itself_does_not_open_the_circuit_and_a_success_closes_it_again() {
+        use crate::resilience::{Circuit, Policy, snapshot};
+        let (fake, base) = spawn().await;
+        let policy = Policy { circuit: Some(Circuit { failures: 2, window_secs: 30, open_secs: 1 }), max_concurrent: None };
+        let (id, env) = ("circuit-4xx", "EDA_TEST_CIRCUIT_4XX_URL");
+        // Five 404s and a header that cannot be sent: the dependency is fine, none of it counts.
+        for _ in 0..5 {
+            assert_eq!(send_guarded(base.clone(), guarded("/status/404", id, env, policy)).await.unwrap().status, 404);
+        }
+        let mut bad = guarded("/ok", id, env, policy);
+        bad.headers.set("bad header", "x");
+        assert_eq!(status_of(send_guarded(base.clone(), bad).await), Some(400));
+        assert!(send_guarded(base.clone(), guarded("/ok", id, env, policy)).await.unwrap().ok());
+        assert!(snapshot().contains(&(env.to_string(), "closed")), "{:?}", snapshot());
+        // Two failures open it; after the delay one call tries, succeeds, and closes it.
+        for _ in 0..2 {
+            send_guarded(base.clone(), guarded("/status/500", id, env, policy)).await.unwrap();
+        }
+        assert!(snapshot().contains(&(env.to_string(), "open")));
+        let seen = fake.seen.lock().unwrap().len();
+        assert_eq!(send_guarded(base.clone(), guarded("/ok", id, env, policy)).await.unwrap().status, 0);
+        assert_eq!(fake.seen.lock().unwrap().len(), seen);
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        assert!(send_guarded(base, guarded("/ok", id, env, policy)).await.unwrap().ok());
+        assert!(snapshot().contains(&(env.to_string(), "closed")));
+    }
+
+    #[tokio::test]
+    async fn the_bulkhead_refuses_a_call_while_the_slow_ones_hold_every_place() {
+        use crate::resilience::Policy;
+        let (_fake, base) = spawn().await;
+        let policy = Policy { circuit: None, max_concurrent: Some(1) };
+        let slow = {
+            let base = base.clone();
+            tokio::spawn(async move {
+                let mut c = guarded("/slow", "bulkhead-http", "EDA_TEST_BULKHEAD_URL", policy);
+                c.timeout_secs = 5;
+                send_guarded(base, c).await.unwrap().status
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let refused = send_guarded(base.clone(), guarded("/ok", "bulkhead-http", "EDA_TEST_BULKHEAD_URL", policy)).await.unwrap();
+        assert_eq!(refused.status, 0, "no place: refused at once, not queued behind the slow one");
+        assert_eq!(slow.await.unwrap(), 200);
+        // The place is free again.
+        assert!(send_guarded(base, guarded("/ok", "bulkhead-http", "EDA_TEST_BULKHEAD_URL", policy)).await.unwrap().ok());
     }
 }
