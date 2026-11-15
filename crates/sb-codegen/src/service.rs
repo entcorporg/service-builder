@@ -212,6 +212,9 @@ fn cargo_toml(service: &Service) -> String {
     if service.uses_short_ids() {
         features.push("\"short-id\"");
     }
+    if service.uses_time_zones() {
+        features.push("\"time-zones\"");
+    }
     let passkeys = if features.is_empty() {
         String::new()
     } else {

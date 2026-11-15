@@ -953,6 +953,7 @@ pub fn showcase() -> Project {
     add_usage(&mut p);
     add_api_keys(&mut p);
     add_invoices(&mut p);
+    add_calendar(&mut p);
     add_sql_reads(&mut p);
     add_mailer(&mut p);
     add_mail_design(&mut p);
@@ -1930,6 +1931,71 @@ pub fn add_api_keys(p: &mut Project) {
             Step::Respond {
                 id: "k8".into(),
                 fields: vec![set("owner", path("owner"))],
+                status: None,
+                cookies: vec![],
+                headers: vec![],
+            },
+        ],
+    });
+}
+
+/// A route that tells the calendar of a visitor from the time zone in its path: the day it is for them, when that day began (not a
+/// multiple of 86 400 seconds: a day is 23 or 25 hours when the clocks change), the same time next week and next month on their
+/// clock.
+pub fn add_calendar(p: &mut Project) {
+    p.messages.push(api(
+        "CalendarRequest",
+        vec![field("zone", FieldType::String)],
+    ));
+    p.messages.push(api(
+        "CalendarAnswer",
+        vec![
+            field("today", FieldType::String),
+            field("day_start", FieldType::Int64),
+            field("next_week", FieldType::Int64),
+            field("next_month", FieldType::Int64),
+            field("paris_now", FieldType::String),
+        ],
+    ));
+    let zone = || path("input.zone");
+    p.services[0].routes.push(Route {
+        name: "calendar".into(),
+        method: HttpMethod::Get,
+        path: "/calendar/{zone}".into(),
+        request: "CalendarRequest".into(),
+        response: "CalendarAnswer".into(),
+        status: 200,
+        steps: vec![
+            Step::Let {
+                id: "t1".into(),
+                name: "now".into(),
+                value_type: FieldType::Int64,
+                optional: false,
+                repeated: false,
+                value: call(Func::NowSeconds, vec![]),
+            },
+            Step::Respond {
+                id: "t2".into(),
+                fields: vec![
+                    set("today", call(Func::LocalDate, vec![path("now"), zone()])),
+                    set(
+                        "day_start",
+                        call(Func::StartOfDay, vec![path("now"), zone()]),
+                    ),
+                    set(
+                        "next_week",
+                        call(Func::AddDays, vec![path("now"), lit(7), zone()]),
+                    ),
+                    set(
+                        "next_month",
+                        call(Func::AddMonths, vec![path("now"), lit(1), zone()]),
+                    ),
+                    // A zone written in the flow is checked when the project is: a typo would be a 400 at every call.
+                    set(
+                        "paris_now",
+                        call(Func::LocalTime, vec![path("now"), lit("Europe/Paris")]),
+                    ),
+                ],
                 status: None,
                 cookies: vec![],
                 headers: vec![],

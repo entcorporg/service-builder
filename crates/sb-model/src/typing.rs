@@ -310,9 +310,14 @@ pub fn parse_template(template: &str) -> Result<Vec<TemplatePart>, String> {
     Ok(parts)
 }
 
+/// Whether `name` is a time zone of the IANA database (`Europe/Paris`, `UTC`): the database is bundled with the editor.
+pub fn is_time_zone(name: &str) -> bool {
+    jiff::tz::TimeZone::get(name).is_ok()
+}
+
 impl Func {
     /// Every operation, in the order the editors list them.
-    pub const ALL: [Func; 34] = [
+    pub const ALL: [Func; 41] = [
         Func::Concat,
         Func::Lower,
         Func::Upper,
@@ -346,6 +351,13 @@ impl Func {
         Func::NewUuidV7,
         Func::ShortId,
         Func::FromShortId,
+        Func::NowSeconds,
+        Func::LocalDate,
+        Func::LocalTime,
+        Func::StartOfDay,
+        Func::AddDays,
+        Func::AddMonths,
+        Func::ParseLocal,
         Func::ListLength,
     ];
 
@@ -365,7 +377,8 @@ impl Func {
     pub fn arity(self) -> (usize, Option<usize>) {
         use Func::*;
         match self {
-            NewUuid | NewUuidV7 => (0, Some(0)),
+            NewUuid | NewUuidV7 | NowSeconds => (0, Some(0)),
+            AddDays | AddMonths => (3, Some(3)),
             Concat => (1, None),
             Lower | Upper | Trim | SanitizeHtml | Length | Round | Floor | Ceil | ToInt32
             | ToInt64 | ToDouble | ToText | ParseInt64 | ParseDouble | ShortId | FromShortId
@@ -554,6 +567,38 @@ fn call_type(
             Ok(Some(plain))
         }
         NewUuid | NewUuidV7 => result(FieldType::Uuid),
+        NowSeconds => result(FieldType::Int64),
+        LocalDate | LocalTime | StartOfDay | AddDays | AddMonths | ParseLocal => {
+            let int = TypeRef::scalar(FieldType::Int64);
+            // The instant (or the text to read), then what is added, then the zone: always the last argument.
+            match func {
+                ParseLocal => check(0, &text)?,
+                _ => check(0, &int)?,
+            }
+            if matches!(func, AddDays | AddMonths) {
+                check(1, &int)?;
+            }
+            let zone = args.len() - 1;
+            check(zone, &text)?;
+            // A zone written in the flow is checked now: a typo would be a 400 at every call.
+            if let Expr::Literal { value } = &args[zone]
+                && let Some(name) = value.as_str()
+                && !is_time_zone(name)
+            {
+                return Err(format!(
+                    "`{name}` is not a time zone of the IANA database (`Europe/Paris`, `America/New_York`, `UTC`)"
+                ));
+            }
+            match func {
+                LocalDate | LocalTime => result(FieldType::String),
+                ParseLocal => Ok(Some(TypeRef {
+                    optional: true,
+                    ty: FieldType::Int64,
+                    repeated: false,
+                })),
+                _ => result(FieldType::Int64),
+            }
+        }
         ShortId => {
             check(0, &TypeRef::scalar(FieldType::Int64))?;
             result(FieldType::String)

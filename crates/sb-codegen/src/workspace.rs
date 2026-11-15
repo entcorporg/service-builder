@@ -28,6 +28,7 @@ const RUNTIME_API_KEY: &str = include_str!("../templates/runtime/api_key.rs");
 const RUNTIME_RESILIENCE: &str = include_str!("../templates/runtime/resilience.rs");
 const RUNTIME_SEQUENCE: &str = include_str!("../templates/runtime/sequence.rs");
 const RUNTIME_SHORT_ID: &str = include_str!("../templates/runtime/short_id.rs");
+const RUNTIME_TIME_ZONE: &str = include_str!("../templates/runtime/time_zone.rs");
 const RUNTIME_HTML: &str = include_str!("../templates/runtime/html.rs");
 const RUNTIME_PASSWORD: &str = include_str!("../templates/runtime/password.rs");
 const RUNTIME_USAGE: &str = include_str!("../templates/runtime/usage.rs");
@@ -67,6 +68,7 @@ pub fn files(project: &Project) -> Vec<GeneratedFile> {
         GeneratedFile::new("runtime/src/password.rs", RUNTIME_PASSWORD),
         GeneratedFile::new("runtime/src/api_key.rs", RUNTIME_API_KEY),
         GeneratedFile::new("runtime/src/html.rs", RUNTIME_HTML),
+        GeneratedFile::new("runtime/src/time_zone.rs", RUNTIME_TIME_ZONE),
         GeneratedFile::new("runtime/src/sequence.rs", RUNTIME_SEQUENCE),
         GeneratedFile::new("runtime/src/short_id.rs", RUNTIME_SHORT_ID),
         GeneratedFile::new("runtime/src/resilience.rs", RUNTIME_RESILIENCE),
@@ -183,6 +185,7 @@ sha1 = "0.11"
 zxcvbn = "3"
 ammonia = "4"
 sqids = "0.4"
+jiff = {{ version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }}
 aws-config = "1"
 aws-sdk-s3 = "1"
 async-trait = "0.1"

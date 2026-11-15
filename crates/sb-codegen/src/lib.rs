@@ -186,6 +186,7 @@ mod tests {
                 "runtime/src/s3.rs",
                 "runtime/src/sequence.rs",
                 "runtime/src/short_id.rs",
+                "runtime/src/time_zone.rs",
                 "runtime/src/totp.rs",
                 "runtime/src/usage.rs",
                 "runtime/src/validation.rs",
@@ -1599,6 +1600,36 @@ mod tests {
         let plain = generate(&sample::orders()).unwrap();
         assert!(!file(&plain, "services/orders/Cargo.toml").contains("short-id"));
         assert!(!file(&plain, "services/orders/src/app/schema.rs").contains("sequence"));
+    }
+
+    #[test]
+    fn calendar_arithmetic_goes_through_the_zones_of_the_runtime_and_only_its_service_builds_them()
+    {
+        let mut p = sample::orders();
+        sample::add_calendar(&mut p);
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs").replace('\n', " ");
+        let api = api.split_whitespace().collect::<Vec<_>>().join(" ");
+        for expected in [
+            "let now: i64 = eda_runtime::time_zone::now_seconds();",
+            "today: eda_runtime::time_zone::local_date(now.clone(), &(input.zone.clone()))?",
+            "day_start: eda_runtime::time_zone::start_of_day(now.clone(), &(input.zone.clone()))?",
+            "next_week: eda_runtime::time_zone::add_days(now.clone(), 7, &(input.zone.clone()))?",
+            "next_month: eda_runtime::time_zone::add_months(now.clone(), 1, &(input.zone.clone()))?",
+            "paris_now: eda_runtime::time_zone::local_time(now.clone(), &(\"Europe/Paris\".to_string()))?",
+        ] {
+            assert!(api.contains(expected), "{expected}\n{api}");
+        }
+        assert!(file(&files, "services/orders/Cargo.toml").contains("\"time-zones\""));
+        assert!(file(&files, "runtime/Cargo.toml").contains("time-zones = [\"dep:jiff\"]"));
+        assert!(
+            file(&files, "runtime/src/lib.rs")
+                .contains("#[cfg(feature = \"time-zones\")]\npub mod time_zone;")
+        );
+        // The zones are bundled: the service does not read the tzdata of the machine it runs on.
+        assert!(file(&files, "Cargo.toml").contains("tzdb-bundle-always"));
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/Cargo.toml").contains("time-zones"));
     }
 
     #[test]

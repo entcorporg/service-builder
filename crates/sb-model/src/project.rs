@@ -2307,6 +2307,27 @@ pub enum Func {
     FromShortId,
     /// Number of elements of a list (int64).
     ListLength,
+    /// The current instant, in whole seconds since 1970 (int64): what the functions below take and give.
+    NowSeconds,
+    /// `localDate(seconds, zone)`: the calendar day of an instant in a time zone, as `2026-03-29` (a text). A report "per day" is
+    /// per day **of someone**: 23:30 in Paris is already the next day in Tokyo.
+    LocalDate,
+    /// `localTime(seconds, zone)`: an instant as the local date and time with the offset of the zone then, as
+    /// `2026-03-29T03:30:00+02:00` (RFC 3339, a text).
+    LocalTime,
+    /// `startOfDay(seconds, zone)`: the instant (seconds, int64) at which the day of `seconds` began in the zone. A day is not 86400
+    /// seconds: it is 82800 the day the clocks go forward and 90000 the day they go back.
+    StartOfDay,
+    /// `addDays(seconds, days, zone)`: the instant `days` calendar days later (or earlier, if negative) **at the same time on the
+    /// clock** in the zone: a day later at 09:00 is 09:00 the next day, 23 or 25 hours after across a change of time.
+    AddDays,
+    /// `addMonths(seconds, months, zone)`: the same on the clock `months` calendar months later; the 31st plus a month is the last
+    /// day of the next month (`January 31` gives `February 28`).
+    AddMonths,
+    /// `parseLocal(text, zone)`: the instant (seconds, int64) of a date and time written without offset, `2026-03-29T10:00:00` or
+    /// `2026-03-29 10:00` (a date alone is its midnight), read in the zone; absent when the text is not one. A time that does not
+    /// exist (the hour skipped when the clocks go forward) is moved forward by the gap, one that happens twice is the first.
+    ParseLocal,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -2647,6 +2668,23 @@ impl Service {
             step.walk(&mut |s| used |= matches!(s, Step::NextNumber { .. }));
         }
         used
+    }
+
+    /// Whether an expression of the service works in a time zone: the runtime then brings the zones in (`time-zones`).
+    pub fn uses_time_zones(&self) -> bool {
+        serde_json::to_string(self).is_ok_and(|json| {
+            [
+                "nowSeconds",
+                "localDate",
+                "localTime",
+                "startOfDay",
+                "addDays",
+                "addMonths",
+                "parseLocal",
+            ]
+            .iter()
+            .any(|f| json.contains(&format!("\"func\":\"{f}\"")))
+        })
     }
 
     /// Whether an expression of the service makes or reads a short identifier: the runtime then brings Sqids in (`short-id`).

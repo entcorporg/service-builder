@@ -27,6 +27,7 @@ sha1.workspace = true
 zxcvbn = { workspace = true, optional = true }
 ammonia = { workspace = true, optional = true }
 sqids = { workspace = true, optional = true }
+jiff = { workspace = true, optional = true }
 webauthn-rs = { workspace = true, optional = true }
 webauthn-authenticator-rs = { workspace = true, optional = true }
 redis = { workspace = true, optional = true }
@@ -46,6 +47,8 @@ password-strength = ["dep:zxcvbn", "dep:reqwest"]
 html = ["dep:ammonia"]
 # Short identifiers (`shortId`, `fromShortId`) bring Sqids in: only the services that use them build it.
 short-id = ["dep:sqids"]
+# Calendar arithmetic in a time zone (`localDate`, `startOfDay`, `addMonths`...) brings Jiff and the bundled zones in.
+time-zones = ["dep:jiff"]
 # Passkeys bring OpenSSL in: only the services that have a passkey step turn this on.
 webauthn = ["dep:webauthn-rs"]
 # The tests of the passkeys, against a software authenticator.

@@ -151,6 +151,11 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
       # The circuit breaker and the bulkhead of the outbound calls (and the client itself), against a fake API on a local port.
+      - run: "cargo test -p eda-runtime --features time-zones --lib time_zone::"
+        working-directory: ${{ runner.temp }}/generated
+        env:
+          CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
+      # Calendar arithmetic in a zone: the days of 23 and 25 hours, the end of a month, the time that does not exist.
       - run: "cargo test -p eda-runtime --features short-id --lib -- short_id:: logic::"
         working-directory: ${{ runner.temp }}/generated
         env:

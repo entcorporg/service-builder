@@ -28,6 +28,8 @@ pub mod short_id;
 pub mod resilience;
 #[cfg(feature = "s3")]
 pub mod s3;
+#[cfg(feature = "time-zones")]
+pub mod time_zone;
 pub mod totp;
 pub mod usage;
 pub mod validation;

@@ -422,6 +422,25 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
     **Le prix** : les flux qui numérotent la même suite et le même `scope` s'attendent l'un l'autre ; il faut donc numéroter **le
     plus tard possible**, juste avant ce qu'on écrit avec, et garder court ce qui suit. Limites : pas de numéro formaté (le préfixe, l'année,
     le remplissage de zéros se font avec une expression), pas de choix du type d'identifiant dans l'éditeur de table.
+- **Fuseaux horaires et calendrier** : sept opérations d'expression, avec [Jiff](https://github.com/BurntSushi/jiff) (MIT ou
+  Unlicense) et la **base IANA embarquée** (le service ne dépend pas du `tzdata` de la machine où il tourne). Un **instant** est un
+  entier de **secondes depuis 1970** (`int64`), un **fuseau** son nom IANA (`Europe/Paris`, `America/New_York`, `UTC`).
+  `nowSeconds()` ; `localDate(s, fuseau)` : le jour (`2026-03-29`, texte) ; `localTime(s, fuseau)` : la date et l'heure locales avec le
+  décalage d'alors (`2026-03-29T03:30:00+02:00`) ; `startOfDay(s, fuseau)` : l'instant où le jour a commencé ; `addDays(s, n, fuseau)` et
+  `addMonths(s, n, fuseau)` ; `parseLocal(texte, fuseau)` : l'instant d'une date et heure écrites **sans décalage**
+  (`2026-03-29T10:00` ou `2026-03-29 10:00` ; une date seule est son minuit), **optionnel** (absent si le texte n'en est pas un).
+  Ce qui est calendaire suit le calendrier : **un jour n'a pas 86 400 secondes** (82 800 le jour où les horloges avancent, 90 000
+  quand elles reculent, et `startOfDay` n'est pas un multiple de 86 400) ; `addDays` et `addMonths` gardent **l'heure sur
+  l'horloge** (9 h plus un jour, c'est 9 h le lendemain, 23 ou 25 heures plus tard au changement d'heure), et le 31 plus un mois est
+  le dernier jour du mois suivant (31 janvier → 28 février) ; une heure locale qui **n'existe pas** (celle sautée au passage à
+  l'heure d'été) est avancée de l'écart, une qui **a lieu deux fois** est la première. Un texte qui porte **son propre décalage ou
+  fuseau** (`…+02:00`, `…Z`, `[Europe/Paris]`) n'est pas une heure d'horloge : `parseLocal` le refuse (l'analyseur accepterait
+  `+02:00` en l'oubliant, et l'instant serait faux). Un fuseau **écrit dans le flux** est vérifié à l'édition (`E_EXPR_TYPE` : « n'est
+  pas un fuseau de la base IANA ») ; un fuseau qui vient des données est vérifié à l'appel : un `400` qui le nomme (aussi pour un
+  instant hors des années comptées). Seul le service qui les emploie compile Jiff (feature `time-zones`). **Limites** : pas de type
+  « date » ni « heure locale » dans le modèle (un `timestamp` de message reste un `Timestamp` protobuf que les expressions ne lisent
+  pas : on passe par des secondes ou du texte), et le fuseau d'un locataire est une valeur qu'on lit et qu'on passe, pas un réglage
+  du locataire.
 - **Règles de champ** : un champ texte (`string`, `uuid`) d'un schéma API peut porter des règles (`rules`), vérifiées par le
   handler généré **avant toute étape**, dans l'ordre des champs ; la première qui échoue répond `400 { "error": "champ : … " }`.
   - `length` (`min`, `max`) : entre `min` et `max` **caractères** (pas octets), texte rogné avant d'être compté ; la borne

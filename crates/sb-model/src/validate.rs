@@ -7258,6 +7258,159 @@ mod tests {
     }
 
     #[test]
+    fn the_calendar_functions_take_instants_and_zones_and_a_zone_written_in_the_flow_must_exist() {
+        let int = |n: i64| Expr::Literal { value: n.into() };
+        let text = |t: &str| Expr::Literal { value: t.into() };
+        let mut p = sample::orders();
+        let mut check = |value_type: FieldType, optional: bool, value: Expr, ok: bool| {
+            route_of(&mut p).steps.insert(
+                0,
+                Step::Let {
+                    id: "c".into(),
+                    name: "made".into(),
+                    value_type,
+                    optional,
+                    repeated: false,
+                    value,
+                },
+            );
+            let found = errors(&p);
+            route_of(&mut p).steps.remove(0);
+            assert_eq!(found.is_empty(), ok, "{found:?}");
+        };
+        let paris = || text("Europe/Paris");
+        check(
+            FieldType::Int64,
+            false,
+            call(Func::NowSeconds, vec![]),
+            true,
+        );
+        check(
+            FieldType::Int64,
+            false,
+            call(Func::NowSeconds, vec![int(1)]),
+            false,
+        );
+        check(
+            FieldType::String,
+            false,
+            call(Func::LocalDate, vec![int(0), paris()]),
+            true,
+        );
+        check(
+            FieldType::String,
+            false,
+            call(Func::LocalTime, vec![int(0), text("UTC")]),
+            true,
+        );
+        check(
+            FieldType::Int64,
+            false,
+            call(Func::StartOfDay, vec![int(0), paris()]),
+            true,
+        );
+        check(
+            FieldType::Int64,
+            false,
+            call(Func::AddDays, vec![int(0), int(7), paris()]),
+            true,
+        );
+        check(
+            FieldType::Int64,
+            false,
+            call(Func::AddMonths, vec![int(0), int(-1), paris()]),
+            true,
+        );
+        // A text that may not be a date: the instant is optional.
+        check(
+            FieldType::Int64,
+            true,
+            call(Func::ParseLocal, vec![text("2026-03-29T10:00"), paris()]),
+            true,
+        );
+        check(
+            FieldType::Int64,
+            false,
+            call(Func::ParseLocal, vec![text("2026-03-29T10:00"), paris()]),
+            false,
+        );
+        // The types: seconds first (not a text), the zone last (not a number), days and months whole numbers.
+        check(
+            FieldType::String,
+            false,
+            call(Func::LocalDate, vec![text("0"), paris()]),
+            false,
+        );
+        check(
+            FieldType::String,
+            false,
+            call(Func::LocalDate, vec![int(0), int(1)]),
+            false,
+        );
+        check(
+            FieldType::Int64,
+            false,
+            call(Func::AddDays, vec![int(0), text("7"), paris()]),
+            false,
+        );
+        check(
+            FieldType::Int64,
+            false,
+            call(Func::AddDays, vec![int(0), paris()]),
+            false,
+        );
+        // A zone written in the flow must be in the IANA database; one that comes from the data is the runtime's to check.
+        check(
+            FieldType::String,
+            false,
+            call(Func::LocalDate, vec![int(0), text("Europe/Pariss")]),
+            false,
+        );
+        check(
+            FieldType::String,
+            false,
+            call(Func::LocalDate, vec![int(0), text("")]),
+            false,
+        );
+        check(
+            FieldType::String,
+            false,
+            call(Func::LocalDate, vec![int(0), text("America/New_York")]),
+            true,
+        );
+        check(
+            FieldType::String,
+            false,
+            call(Func::LocalDate, vec![int(0), text("UTC")]),
+            true,
+        );
+        check(
+            FieldType::Int64,
+            true,
+            call(Func::ParseLocal, vec![text("x"), text("Mars/Olympus")]),
+            false,
+        );
+        // Their names are the ones the compact syntax and the JSON use.
+        for (func, name) in [
+            (Func::NowSeconds, "nowSeconds"),
+            (Func::LocalDate, "localDate"),
+            (Func::LocalTime, "localTime"),
+            (Func::StartOfDay, "startOfDay"),
+            (Func::AddDays, "addDays"),
+            (Func::AddMonths, "addMonths"),
+            (Func::ParseLocal, "parseLocal"),
+        ] {
+            assert_eq!(func.name(), name);
+            assert_eq!(Func::from_name(name), Some(func));
+        }
+        assert!(!sample::orders().services[0].uses_time_zones());
+        assert!(
+            crate::typing::is_time_zone("Europe/Paris")
+                && !crate::typing::is_time_zone("Europe/Pariss")
+        );
+    }
+
+    #[test]
     fn a_shared_rate_limit_keeps_to_what_the_store_can_count() {
         let mut p = sample::orders();
         let limit = |max: u32, shared: bool| Step::RateLimit {
