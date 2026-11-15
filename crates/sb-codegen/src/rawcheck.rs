@@ -116,6 +116,42 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                     expr(owner, &format!("{path}/owner"), out);
                 }
             }
+            Step::Audit {
+                target,
+                actor,
+                tenant,
+                before,
+                after,
+                ..
+            } => {
+                expr(target, &format!("{path}/target"), out);
+                expr(actor, &format!("{path}/actor"), out);
+                if let Some(tenant) = tenant {
+                    expr(tenant, &format!("{path}/tenant"), out);
+                }
+                assignments(before, &format!("{path}/before"), out);
+                assignments(after, &format!("{path}/after"), out);
+            }
+            Step::AuditRead {
+                tenant,
+                target_type,
+                target,
+                action,
+                cursor,
+                ..
+            } => {
+                expr(tenant, &format!("{path}/tenant"), out);
+                for (value, name) in [
+                    (target_type, "targetType"),
+                    (target, "target"),
+                    (action, "action"),
+                    (cursor, "cursor"),
+                ] {
+                    if let Some(value) = value {
+                        expr(value, &format!("{path}/{name}"), out);
+                    }
+                }
+            }
             Step::NextNumber { scope, .. } => {
                 if let Some(by) = scope {
                     expr(by, &format!("{path}/scope"), out);

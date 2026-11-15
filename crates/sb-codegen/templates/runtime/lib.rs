@@ -14,6 +14,7 @@ pub mod jobs;
 pub mod html;
 pub mod jwt;
 pub mod api_key;
+pub mod audit;
 pub mod challenge;
 pub mod logic;
 #[cfg(feature = "live")]

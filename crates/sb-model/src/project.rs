@@ -1098,6 +1098,58 @@ pub enum Step {
     /// Routes only, in a service that serves a challenge.
     #[serde(rename_all = "camelCase")]
     VerifyChallenge { id: String, payload: Expr },
+    /// Writes what happened to the audit journal: who (`actor`) did what (`action`, `invoice.issued`) to what (`targetType` and
+    /// `target`), for which company (`tenant`), with the values `before` and `after` the change. A row of the table
+    /// `audit_events` of the service's database, written **in the transaction of the handler**: the change and its trace commit
+    /// together, or neither does, so the journal never tells of something that did not happen nor misses something that did. The
+    /// table is **append-only**: a trigger refuses an update and a delete. The values are plain (text, number, bool, uuid), named
+    /// (`status = "draft"`); the fields whose value is not the same before and after are kept apart (`changed`).
+    #[serde(rename_all = "camelCase")]
+    Audit {
+        id: String,
+        /// What was done: `domain.action`, lowercase letters, digits and `_.-` (`invoice.issued`, `member.removed`).
+        action: String,
+        /// The kind of thing it was done to: `invoice`, `member` (the same spelling everywhere).
+        target_type: String,
+        /// Which one: its identifier (a text).
+        target: Expr,
+        /// Who did it: the account, the API key, the job (a text).
+        actor: Expr,
+        /// For which company; left out, the entry is not any company's.
+        #[serde(default)]
+        tenant: Option<Expr>,
+        /// The values before the change, one `name = value` each.
+        #[serde(default)]
+        before: Vec<Assignment>,
+        /// The values after the change, one `name = value` each.
+        #[serde(default)]
+        after: Vec<Assignment>,
+    },
+    /// Reads the journal of a company, **newest first**, a page at a time. `tenant` is required: a company reads its own entries and
+    /// no one else's. Filtered by `targetType`, `target` and `action` when given. `bind` receives the entries, a list of the API
+    /// schema `AuditEntry` (`id`, `at`, `actor`, `action`, `target_type`, `target_id`, `before`, `after`: texts, `before` and `after`
+    /// being JSON, and `changed`: a list of texts, and `id` a number); `nextCursorBind` the `cursor` of the next page (an optional
+    /// int64, absent on the last one): to be given back as `cursor` to read the entries older than the last of this page.
+    #[serde(rename_all = "camelCase")]
+    AuditRead {
+        id: String,
+        tenant: Expr,
+        #[serde(default)]
+        target_type: Option<Expr>,
+        #[serde(default)]
+        target: Option<Expr>,
+        #[serde(default)]
+        action: Option<Expr>,
+        /// The `id` of the last entry already read (an `int64`); left out, the newest.
+        #[serde(default)]
+        cursor: Option<Expr>,
+        /// Entries in a page: 1 to 200, 50 by default.
+        #[serde(default = "default_audit_page")]
+        limit: u32,
+        bind: String,
+        #[serde(default)]
+        next_cursor_bind: Option<String>,
+    },
     /// The next number of a sequence **without gaps**, for what the law asks to be numbered one after the other (invoices, credit
     /// notes): 1, 2, 3... In the table `number_sequences` of the service's database, in the transaction of the handler: the row of
     /// the sequence is locked until the transaction ends, so two runs cannot get the same number, and a run that fails gives its
@@ -2038,6 +2090,8 @@ impl Step {
             | Step::Fail { id, .. }
             | Step::RateLimit { id, .. }
             | Step::NextNumber { id, .. }
+            | Step::Audit { id, .. }
+            | Step::AuditRead { id, .. }
             | Step::Meter { id, .. }
             | Step::CheckQuota { id, .. }
             | Step::VerifyChallenge { id, .. }
@@ -2138,6 +2192,14 @@ impl Default for CircuitConfig {
             open_secs: DEFAULT_CIRCUIT_OPEN_SECS,
         }
     }
+}
+
+/// Entries in a page of the audit journal, and the most.
+pub const DEFAULT_AUDIT_PAGE: u32 = 50;
+pub const MAX_AUDIT_PAGE: u32 = 200;
+
+fn default_audit_page() -> u32 {
+    DEFAULT_AUDIT_PAGE
 }
 
 /// The first number of a sequence.
@@ -2657,6 +2719,15 @@ impl Service {
                         | Step::ApiKeyRevoke { .. }
                 )
             });
+        }
+        used
+    }
+
+    /// Whether a step of the service writes to or reads the audit journal: its database then holds `audit_events`.
+    pub fn uses_audit(&self) -> bool {
+        let mut used = false;
+        for step in self.handler_steps() {
+            step.walk(&mut |s| used |= matches!(s, Step::Audit { .. } | Step::AuditRead { .. }));
         }
         used
     }

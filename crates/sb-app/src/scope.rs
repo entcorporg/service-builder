@@ -86,6 +86,18 @@ fn bind(project: &Project, scope: &mut BTreeMap<String, Ty>, step: &Step) {
     {
         scope.insert(var.into(), scalar("string"));
     }
+    // The cursor of the next page of the audit journal: a number that may be absent.
+    if kind == "auditRead"
+        && let Some(var) = text("nextCursorBind")
+    {
+        scope.insert(
+            var.into(),
+            Ty {
+                optional: true,
+                ..scalar("int64")
+            },
+        );
+    }
     let Some(var) = text("bind") else { return };
     let ty = match kind {
         "verifyPassword" => scalar("bool"),
@@ -110,6 +122,11 @@ fn bind(project: &Project, scope: &mut BTreeMap<String, Ty>, step: &Step) {
             ..scalar("string")
         },
         "jwks" => message("Jwks"),
+        // The entries of one page of the journal.
+        "auditRead" => Ty {
+            repeated: true,
+            ..message("AuditEntry")
+        },
         "sql" => {
             let has_columns = v["columns"].as_array().is_some_and(|c| !c.is_empty());
             if !has_columns {

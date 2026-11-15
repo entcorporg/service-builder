@@ -51,7 +51,7 @@ vérité : le canvas, l'inspecteur et le code généré en sont des vues.
   Un producteur sans étape *Publier* donne un avertissement. Les projets enregistrés avant (`schemaVersion` 1) sont
   migrés à l'ouverture : tout service qui publiait sur un topic en devient producteur.
 - **Services** : des RPC (gRPC), des routes HTTP, des consumers (Kafka) et des tâches planifiées. Chacun contient une **liste d'étapes**.
-- **Étapes** : `log`, `let`, `publish`, `publishLive`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `rateLimit`, `checkQuota`, `verifyChallenge`, `passwordStrength`, `apiKeyVerify`, `apiKeyRevoke` et `verifyHmac` (routes HTTP), `meter`, `nextNumber`, `apiKeyCreate`, `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
+- **Étapes** : `log`, `let`, `publish`, `publishLive`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `rateLimit`, `checkQuota`, `verifyChallenge`, `passwordStrength`, `apiKeyVerify`, `apiKeyRevoke` et `verifyHmac` (routes HTTP), `meter`, `nextNumber`, `audit`, `auditRead`, `apiKeyCreate`, `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
   Une liste d'étapes est un arbre (pas un graphe arbitraire) : cela se génère en Rust structuré et s'édite comme
   une pile de blocs, comme dans un page builder.
 
@@ -442,6 +442,28 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
   pas : on passe par des secondes ou du texte), et le fuseau d'un locataire est une valeur qu'on lit et qu'on passe, pas un réglage
   du locataire. Ne nommez pas une variable `now` : dans la syntaxe compacte de l'éditeur, `now` est l'horloge de la base (`Expr::Now`),
   et la variable serait relue comme elle.
+- **Journal d'audit** : deux étapes, dans la base du service (table `audit_events`, créée avec le schéma, nom réservé :
+  `E_TABLE_RESERVED`), **dans la transaction du handler** : le changement et sa trace sont validés ensemble ou pas du tout, donc le
+  journal ne raconte jamais ce qui n'a pas eu lieu et ne manque jamais ce qui a eu lieu.
+  - `audit { action, targetType, target, actor, tenant?, before, after }` : **qui** (`actor`, un texte : le compte, la clé, la
+    tâche) a fait **quoi** (`action` : `invoice.sent`, minuscules, chiffres, `_.-`, `E_AUDIT_ACTION`) à **quoi** (`targetType`,
+    `E_AUDIT_TARGET_TYPE`, et `target`, l'identifiant), pour **quelle société** (`tenant`, vide quand l'entrée n'est celle d'aucune),
+    **quand** (l'horloge de la base), avec les **valeurs avant et après**, nommées (`status = "draft"`), une fois chacune
+    (`E_AUDIT_FIELD`) et **simples** : texte, nombre, oui/non, uuid ; ni message, ni liste, ni octets, ni `timestamp`
+    (`E_AUDIT_VALUE`). Les noms dont la valeur diffère entre l'avant et l'après sont gardés à part (`changed`) pour qu'un écran
+    montre ce qui a bougé sans comparer. Les valeurs ne dépassent pas 64 Kio de JSON (413 au-delà).
+  - **En ajout seul** : un déclencheur refuse la modification et la suppression d'une entrée (`audit_events is append-only`). Il
+    protège le journal de l'application, flux compris, **pas du propriétaire de la base**, qui peut désactiver un déclencheur : si
+    la preuve doit tenir contre lui, l'envoi du journal vers un stockage qu'il ne contrôle pas reste à faire.
+  - `auditRead { tenant, targetType?, target?, action?, cursor?, limit, bind, nextCursorBind? }` lit le journal d'**une société**
+    (`tenant` est obligatoire : une société lit les siennes et pas celles d'une autre), **le plus récent d'abord**, par pages
+    de 1 à 200 (50 par défaut, `E_AUDIT_PAGE`) avec un **curseur** (l'`id` de la dernière entrée lue) et non un décalage : une page ne
+    glisse pas quand des entrées s'écrivent entre-temps. `bind` reçoit une liste du schéma API **`AuditEntry`** (`id` int64, `at`,
+    `actor`, `action`, `target_type`, `target_id`, `before`, `after` : textes, `before` et `after` étant du JSON, vide s'il n'y en a
+    pas, et `changed` : liste de textes ; `E_AUDIT_SCHEMA`, nom non renommable) ; `nextCursorBind` reçoit le curseur de la page
+    suivante (un `int64` optionnel, absent à la dernière), à redonner en `cursor`.
+  - Limites : pas de route de lecture générée (le flux qui lit pose ses droits : qui voit le journal), pas de rétention ni de purge,
+    pas de signature des entrées, pas de diff champ par champ au-delà de la liste `changed`.
 - **Règles de champ** : un champ texte (`string`, `uuid`) d'un schéma API peut porter des règles (`rules`), vérifiées par le
   handler généré **avant toute étape**, dans l'ordre des champs ; la première qui échoue répond `400 { "error": "champ : … " }`.
   - `length` (`min`, `max`) : entre `min` et `max` **caractères** (pas octets), texte rogné avant d'être compté ; la borne

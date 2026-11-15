@@ -168,6 +168,7 @@ mod tests {
                 "docker-compose.yml",
                 "runtime/Cargo.toml",
                 "runtime/src/api_key.rs",
+                "runtime/src/audit.rs",
                 "runtime/src/challenge.rs",
                 "runtime/src/crypto.rs",
                 "runtime/src/db.rs",
@@ -1630,6 +1631,47 @@ mod tests {
         assert!(file(&files, "Cargo.toml").contains("tzdb-bundle-always"));
         let plain = generate(&sample::orders()).unwrap();
         assert!(!file(&plain, "services/orders/Cargo.toml").contains("time-zones"));
+    }
+
+    #[test]
+    fn a_change_is_traced_in_its_transaction_and_the_journal_is_read_by_its_company() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_audit(&mut p);
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs").replace('\n', " ");
+        let api = api.split_whitespace().collect::<Vec<_>>().join(" ");
+        for expected in [
+            "eda_runtime::audit::record(&mut tx, eda_runtime::audit::Event { action: \"invoice.sent\", target_type: \"invoice\", target: &(input.invoice_id.clone()), actor: &(claims.sub.clone()), tenant: Some(&(claims.tid.clone())), before: Some(eda_runtime::audit::Values::new().set(\"status\", \"draft\".to_string())), after: Some(eda_runtime::audit::Values::new().set(\"status\", \"sent\".to_string())) }).await?;",
+            "let __page = eda_runtime::audit::read(&mut tx, eda_runtime::audit::Filter { tenant: &(claims.tid.clone()), target_type: None, target: None, action: None, cursor: Some(",
+            "limit: 50 }).await?;",
+            "let next_cursor: Option<i64> = __page.next;",
+            "let entries: Vec<pb::AuditEntry> = __page.entries.into_iter().map(|e| pb::AuditEntry {",
+        ] {
+            assert!(api.contains(expected), "{expected}\n{api}");
+        }
+        // The trace is written in the transaction of the change, before it commits.
+        let trace = api.find("eda_runtime::audit::record(").unwrap();
+        let commit = api[trace..].find("tx.commit().await?;").unwrap();
+        assert!(commit > 0);
+        // The journal, its indexes and the trigger that keeps it append-only are created with the schema, only in this service.
+        let schema = file(&files, "services/orders/src/app/schema.rs");
+        for statement in [
+            "CREATE_TABLE",
+            "CREATE_TENANT_INDEX",
+            "CREATE_TARGET_INDEX",
+            "CREATE_GUARD_FUNCTION",
+            "CREATE_GUARD_TRIGGER",
+        ] {
+            assert!(
+                schema.contains(&format!("eda_runtime::audit::{statement},")),
+                "{statement}"
+            );
+        }
+        assert!(!file(&files, "services/payments/src/app/schema.rs").contains("audit"));
+        assert!(file(&files, "runtime/src/lib.rs").contains("pub mod audit;"));
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/src/app/schema.rs").contains("audit"));
     }
 
     #[test]

@@ -87,6 +87,9 @@ pub const USAGE_TABLES: [&str; 2] = ["usage_events", "usage_daily"];
 /// What the API key steps keep in the database of the service: the keys.
 pub const API_KEYS_TABLE: &str = "api_keys";
 
+/// What the audit steps keep in the database of the service: the journal.
+pub const AUDIT_TABLE: &str = "audit_events";
+
 /// What `nextNumber` keeps in the database of the service: the last number of each sequence.
 pub const SEQUENCES_TABLE: &str = "number_sequences";
 
@@ -1785,12 +1788,13 @@ impl<'a> Checker<'a> {
                 || (s.uses_challenge_check() && t.name == CHALLENGE_TABLE)
                 || (s.uses_api_keys() && t.name == API_KEYS_TABLE)
                 || (s.uses_sequences() && t.name == SEQUENCES_TABLE)
+                || (s.uses_audit() && t.name == AUDIT_TABLE)
             {
                 self.error(
                     "E_TABLE_RESERVED",
                     format!("{tp}/name"),
                     format!(
-                        "`{}` is kept by the meter, quota, challenge, API key or numbering steps of this service, pick another name",
+                        "`{}` is kept by the meter, quota, challenge, API key, numbering or audit steps of this service, pick another name",
                         t.name
                     ),
                 );
@@ -3763,6 +3767,140 @@ impl<'a> Checker<'a> {
                 }
                 false
             }
+            Step::Audit {
+                action,
+                target_type,
+                target,
+                actor,
+                tenant,
+                before,
+                after,
+                ..
+            } => {
+                self.check_name_of(
+                    action,
+                    "E_AUDIT_ACTION",
+                    "an action",
+                    "invoice.issued`, `member.removed",
+                    &format!("{path}/action"),
+                );
+                self.check_name_of(
+                    target_type,
+                    "E_AUDIT_TARGET_TYPE",
+                    "a kind of target",
+                    "invoice`, `member",
+                    &format!("{path}/targetType"),
+                );
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, target, Some(&text), &format!("{path}/target"));
+                self.check_expr(scope, actor, Some(&text), &format!("{path}/actor"));
+                if let Some(tenant) = tenant {
+                    self.check_expr(scope, tenant, Some(&text), &format!("{path}/tenant"));
+                }
+                for (list, name) in [(before, "before"), (after, "after")] {
+                    let mut seen = HashSet::new();
+                    for (i, a) in list.iter().enumerate() {
+                        let ap = format!("{path}/{name}/{i}");
+                        if !crate::names::is_snake_ident(&a.field) || a.field.len() > 64 {
+                            self.error(
+                                "E_AUDIT_FIELD",
+                                format!("{ap}/field"),
+                                "a value of the journal is named in snake_case (64 characters at most): `status`, `total_cents`",
+                            );
+                        } else if !seen.insert(a.field.as_str()) {
+                            self.error(
+                                "E_AUDIT_FIELD",
+                                format!("{ap}/field"),
+                                format!("`{}` is given twice in `{name}`", a.field),
+                            );
+                        }
+                        self.check_expr(scope, &a.value, None, &format!("{ap}/value"));
+                        // A plain value, which is written as JSON: not a message, a list, bytes or a timestamp.
+                        if let Ok(Some(ty)) =
+                            crate::typing::expr_type(self.project, scope, &a.value, None)
+                            && (ty.repeated
+                                || matches!(
+                                    ty.ty,
+                                    FieldType::Message { .. }
+                                        | FieldType::Bytes
+                                        | FieldType::Timestamp
+                                ))
+                        {
+                            self.error(
+                                "E_AUDIT_VALUE",
+                                format!("{ap}/value"),
+                                format!("the journal keeps plain values (text, number, yes/no, uuid), and `{}` is a {ty}", a.field),
+                            );
+                        }
+                    }
+                }
+                false
+            }
+            Step::AuditRead {
+                tenant,
+                target_type,
+                target,
+                action,
+                cursor,
+                limit,
+                bind,
+                next_cursor_bind,
+                ..
+            } => {
+                self.audit_schema(&format!("{path}/bind"));
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, tenant, Some(&text), &format!("{path}/tenant"));
+                for (value, name) in [
+                    (target_type, "targetType"),
+                    (target, "target"),
+                    (action, "action"),
+                ] {
+                    if let Some(value) = value {
+                        self.check_expr(scope, value, Some(&text), &format!("{path}/{name}"));
+                    }
+                }
+                if let Some(cursor) = cursor {
+                    let id = TypeRef::scalar(FieldType::Int64);
+                    self.check_expr(scope, cursor, Some(&id), &format!("{path}/cursor"));
+                }
+                if !(1..=MAX_AUDIT_PAGE).contains(limit) {
+                    self.error(
+                        "E_AUDIT_PAGE",
+                        format!("{path}/limit"),
+                        format!("a page of the journal is 1 to {MAX_AUDIT_PAGE} entries"),
+                    );
+                }
+                self.check_var_name(bind, &format!("{path}/bind"));
+                scope.bind(
+                    bind.clone(),
+                    TypeRef {
+                        ty: FieldType::Message {
+                            name: "AuditEntry".into(),
+                        },
+                        repeated: true,
+                        optional: false,
+                    },
+                );
+                if let Some(next) = next_cursor_bind {
+                    self.check_var_name(next, &format!("{path}/nextCursorBind"));
+                    if next == bind {
+                        self.error(
+                            "E_AUDIT_BIND",
+                            format!("{path}/nextCursorBind"),
+                            "the entries and the cursor of the next page are two variables",
+                        );
+                    }
+                    scope.bind(
+                        next.clone(),
+                        TypeRef {
+                            ty: FieldType::Int64,
+                            repeated: false,
+                            optional: true,
+                        },
+                    );
+                }
+                false
+            }
             Step::NextNumber {
                 sequence,
                 scope: kept_apart,
@@ -4132,6 +4270,37 @@ impl<'a> Checker<'a> {
                 "E_PASSKEY_SCHEMA",
                 path,
                 "starting a passkey step needs the API schema `PasskeyChallenge` (`state_id`, `options`: texts)",
+            );
+        }
+    }
+
+    /// What `auditRead` hands over: the API schema `AuditEntry`, with the fields the journal has.
+    fn audit_schema(&mut self, path: &str) {
+        let texts = [
+            "at",
+            "actor",
+            "action",
+            "target_type",
+            "target_id",
+            "before",
+            "after",
+        ];
+        let ok = self.project.message("AuditEntry").is_some_and(|m| {
+            m.kind == MessageKind::Api
+                && texts.iter().all(|n| {
+                    m.field(n)
+                        .is_some_and(|f| f.ty == FieldType::String && !f.repeated && !f.optional)
+                })
+                && m.field("id")
+                    .is_some_and(|f| f.ty == FieldType::Int64 && !f.repeated && !f.optional)
+                && m.field("changed")
+                    .is_some_and(|f| f.ty == FieldType::String && f.repeated)
+        });
+        if !ok {
+            self.error(
+                "E_AUDIT_SCHEMA",
+                path,
+                "reading the journal needs the API schema `AuditEntry`: `id` (int64), `at`, `actor`, `action`, `target_type`, `target_id`, `before`, `after` (texts) and `changed` (a list of texts)",
             );
         }
     }
@@ -7407,6 +7576,181 @@ mod tests {
         assert!(
             crate::typing::is_time_zone("Europe/Paris")
                 && !crate::typing::is_time_zone("Europe/Pariss")
+        );
+    }
+
+    fn with_audit() -> Project {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_audit(&mut p);
+        p
+    }
+
+    fn audit_step<'a>(p: &'a mut Project, route: &str, index: usize) -> &'a mut Step {
+        let r = p.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == route)
+            .unwrap();
+        &mut r.steps[index]
+    }
+
+    #[test]
+    fn the_audit_steps_are_checked_and_the_journal_schema_is_required() {
+        let p = with_audit();
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        // The name of an action and of a kind of target are spelled the same everywhere.
+        for bad in ["", "Invoice.Sent", "invoice sent", "1a", &"x".repeat(65)] {
+            let mut q = p.clone();
+            if let Step::Audit {
+                action,
+                target_type,
+                ..
+            } = audit_step(&mut q, "send_invoice", 1)
+            {
+                (*action, *target_type) = (bad.into(), bad.into());
+            }
+            let found = errors(&q);
+            assert!(
+                found.contains(&"E_AUDIT_ACTION".to_string())
+                    && found.contains(&"E_AUDIT_TARGET_TYPE".to_string()),
+                "{bad:?}: {found:?}"
+            );
+        }
+        // The values are named, once each, and plain.
+        let lit = |v: &str| Expr::Literal { value: v.into() };
+        let mut q = p.clone();
+        if let Step::Audit { before, .. } = audit_step(&mut q, "send_invoice", 1) {
+            before.push(Assignment {
+                field: "Bad Name".into(),
+                value: lit("x"),
+            });
+            before.push(Assignment {
+                field: "status".into(),
+                value: lit("again"),
+            });
+        }
+        assert_eq!(
+            errors(&q).iter().filter(|c| *c == "E_AUDIT_FIELD").count(),
+            2,
+            "{:?}",
+            errors(&q)
+        );
+        // A whole message, a list and a timestamp are not plain values.
+        let mut q = p.clone();
+        if let Step::Audit { after, .. } = audit_step(&mut q, "send_invoice", 1) {
+            after.push(Assignment {
+                field: "claims".into(),
+                value: Expr::Path {
+                    path: "claims".into(),
+                },
+            });
+            after.push(Assignment {
+                field: "roles".into(),
+                value: Expr::Path {
+                    path: "claims.roles".into(),
+                },
+            });
+        }
+        assert_eq!(
+            errors(&q).iter().filter(|c| *c == "E_AUDIT_VALUE").count(),
+            2,
+            "{:?}",
+            errors(&q)
+        );
+        // The target, the actor and the company are text.
+        let mut q = p.clone();
+        if let Step::Audit {
+            target,
+            actor,
+            tenant,
+            ..
+        } = audit_step(&mut q, "send_invoice", 1)
+        {
+            (*target, *actor, *tenant) = (
+                Expr::Literal { value: 1.into() },
+                Expr::Literal { value: 2.into() },
+                Some(Expr::Literal { value: 3.into() }),
+            );
+        }
+        assert_eq!(
+            errors(&q)
+                .iter()
+                .filter(|c| *c == "E_TYPE_MISMATCH")
+                .count(),
+            3,
+            "{:?}",
+            errors(&q)
+        );
+        // Reading: a page of 1 to 200, a cursor that is a number, and the schema `AuditEntry` as the journal has it.
+        for bad in [0, MAX_AUDIT_PAGE + 1] {
+            let mut q = p.clone();
+            if let Step::AuditRead { limit, .. } = audit_step(&mut q, "audit_journal", 1) {
+                *limit = bad;
+            }
+            assert!(
+                errors(&q).contains(&"E_AUDIT_PAGE".to_string()),
+                "{bad}: {:?}",
+                errors(&q)
+            );
+        }
+        let mut q = p.clone();
+        if let Step::AuditRead {
+            cursor,
+            tenant,
+            next_cursor_bind,
+            bind,
+            ..
+        } = audit_step(&mut q, "audit_journal", 1)
+        {
+            *cursor = Some(lit("x"));
+            *tenant = Expr::Literal { value: 1.into() };
+            *next_cursor_bind = Some(bind.clone());
+        }
+        let found = errors(&q);
+        assert!(
+            found.contains(&"E_AUDIT_BIND".to_string())
+                && found.iter().filter(|c| *c == "E_TYPE_MISMATCH").count() >= 2,
+            "{found:?}"
+        );
+        let mut q = p.clone();
+        q.messages.retain(|m| m.name != "AuditEntry");
+        assert!(
+            errors(&q)
+                .iter()
+                .any(|c| c == "E_AUDIT_SCHEMA" || c == "E_UNKNOWN_MESSAGE"),
+            "{:?}",
+            errors(&q)
+        );
+        let mut q = p.clone();
+        q.messages
+            .iter_mut()
+            .find(|m| m.name == "AuditEntry")
+            .unwrap()
+            .fields
+            .retain(|f| f.name != "changed");
+        assert!(
+            errors(&q).contains(&"E_AUDIT_SCHEMA".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        // The entries and the next cursor can be read after the step, not before; the journal table is the generator's.
+        let mut q = p.clone();
+        let r = q.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == "audit_journal")
+            .unwrap();
+        r.steps.swap(1, 2);
+        assert!(!errors(&q).is_empty());
+        let mut q = p.clone();
+        let mut table = Table::new(AUDIT_TABLE, vec![Column::new("id", ColumnType::String)]);
+        table.columns[0].primary_key = true;
+        q.services[0].tables.push(table);
+        assert!(
+            errors(&q).contains(&"E_TABLE_RESERVED".to_string()),
+            "{:?}",
+            errors(&q)
         );
     }
 
