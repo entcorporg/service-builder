@@ -71,6 +71,10 @@ pub fn files(project: &Project) -> Vec<GeneratedFile> {
         GeneratedFile::new("runtime/src/webauthn.rs", RUNTIME_WEBAUTHN),
         GeneratedFile::new("runtime/src/webhook.rs", RUNTIME_WEBHOOK),
     ];
+    // The events of the project, as AsyncAPI: the counterpart of the OpenAPI document that sits next to each service.
+    if let Some(doc) = crate::asyncapi::asyncapi_yaml(project) {
+        files.push(GeneratedFile::new("asyncapi.yaml", doc));
+    }
     if json_adapters(project) {
         files.push(GeneratedFile::new("contracts/src/json.rs", CONTRACTS_JSON));
     }

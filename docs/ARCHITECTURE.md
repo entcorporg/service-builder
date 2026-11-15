@@ -389,6 +389,17 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
     chaque réplica apprend pour lui-même. Chaque changement d'état est écrit dans le journal (`circuit breaker changed state`) et
     `eda_runtime::resilience::snapshot()` liste les circuits. Limite : l'état n'est **pas** exposé dans `/metrics` (les services
     ordinaires n'en ont pas) ; c'est un prochain pas, avec une route de métriques.
+- **Document AsyncAPI des topics** : `asyncapi.yaml` à la racine de l'export (et dans l'onglet « Code généré »), le pendant événementiel
+  du document OpenAPI de chaque service, **dérivé du même modèle** que les handlers et l'outbox. AsyncAPI 3.0, un document pour le
+  projet (les topics sont partagés). Un **canal** est un topic : son nom Kafka, ses partitions et réplicas, le champ qui est la
+  clé d'enregistrement (`bindings.kafka.key`), et le topic `<nom>.dlq` où l'outbox déplace un événement après `maxAttempts` échecs
+  de publication ; le **message** est l'événement, en protobuf (`application/x-protobuf`), décrit par le schéma de ses champs
+  (les mêmes schémas que les documents OpenAPI). Une **opération** `send` est un service qui possède l'événement ou dont un flux le
+  publie ; une opération `receive` est un consumer, avec son groupe Kafka (`bindings.kafka.groupId`) et, s'il saute les événements
+  déjà traités (`idempotentOn`), le champ qui les identifie. Les identifiants d'opération sont `<Service>_<action>_<topic>` en
+  lettres, chiffres et `_`. Absent d'un projet sans topic. Le YAML est écrit par un petit émetteur (chaque texte entre guillemets,
+  chaque clé ambiguë aussi : `y`, `no`, `true`…) ; la CI le valide avec le parseur officiel (`@asyncapi/parser`). Limite : le
+  document décrit les champs, pas l'encodage protobuf (numéros de champs) : le `.proto` de `contracts/` fait foi.
 - **Règles de champ** : un champ texte (`string`, `uuid`) d'un schéma API peut porter des règles (`rules`), vérifiées par le
   handler généré **avant toute étape**, dans l'ordre des champs ; la première qui échoue répond `400 { "error": "champ : … " }`.
   - `length` (`min`, `max`) : entre `min` et `max` **caractères** (pas octets), texte rogné avant d'être compté ; la borne

@@ -2,6 +2,7 @@
 //! protobuf contracts, one tonic gRPC server + rdkafka consumers per service, and a
 //! docker-compose for Kafka.
 
+pub mod asyncapi;
 mod expr;
 mod http_call;
 #[cfg(test)]
@@ -159,6 +160,7 @@ mod tests {
                 ".gitignore",
                 "Cargo.toml",
                 "README.md",
+                "asyncapi.yaml",
                 "contracts/Cargo.toml",
                 "contracts/build.rs",
                 "contracts/proto/orders_demo.proto",

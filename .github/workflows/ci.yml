@@ -169,6 +169,14 @@ jobs:
             "$RUNNER_TEMP/oas/bin/python" -m openapi_spec_validator "$doc"
           done
 
+      # The AsyncAPI document of the topics, with the official parser.
+      - name: Validate the AsyncAPI document
+        run: |
+          mkdir -p "$RUNNER_TEMP/asyncapi" && cd "$RUNNER_TEMP/asyncapi"
+          npm init -y >/dev/null && npm install --silent @asyncapi/parser@3
+          cp "$GITHUB_WORKSPACE/scripts/validate-asyncapi.mjs" .
+          node validate-asyncapi.mjs "$RUNNER_TEMP/generated/asyncapi.yaml"
+
   generated-realtime:
     # The real-time service is tested for real: its own tests, then the whole of it against a DragonflyDB, over real sockets.
     # It needs neither Kafka nor a database, so none of the C toolchain of the other services is built here.
