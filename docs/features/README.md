@@ -44,6 +44,11 @@ Les projets sous AGPL, SSPL ou BSL ne sont cités que comme projets écartés. L
 | Notifications multicanal et préférences | `feature/notifications-et-preferences` | [Novu](https://github.com/novuhq/novu) | MIT | TypeScript | Réécriture à prévoir |
 | Traductions des mails et des messages | `feature/traductions` | [Fluent](https://github.com/projectfluent/fluent-rs) | MIT ou Apache-2.0 | Rust | Déjà en Rust |
 | Paiements | `feature/paiements` | [Hyperswitch](https://github.com/juspay/hyperswitch) | Apache-2.0 | Rust | Déjà en Rust |
+| Facture électronique (EN 16931 : Factur-X, UBL, CII) | `feature/facture-electronique` | [Mustang Project](https://github.com/ZUGFeRD/mustangproject) | Apache-2.0 | Java | Réécriture à prévoir |
+| Point d'accès Peppol (AS4) | `feature/point-d-acces-peppol` | [phase4](https://github.com/phax/phase4) | Apache-2.0 | Java | Réécriture à prévoir |
+| Archivage à valeur probante | `feature/archivage-probant` | [DSS (Digital Signature Service de la Commission européenne)](https://github.com/esig/dss) | LGPL-2.1 | Java | Crate Rust disponible |
+| Messagerie entre utilisateurs | `feature/messagerie-entre-utilisateurs` | [Chatwoot](https://github.com/chatwoot/chatwoot) | MIT | Ruby | Réécriture à prévoir |
+| Liens de suivi et attribution | `feature/liens-de-suivi` | [Kutt](https://github.com/thedevs-network/kutt) | MIT | TypeScript | Réécriture à prévoir |
 
 ### Moteur
 
@@ -85,6 +90,7 @@ Les projets sous AGPL, SSPL ou BSL ne sont cités que comme projets écartés. L
 | SSO SAML et provisionnement SCIM | `feature/sso-saml-et-scim` | [Ory Polis (ex-BoxyHQ SAML Jackson)](https://github.com/ory/polis) | Apache-2.0 | TypeScript | Crate Rust disponible |
 | Protection contre les robots | `feature/protection-anti-robots` | [ALTCHA](https://github.com/altcha-org/altcha) | MIT | TypeScript | Crate Rust disponible |
 | Robustesse des mots de passe | `feature/robustesse-des-mots-de-passe` | [zxcvbn (portage Rust `zxcvbn-rs`)](https://github.com/shssoichiro/zxcvbn-rs) | MIT | Rust | Déjà en Rust |
+| Connexions aux comptes tiers des utilisateurs | `feature/connexions-a-des-api-tierces` | [oauth2 (crate)](https://github.com/ramosbugs/oauth2-rs) | MIT ou Apache-2.0 | Rust | Déjà en Rust |
 
 ### Événements
 
@@ -141,6 +147,7 @@ Les projets sous AGPL, SSPL ou BSL ne sont cités que comme projets écartés. L
 | Identifiants : UUIDv7, identifiants courts, numéros sans trou | `feature/identifiants` | [Sqids](https://github.com/sqids/sqids-rust) | MIT | Rust | Déjà en Rust |
 | Migrations sans interruption de service | `feature/migrations-sans-interruption` | [pgroll](https://github.com/xataio/pgroll) | Apache-2.0 | Go | Crate Rust disponible |
 | Copie anonymisée des données | `feature/donnees-anonymisees` | [Greenmask](https://github.com/GreenmaskIO/greenmask) | Apache-2.0 | Go | Réécriture à prévoir |
+| XML : lecture, écriture et validation | `feature/xml-et-validation` | [quick-xml](https://github.com/tafia/quick-xml) | MIT | Rust | Crate Rust disponible |
 
 ### Exploitation
 
@@ -168,6 +175,7 @@ Les projets sous AGPL, SSPL ou BSL ne sont cités que comme projets écartés. L
 | Importer un existant | `feature/import-d-un-existant` | [SeaSchema](https://github.com/SeaQL/sea-schema) | MIT ou Apache-2.0 | Rust | Déjà en Rust |
 | Débogueur de flux | `feature/debogueur-de-flux` | [Node-RED (panneau de débogage)](https://github.com/node-red/node-red) | Apache-2.0 | JavaScript | Réécriture à prévoir |
 | Règles de style d'API | `feature/regles-de-style-d-api` | [vacuum](https://github.com/daveshanley/vacuum) | MIT | Go | Réécriture à prévoir |
+| Services externes dans le graphe | `feature/services-externes` | [Dapr](https://github.com/dapr/dapr) | Apache-2.0 | Go | Réécriture à prévoir |
 
 ## Écarté pour l'instant
 
