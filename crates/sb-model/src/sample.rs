@@ -527,6 +527,9 @@ pub fn orders() -> Project {
                             set("reason", path("input.reason")),
                         ],
                         bind: Some("cancelled".into()),
+                        // Orders is asked to cancel; while it fails, the event waits (and is retried) instead of piling calls on it.
+                        circuit: Some(CircuitConfig::default()),
+                        max_concurrent: None,
                     },
                     Step::Log {
                         id: "n3".into(),
@@ -3007,6 +3010,9 @@ pub fn add_http_calls(p: &mut Project) {
                 on_error: HttpOnError::Fail,
                 error_status: 502,
                 error_message: "the payment provider did not accept the payment".into(),
+                // Five failures in thirty seconds cut the calls for thirty seconds; twenty payments at a time at most.
+                circuit: Some(CircuitConfig::default()),
+                max_concurrent: Some(20),
             },
             Step::Respond {
                 id: "i2".into(),
@@ -3055,6 +3061,13 @@ pub fn add_http_calls(p: &mut Project) {
                 on_error: HttpOnError::Continue,
                 error_status: 502,
                 error_message: "the SMS provider did not answer correctly".into(),
+                // An open circuit is a call nobody answered (status 0): the branch below answers a 502 at once.
+                circuit: Some(CircuitConfig {
+                    failures: 3,
+                    window_secs: 60,
+                    open_secs: 20,
+                }),
+                max_concurrent: None,
             },
             Step::Branch {
                 id: "s2".into(),

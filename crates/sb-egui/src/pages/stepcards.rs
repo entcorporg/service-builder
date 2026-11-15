@@ -184,6 +184,8 @@ fn field_name(key: &str) -> String {
         "period" => "Période (UTC)",
         "wanted" => "Quantité demandée (1 par défaut)",
         "minScore" => "Score minimum (0 à 4)",
+        "circuit" => "Disjoncteur (échecs, fenêtre en s, ouverture en s)",
+        "maxConcurrent" => "Appels simultanés au plus (cloison)",
         "owner" => "Propriétaire (société, compte)",
         "scopes" => "Portées (ex. orders:read)",
         "scope" => "Portée exigée",

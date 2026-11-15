@@ -22,6 +22,7 @@ pub mod outbox;
 #[cfg(feature = "password-strength")]
 pub mod password;
 pub mod rate_limit;
+pub mod resilience;
 #[cfg(feature = "s3")]
 pub mod s3;
 pub mod totp;

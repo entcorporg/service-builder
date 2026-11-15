@@ -124,6 +124,8 @@ pub fn http_call_step(
         on_error,
         error_status,
         error_message,
+        circuit,
+        max_concurrent,
     } = step
     else {
         return Err(CodegenError::Internal("not an httpCall".into()));
@@ -194,6 +196,10 @@ pub fn http_call_step(
     c.line(format!("    timeout_secs: {timeout_secs},"));
     c.line(format!("    retries: {retries},"));
     c.line(format!("    idempotency_key: {key},"));
+    c.line(format!(
+        "    resilience: {},",
+        crate::service::resilience_policy(circuit, max_concurrent)
+    ));
     c.line("})");
     c.line(".await?");
     c.close_with(";");

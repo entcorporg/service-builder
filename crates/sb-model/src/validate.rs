@@ -90,6 +90,11 @@ pub const API_KEYS_TABLE: &str = "api_keys";
 /// What `verifyChallenge` keeps in the database of the service: the solutions already accepted.
 pub const CHALLENGE_TABLE: &str = "challenge_uses";
 
+/// What a circuit and a bulkhead can be set to: wide enough for any real dependency, narrow enough to be a mistake when exceeded.
+pub const MAX_CIRCUIT_FAILURES: u32 = 1_000;
+pub const MAX_CIRCUIT_SECS: u32 = 3_600;
+pub const MAX_CONCURRENT_CALLS: u32 = 10_000;
+
 /// The most attempts a `rateLimit` counted in the shared store can allow: the store keeps one entry per attempt of the window.
 pub const SHARED_RATE_LIMIT_MAX: u32 = 10_000;
 
@@ -2992,8 +2997,11 @@ impl<'a> Checker<'a> {
                 method,
                 request,
                 bind,
+                circuit,
+                max_concurrent,
                 ..
             } => {
+                self.resilience(path, circuit, max_concurrent);
                 if let Some(b) = bind {
                     self.check_var_name(b, &format!("{path}/bind"));
                 }
@@ -3936,6 +3944,47 @@ impl<'a> Checker<'a> {
                 }
                 false
             }
+        }
+    }
+
+    /// The circuit and the bulkhead of a call to a dependency: counts, windows and delays that mean something.
+    fn resilience(
+        &mut self,
+        path: &str,
+        circuit: &Option<CircuitConfig>,
+        max_concurrent: &Option<u32>,
+    ) {
+        if let Some(c) = circuit {
+            if !(1..=MAX_CIRCUIT_FAILURES).contains(&c.failures) {
+                self.error(
+                    "E_CIRCUIT_FAILURES",
+                    format!("{path}/circuit/failures"),
+                    format!("the circuit opens after 1 to {MAX_CIRCUIT_FAILURES} failures"),
+                );
+            }
+            if !(1..=MAX_CIRCUIT_SECS).contains(&c.window_secs) {
+                self.error(
+                    "E_CIRCUIT_WINDOW",
+                    format!("{path}/circuit/windowSecs"),
+                    format!("the window the failures are counted in is 1 second to 1 hour ({MAX_CIRCUIT_SECS})"),
+                );
+            }
+            if !(1..=MAX_CIRCUIT_SECS).contains(&c.open_secs) {
+                self.error(
+                    "E_CIRCUIT_OPEN",
+                    format!("{path}/circuit/openSecs"),
+                    format!("the circuit stays open for 1 second to 1 hour ({MAX_CIRCUIT_SECS})"),
+                );
+            }
+        }
+        if let Some(n) = max_concurrent
+            && !(1..=MAX_CONCURRENT_CALLS).contains(n)
+        {
+            self.error(
+                "E_MAX_CONCURRENT",
+                format!("{path}/maxConcurrent"),
+                format!("a bulkhead lets 1 to {MAX_CONCURRENT_CALLS} calls through at a time"),
+            );
         }
     }
 
@@ -6883,6 +6932,140 @@ mod tests {
     }
 
     #[test]
+    fn a_circuit_and_a_bulkhead_keep_to_values_that_mean_something() {
+        let mut p = sample::showcase();
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        // The same settings on a call to a service of the project (`callRpc`) and on an outbound call (`httpCall`).
+        let set = |p: &mut Project, circuit: Option<CircuitConfig>, max: Option<u32>| {
+            let mut touched = 0;
+            for s in &mut p.services {
+                for c in &mut s.consumers {
+                    for step in &mut c.steps {
+                        if let Step::CallRpc {
+                            circuit: ci,
+                            max_concurrent,
+                            ..
+                        } = step
+                        {
+                            (*ci, *max_concurrent) = (circuit, max);
+                            touched += 1;
+                        }
+                    }
+                }
+                for r in &mut s.routes {
+                    for step in &mut r.steps {
+                        if let Step::HttpCall {
+                            circuit: ci,
+                            max_concurrent,
+                            ..
+                        } = step
+                        {
+                            (*ci, *max_concurrent) = (circuit, max);
+                            touched += 1;
+                        }
+                    }
+                }
+            }
+            assert!(
+                touched >= 3,
+                "the showcase has two outbound calls and a call to a service"
+            );
+        };
+        let ok = CircuitConfig {
+            failures: 1,
+            window_secs: 1,
+            open_secs: 1,
+        };
+        set(&mut p, Some(ok), Some(1));
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        let top = CircuitConfig {
+            failures: MAX_CIRCUIT_FAILURES,
+            window_secs: MAX_CIRCUIT_SECS,
+            open_secs: MAX_CIRCUIT_SECS,
+        };
+        set(&mut p, Some(top), Some(MAX_CONCURRENT_CALLS));
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        for (code, circuit, max) in [
+            (
+                "E_CIRCUIT_FAILURES",
+                CircuitConfig { failures: 0, ..ok },
+                None,
+            ),
+            (
+                "E_CIRCUIT_FAILURES",
+                CircuitConfig {
+                    failures: MAX_CIRCUIT_FAILURES + 1,
+                    ..ok
+                },
+                None,
+            ),
+            (
+                "E_CIRCUIT_WINDOW",
+                CircuitConfig {
+                    window_secs: 0,
+                    ..ok
+                },
+                None,
+            ),
+            (
+                "E_CIRCUIT_WINDOW",
+                CircuitConfig {
+                    window_secs: MAX_CIRCUIT_SECS + 1,
+                    ..ok
+                },
+                None,
+            ),
+            ("E_CIRCUIT_OPEN", CircuitConfig { open_secs: 0, ..ok }, None),
+            (
+                "E_CIRCUIT_OPEN",
+                CircuitConfig {
+                    open_secs: MAX_CIRCUIT_SECS + 1,
+                    ..ok
+                },
+                None,
+            ),
+        ] {
+            let mut q = p.clone();
+            set(&mut q, Some(circuit), max);
+            assert!(
+                errors(&q).contains(&code.to_string()),
+                "{code}: {:?}",
+                errors(&q)
+            );
+        }
+        for bad in [0, MAX_CONCURRENT_CALLS + 1] {
+            let mut q = p.clone();
+            set(&mut q, None, Some(bad));
+            assert!(
+                errors(&q).contains(&"E_MAX_CONCURRENT".to_string()),
+                "{bad}: {:?}",
+                errors(&q)
+            );
+        }
+        // Left out, they are not written: a project without them is the same file as before.
+        let mut q = sample::orders();
+        set_none(&mut q);
+        assert!(!serde_json::to_string(&q).unwrap().contains("circuit"));
+        assert!(!serde_json::to_string(&q).unwrap().contains("maxConcurrent"));
+    }
+
+    /// Takes the circuits and the bulkheads off every call of a project.
+    fn set_none(p: &mut Project) {
+        for s in &mut p.services {
+            for step in s.consumers.iter_mut().flat_map(|c| c.steps.iter_mut()) {
+                if let Step::CallRpc {
+                    circuit,
+                    max_concurrent,
+                    ..
+                } = step
+                {
+                    (*circuit, *max_concurrent) = (None, None);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_shared_rate_limit_keeps_to_what_the_store_can_count() {
         let mut p = sample::orders();
         let limit = |max: u32, shared: bool| Step::RateLimit {
@@ -8889,6 +9072,8 @@ mod tests {
             method: "X".into(),
             request: vec![],
             bind: None,
+            circuit: None,
+            max_concurrent: None,
         });
         p.services[2].consumers[1].steps.push(Step::CallRpc {
             id: "d".into(),
@@ -8896,6 +9081,8 @@ mod tests {
             method: "Missing".into(),
             request: vec![],
             bind: None,
+            circuit: None,
+            max_concurrent: None,
         });
         let e = errors(&p);
         assert!(e.contains(&"E_SELF_CALL".into()));

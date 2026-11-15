@@ -2297,11 +2297,13 @@ fn steps(
                 c.line("});");
             }
             Step::CallRpc {
+                id,
                 service,
                 method,
                 request,
                 bind,
-                ..
+                circuit,
+                max_concurrent,
             } => {
                 let target = project.service(service).ok_or_else(|| {
                     CodegenError::Internal(format!("unknown service `{service}`"))
@@ -2310,11 +2312,27 @@ fn steps(
                     .rpc(method)
                     .ok_or_else(|| CodegenError::Internal(format!("unknown RPC `{method}`")))?;
                 let literal = struct_literal(project, scope, &rpc.request, request)?;
-                let call = format!(
-                    "ctx.{}.clone().{}({literal}).await?.into_inner()",
-                    snake(service),
-                    snake(method)
-                );
+                let call = if circuit.is_none() && max_concurrent.is_none() {
+                    format!(
+                        "ctx.{}.clone().{}({literal}).await?.into_inner()",
+                        snake(service),
+                        snake(method)
+                    )
+                } else {
+                    // Through the circuit and the bulkhead: a call they refuse is a 503 (`?`), and what the service answered says
+                    // whether it is unwell: not a refusal of the request (`invalid argument`, `not found`...), but no answer, a
+                    // timeout or an error of its own.
+                    format!(
+                        "{{ let __guard = eda_runtime::resilience::enter({}, {service:?}, {id:?})?; \
+                         let __result = ctx.{}.clone().{}({literal}).await; \
+                         __guard.finish(!matches!(&__result, Err(status) if matches!(status.code(), \
+                         tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Internal | tonic::Code::Unknown | tonic::Code::ResourceExhausted))); \
+                         __result }}?.into_inner()",
+                        resilience_policy(circuit, max_concurrent),
+                        snake(service),
+                        snake(method)
+                    )
+                };
                 match bind {
                     Some(var) => {
                         c.line(format!("let {var} = {call};"));
@@ -3062,6 +3080,30 @@ fn placeholder(n: usize, col: &Column) -> String {
     } else {
         format!("${n}")
     }
+}
+
+/// The `eda_runtime::resilience::Policy` of a call: its circuit and its bulkhead, or none of either.
+pub(crate) fn resilience_policy(
+    circuit: &Option<sb_model::CircuitConfig>,
+    max_concurrent: &Option<u32>,
+) -> String {
+    if circuit.is_none() && max_concurrent.is_none() {
+        return "eda_runtime::resilience::Policy::default()".to_string();
+    }
+    let circuit = match circuit {
+        Some(c) => format!(
+            "Some(eda_runtime::resilience::Circuit {{ failures: {}, window_secs: {}, open_secs: {} }})",
+            c.failures, c.window_secs, c.open_secs
+        ),
+        None => "None".to_string(),
+    };
+    let max_concurrent = match max_concurrent {
+        Some(n) => format!("Some({n})"),
+        None => "None".to_string(),
+    };
+    format!(
+        "eda_runtime::resilience::Policy {{ circuit: {circuit}, max_concurrent: {max_concurrent} }}"
+    )
 }
 
 /// The variant of `eda_runtime::usage::Period` for a period of the model.

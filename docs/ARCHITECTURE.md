@@ -365,6 +365,30 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
   HTML propre ne change rien). Un texte en entrée, un texte en sortie (`int64` ou nombre refusé : `E_TYPE_MISMATCH`). **Il rend le
   HTML sûr comme contenu d'un élément** : placé dans un attribut, un script ou un style d'une autre page, il ne l'est pas. Seul
   le service qui l'utilise compile l'analyseur HTML (feature `html`). Pas de liste blanche réglable pour l'instant.
+- **Disjoncteur et cloison** : options `circuit` et `maxConcurrent` des étapes `httpCall` et `callRpc`, pour qu'un service lent ou
+  tombé n'entraîne pas ceux qui l'appellent. Modèle de [Resilience4j](https://resilience4j.readme.io) (Apache-2.0), écrit en
+  Rust sans en reprendre de code.
+  - `circuit { failures, windowSecs, openSecs }` (5, 30, 30 par défaut ; `E_CIRCUIT_FAILURES` 1 à 1000, `E_CIRCUIT_WINDOW` et
+    `E_CIRCUIT_OPEN` 1 s à 1 h). **Fermé** : les appels passent, leurs échecs sont comptés ; `failures` échecs dans les `windowSecs`
+    dernières secondes (fenêtre **glissante** : un succès n'efface rien) l'**ouvrent**. **Ouvert** : pendant `openSecs`, tout appel
+    est refusé sans être fait (on ne martèle pas un service qui se relève, et l'appelant n'attend pas un délai d'attente).
+    **Semi-ouvert** ensuite : **un seul** appel essaie (les autres sont refusés pendant ce temps) ; réussi, le circuit se ferme,
+    raté, il se rouvre pour `openSecs`. Un appel abandonné sans verdict (le futur est annulé) rend l'essai : un circuit ne reste
+    jamais bloqué en semi-ouvert. Est un **échec** ce qui dit que la dépendance va mal : délai dépassé, pas de réponse, `429`,
+    `5xx` ; pour gRPC `unavailable`, `deadline exceeded`, `internal`, `unknown`, `resource exhausted` ; un `4xx` est le fait
+    de l'appelant, de même qu'un appel faux en soi (valeur non envoyable, réglage manquant). Pour `httpCall` le verdict est
+    porté sur l'appel entier, reprises comprises.
+  - `maxConcurrent` (1 à 10 000, `E_MAX_CONCURRENT`) : au plus autant d'appels de **l'étape** en même temps ; le suivant est
+    **refusé tout de suite**, pas mis en file derrière un service lent (une file ne ferait que déplacer l'attente en retenant les
+    ressources de l'appelant). Un appel refusé par le circuit ne prend pas de place ; une place refusée rend l'essai au circuit.
+  - **Ce que voit le flux** : pour `httpCall`, un appel refusé est un appel **sans réponse** (statut `0`), donc `onError` décide :
+    `fail` répond `errorStatus`, `continue` laisse le flux lire le statut. Pour `callRpc`, un refus est un `503` avec
+    `Retry-After` (le temps avant le prochain essai), qui devient un échec du consumer (donc une reprise, puis la DLQ) hors route.
+  - Le **circuit est celui de la dépendance** (l'adresse de base de l'appel sortant, le service appelé) et partagé par toutes les
+    étapes de l'instance qui l'appellent ; la **cloison est celle de l'étape**. L'état est **en mémoire de chaque instance** :
+    chaque réplica apprend pour lui-même. Chaque changement d'état est écrit dans le journal (`circuit breaker changed state`) et
+    `eda_runtime::resilience::snapshot()` liste les circuits. Limite : l'état n'est **pas** exposé dans `/metrics` (les services
+    ordinaires n'en ont pas) ; c'est un prochain pas, avec une route de métriques.
 - **Règles de champ** : un champ texte (`string`, `uuid`) d'un schéma API peut porter des règles (`rules`), vérifiées par le
   handler généré **avant toute étape**, dans l'ordre des champs ; la première qui échoue répond `400 { "error": "champ : … " }`.
   - `length` (`min`, `max`) : entre `min` et `max` **caractères** (pas octets), texte rogné avant d'être compté ; la borne

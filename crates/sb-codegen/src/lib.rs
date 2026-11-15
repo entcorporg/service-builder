@@ -180,6 +180,7 @@ mod tests {
                 "runtime/src/outbox.rs",
                 "runtime/src/password.rs",
                 "runtime/src/rate_limit.rs",
+                "runtime/src/resilience.rs",
                 "runtime/src/s3.rs",
                 "runtime/src/totp.rs",
                 "runtime/src/usage.rs",
@@ -1495,6 +1496,64 @@ mod tests {
         assert!(!file(&files, "services/payments/Cargo.toml").contains("html"));
         let plain = generate(&sample::orders()).unwrap();
         assert!(!file(&plain, "services/orders/Cargo.toml").contains("\"html\""));
+    }
+
+    #[test]
+    fn a_call_through_a_circuit_names_its_policy_and_one_without_is_left_as_it_was() {
+        let files = generate(&sample::showcase()).unwrap();
+        let flat = |path: &str| {
+            file(&files, path)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        // httpCall: the policy is a field of the call, with the dependency the address in the environment names.
+        let api = flat("services/orders/src/flows/api.rs");
+        assert!(
+            api.contains("resilience: eda_runtime::resilience::Policy { circuit: Some(eda_runtime::resilience::Circuit { failures: 5, window_secs: 30, open_secs: 30 }), max_concurrent: Some(20) },"),
+            "{api}"
+        );
+        assert!(
+            api.contains("resilience: eda_runtime::resilience::Policy { circuit: Some(eda_runtime::resilience::Circuit { failures: 3, window_secs: 60, open_secs: 20 }), max_concurrent: None },"),
+            "{api}"
+        );
+        // callRpc: through the circuit of the service called, a refusal a 503, and the verdict from what the service answered.
+        let consumers = flat("services/notifications/src/flows/consumers.rs");
+        let rpc = consumers
+            .find("eda_runtime::resilience::enter(eda_runtime::resilience::Policy { circuit: Some(eda_runtime::resilience::Circuit { failures: 5, window_secs: 30, open_secs: 30 }), max_concurrent: None }, \"Orders\", \"n2\")?;")
+            .unwrap_or_else(|| panic!("{consumers}"));
+        let verdict = consumers
+            .find("tonic::Code::Unavailable | tonic::Code::DeadlineExceeded")
+            .unwrap();
+        assert!(rpc < verdict);
+        assert!(
+            consumers.contains("__result }?.into_inner()"),
+            "{consumers}"
+        );
+        // Without the options, the call is the plain one: nothing of the policy is written.
+        let mut bare = sample::orders();
+        for step in bare
+            .services
+            .iter_mut()
+            .flat_map(|s| s.consumers.iter_mut())
+            .flat_map(|c| c.steps.iter_mut())
+        {
+            if let sb_model::Step::CallRpc {
+                circuit,
+                max_concurrent,
+                ..
+            } = step
+            {
+                (*circuit, *max_concurrent) = (None, None);
+            }
+        }
+        let plain = generate(&bare).unwrap();
+        let consumers = file(&plain, "services/notifications/src/flows/consumers.rs");
+        assert!(
+            consumers.contains(".await?.into_inner()") && !consumers.contains("resilience"),
+            "{consumers}"
+        );
+        assert!(!file(&plain, "services/orders/src/flows/api.rs").contains("resilience: "));
     }
 
     #[test]

@@ -1044,6 +1044,13 @@ pub enum Step {
         /// Variable receiving the response message.
         #[serde(default)]
         bind: Option<String>,
+        /// Cut the calls to this service while it fails: see [`CircuitConfig`]. Shared by every step that calls it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        circuit: Option<CircuitConfig>,
+        /// At most this many calls of this step at the same time (a bulkhead): the next one is refused at once with a 503, not
+        /// queued behind a slow service.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_concurrent: Option<u32>,
     },
     #[serde(rename_all = "camelCase")]
     Branch {
@@ -1612,6 +1619,14 @@ pub enum Step {
         /// With `on_error` = `fail`: the fixed text the client is told (a 5xx answers a generic one and logs this).
         #[serde(default = "default_http_error_message")]
         error_message: String,
+        /// Cut the calls to this external service while it fails: see [`CircuitConfig`]. Shared by every step that calls the
+        /// same base address. An open circuit answers like a call nobody answered (status `0`, so `on_error` decides).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        circuit: Option<CircuitConfig>,
+        /// At most this many calls of this step at the same time (a bulkhead): the next one is refused at once, like a call
+        /// nobody answered, not queued behind a slow service.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_concurrent: Option<u32>,
     },
     /// Ends an HTTP route early with an error status (400..=599) and `{ "error": message }`.
     /// The message is a fixed text: a 5xx answers a generic one and keeps this in the logs.
@@ -2055,6 +2070,52 @@ impl Step {
             for s in steps {
                 s.walk(f);
             }
+        }
+    }
+}
+
+/// A circuit breaker on a dependency (an external service, another service of the project), in the manner of Resilience4j.
+/// **Closed**: the calls go through and their failures are counted. When `failures` of them happen within `windowSecs` (a sliding
+/// window), the circuit **opens**: for `openSecs` every call is refused at once, without being made (a service that is down is not
+/// asked, so it is not hammered while it recovers, and the caller does not wait for a timeout). Then it is **half-open**: one
+/// call is let through to try; if it succeeds the circuit closes, if it fails it opens again for another `openSecs`. A failure is
+/// what means the dependency is unwell: a timeout, no answer, a 429, a 5xx (or, for gRPC, `unavailable`, `deadline exceeded`,
+/// `internal`, `unknown`, `resource exhausted`); a 4xx is the caller's fault and counts for nothing. The state is kept in the
+/// memory of each instance, and shared by every step that calls the same dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CircuitConfig {
+    /// How many failures within the window open the circuit.
+    #[serde(default = "default_circuit_failures")]
+    pub failures: u32,
+    /// The sliding window the failures are counted in, in seconds.
+    #[serde(default = "default_circuit_window")]
+    pub window_secs: u32,
+    /// How long the circuit stays open before it lets one call try, in seconds.
+    #[serde(default = "default_circuit_open")]
+    pub open_secs: u32,
+}
+
+pub const DEFAULT_CIRCUIT_FAILURES: u32 = 5;
+pub const DEFAULT_CIRCUIT_WINDOW_SECS: u32 = 30;
+pub const DEFAULT_CIRCUIT_OPEN_SECS: u32 = 30;
+
+fn default_circuit_failures() -> u32 {
+    DEFAULT_CIRCUIT_FAILURES
+}
+fn default_circuit_window() -> u32 {
+    DEFAULT_CIRCUIT_WINDOW_SECS
+}
+fn default_circuit_open() -> u32 {
+    DEFAULT_CIRCUIT_OPEN_SECS
+}
+
+impl Default for CircuitConfig {
+    fn default() -> Self {
+        Self {
+            failures: DEFAULT_CIRCUIT_FAILURES,
+            window_secs: DEFAULT_CIRCUIT_WINDOW_SECS,
+            open_secs: DEFAULT_CIRCUIT_OPEN_SECS,
         }
     }
 }
@@ -2544,6 +2605,30 @@ impl Service {
     /// the project's own JSON, which is where every expression of every step is, nested or not.
     pub fn uses_html_sanitizer(&self) -> bool {
         serde_json::to_string(self).is_ok_and(|json| json.contains("\"func\":\"sanitizeHtml\""))
+    }
+
+    /// Whether a call of the service has a circuit or a bulkhead: nothing is needed to build it (the runtime always holds it), but
+    /// the generated code names the policy.
+    pub fn uses_resilience(&self) -> bool {
+        let mut used = false;
+        for step in self.handler_steps() {
+            step.walk(&mut |s| match s {
+                Step::HttpCall {
+                    circuit,
+                    max_concurrent,
+                    ..
+                }
+                | Step::CallRpc {
+                    circuit,
+                    max_concurrent,
+                    ..
+                } => {
+                    used |= circuit.is_some() || max_concurrent.is_some();
+                }
+                _ => {}
+            });
+        }
+        used
     }
 
     /// Whether a step of the service judges a password: the runtime then brings the estimator in (`password-strength`).
