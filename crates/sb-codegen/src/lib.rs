@@ -2,6 +2,7 @@
 //! protobuf contracts, one tonic gRPC server + rdkafka consumers per service, and a
 //! docker-compose for Kafka.
 
+pub mod asyncapi;
 mod expr;
 mod http_call;
 #[cfg(test)]
@@ -159,6 +160,7 @@ mod tests {
                 ".gitignore",
                 "Cargo.toml",
                 "README.md",
+                "asyncapi.yaml",
                 "contracts/Cargo.toml",
                 "contracts/build.rs",
                 "contracts/proto/orders_demo.proto",
@@ -166,10 +168,12 @@ mod tests {
                 "docker-compose.yml",
                 "runtime/Cargo.toml",
                 "runtime/src/api_key.rs",
+                "runtime/src/audit.rs",
                 "runtime/src/challenge.rs",
                 "runtime/src/crypto.rs",
                 "runtime/src/db.rs",
                 "runtime/src/dedup.rs",
+                "runtime/src/flags.rs",
                 "runtime/src/html.rs",
                 "runtime/src/http_client.rs",
                 "runtime/src/jobs.rs",
@@ -182,6 +186,9 @@ mod tests {
                 "runtime/src/rate_limit.rs",
                 "runtime/src/resilience.rs",
                 "runtime/src/s3.rs",
+                "runtime/src/sequence.rs",
+                "runtime/src/short_id.rs",
+                "runtime/src/time_zone.rs",
                 "runtime/src/totp.rs",
                 "runtime/src/usage.rs",
                 "runtime/src/validation.rs",
@@ -1554,6 +1561,143 @@ mod tests {
             "{consumers}"
         );
         assert!(!file(&plain, "services/orders/src/flows/api.rs").contains("resilience: "));
+    }
+
+    #[test]
+    fn numbers_without_a_gap_ids_that_sort_and_short_ids_are_written_where_they_are_asked() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_invoices(&mut p);
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs").replace('\n', " ");
+        let api = api.split_whitespace().collect::<Vec<_>>().join(" ");
+        for expected in [
+            "let invoice_id: String = eda_runtime::logic::new_uuid_v7();",
+            "let number: i64 = eda_runtime::sequence::next(&mut tx, \"invoices\", &(format!(\"{}-2026\", claims.tid.clone())), 1_i64).await?;",
+            "let reference: String = eda_runtime::short_id::encode(number.clone())?;",
+        ] {
+            assert!(api.contains(expected), "{expected}\n{api}");
+        }
+        // The number is taken after the identifier and before the reference that is made of it.
+        let at = |needle: &str| api.find(needle).unwrap();
+        assert!(
+            at("new_uuid_v7") < at("sequence::next")
+                && at("sequence::next") < at("short_id::encode")
+        );
+        // The table is created with the schema, Sqids only built by the service that asks.
+        assert!(
+            file(&files, "services/orders/src/app/schema.rs")
+                .contains("eda_runtime::sequence::CREATE_TABLE,")
+        );
+        assert!(file(&files, "services/orders/Cargo.toml").contains("\"short-id\""));
+        assert!(file(&files, "runtime/Cargo.toml").contains("short-id = [\"dep:sqids\"]"));
+        assert!(
+            file(&files, "runtime/src/lib.rs")
+                .contains("#[cfg(feature = \"short-id\")]\npub mod short_id;")
+        );
+        assert!(
+            file(&files, "Cargo.toml").contains("sqids = \"0.4\"")
+                && file(&files, "Cargo.toml").contains("\"v7\"")
+        );
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/Cargo.toml").contains("short-id"));
+        assert!(!file(&plain, "services/orders/src/app/schema.rs").contains("sequence"));
+    }
+
+    #[test]
+    fn calendar_arithmetic_goes_through_the_zones_of_the_runtime_and_only_its_service_builds_them()
+    {
+        let mut p = sample::orders();
+        sample::add_calendar(&mut p);
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs").replace('\n', " ");
+        let api = api.split_whitespace().collect::<Vec<_>>().join(" ");
+        for expected in [
+            "let instant: i64 = eda_runtime::time_zone::now_seconds();",
+            "today: eda_runtime::time_zone::local_date(instant.clone(), &(input.zone.clone()))?",
+            "day_start: eda_runtime::time_zone::start_of_day(instant.clone(), &(input.zone.clone()))?",
+            "next_week: eda_runtime::time_zone::add_days(instant.clone(), 7, &(input.zone.clone()))?",
+            "next_month: eda_runtime::time_zone::add_months(instant.clone(), 1, &(input.zone.clone()))?",
+            "paris_now: eda_runtime::time_zone::local_time(instant.clone(), &(\"Europe/Paris\".to_string()))?",
+        ] {
+            assert!(api.contains(expected), "{expected}\n{api}");
+        }
+        assert!(file(&files, "services/orders/Cargo.toml").contains("\"time-zones\""));
+        assert!(file(&files, "runtime/Cargo.toml").contains("time-zones = [\"dep:jiff\"]"));
+        assert!(
+            file(&files, "runtime/src/lib.rs")
+                .contains("#[cfg(feature = \"time-zones\")]\npub mod time_zone;")
+        );
+        // The zones are bundled: the service does not read the tzdata of the machine it runs on.
+        assert!(file(&files, "Cargo.toml").contains("tzdb-bundle-always"));
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/Cargo.toml").contains("time-zones"));
+    }
+
+    #[test]
+    fn a_change_is_traced_in_its_transaction_and_the_journal_is_read_by_its_company() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_audit(&mut p);
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs").replace('\n', " ");
+        let api = api.split_whitespace().collect::<Vec<_>>().join(" ");
+        for expected in [
+            "eda_runtime::audit::record(&mut tx, eda_runtime::audit::Event { action: \"invoice.sent\", target_type: \"invoice\", target: &(input.invoice_id.clone()), actor: &(claims.sub.clone()), tenant: Some(&(claims.tid.clone())), before: Some(eda_runtime::audit::Values::new().set(\"status\", \"draft\".to_string())), after: Some(eda_runtime::audit::Values::new().set(\"status\", \"sent\".to_string())) }).await?;",
+            "let __page = eda_runtime::audit::read(&mut tx, eda_runtime::audit::Filter { tenant: &(claims.tid.clone()), target_type: None, target: None, action: None, cursor: Some(",
+            "limit: 50 }).await?;",
+            "let next_cursor: Option<i64> = __page.next;",
+            "let entries: Vec<pb::AuditEntry> = __page.entries.into_iter().map(|e| pb::AuditEntry {",
+        ] {
+            assert!(api.contains(expected), "{expected}\n{api}");
+        }
+        // The trace is written in the transaction of the change, before it commits.
+        let trace = api.find("eda_runtime::audit::record(").unwrap();
+        let commit = api[trace..].find("tx.commit().await?;").unwrap();
+        assert!(commit > 0);
+        // The journal, its indexes and the trigger that keeps it append-only are created with the schema, only in this service.
+        let schema = file(&files, "services/orders/src/app/schema.rs");
+        for statement in [
+            "CREATE_TABLE",
+            "CREATE_TENANT_INDEX",
+            "CREATE_TARGET_INDEX",
+            "CREATE_GUARD_FUNCTION",
+            "CREATE_GUARD_TRIGGER",
+        ] {
+            assert!(
+                schema.contains(&format!("eda_runtime::audit::{statement},")),
+                "{statement}"
+            );
+        }
+        assert!(!file(&files, "services/payments/src/app/schema.rs").contains("audit"));
+        assert!(file(&files, "runtime/src/lib.rs").contains("pub mod audit;"));
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/src/app/schema.rs").contains("audit"));
+    }
+
+    #[test]
+    fn a_flag_is_asked_in_the_transaction_with_what_it_starts_from_and_its_table_is_created() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_flags(&mut p);
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs").replace('\n', " ");
+        let api = api.split_whitespace().collect::<Vec<_>>().join(" ");
+        for expected in [
+            "let __decision = eda_runtime::flags::evaluate(&mut tx, \"new_checkout\", &(claims.sub.clone()), &eda_runtime::flags::Properties::new().set(\"tenant\", claims.tid.clone()), eda_runtime::flags::Start { enabled: true, rollout: 25 }).await?;",
+            "let new_checkout: bool = __decision.on;",
+            "let variant: String = __decision.variant;",
+        ] {
+            assert!(api.contains(expected), "{expected}\n{api}");
+        }
+        assert!(
+            file(&files, "services/orders/src/app/schema.rs")
+                .contains("eda_runtime::flags::CREATE_TABLE,")
+        );
+        assert!(!file(&files, "services/payments/src/app/schema.rs").contains("flags"));
+        assert!(file(&files, "runtime/src/lib.rs").contains("pub mod flags;"));
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/src/app/schema.rs").contains("flags"));
     }
 
     #[test]

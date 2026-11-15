@@ -26,6 +26,11 @@ const RUNTIME_WEBHOOK: &str = include_str!("../templates/runtime/webhook.rs");
 const RUNTIME_CHALLENGE: &str = include_str!("../templates/runtime/challenge.rs");
 const RUNTIME_API_KEY: &str = include_str!("../templates/runtime/api_key.rs");
 const RUNTIME_RESILIENCE: &str = include_str!("../templates/runtime/resilience.rs");
+const RUNTIME_SEQUENCE: &str = include_str!("../templates/runtime/sequence.rs");
+const RUNTIME_SHORT_ID: &str = include_str!("../templates/runtime/short_id.rs");
+const RUNTIME_TIME_ZONE: &str = include_str!("../templates/runtime/time_zone.rs");
+const RUNTIME_AUDIT: &str = include_str!("../templates/runtime/audit.rs");
+const RUNTIME_FLAGS: &str = include_str!("../templates/runtime/flags.rs");
 const RUNTIME_HTML: &str = include_str!("../templates/runtime/html.rs");
 const RUNTIME_PASSWORD: &str = include_str!("../templates/runtime/password.rs");
 const RUNTIME_USAGE: &str = include_str!("../templates/runtime/usage.rs");
@@ -65,12 +70,21 @@ pub fn files(project: &Project) -> Vec<GeneratedFile> {
         GeneratedFile::new("runtime/src/password.rs", RUNTIME_PASSWORD),
         GeneratedFile::new("runtime/src/api_key.rs", RUNTIME_API_KEY),
         GeneratedFile::new("runtime/src/html.rs", RUNTIME_HTML),
+        GeneratedFile::new("runtime/src/flags.rs", RUNTIME_FLAGS),
+        GeneratedFile::new("runtime/src/audit.rs", RUNTIME_AUDIT),
+        GeneratedFile::new("runtime/src/time_zone.rs", RUNTIME_TIME_ZONE),
+        GeneratedFile::new("runtime/src/sequence.rs", RUNTIME_SEQUENCE),
+        GeneratedFile::new("runtime/src/short_id.rs", RUNTIME_SHORT_ID),
         GeneratedFile::new("runtime/src/resilience.rs", RUNTIME_RESILIENCE),
         GeneratedFile::new("runtime/src/challenge.rs", RUNTIME_CHALLENGE),
         GeneratedFile::new("runtime/src/validation.rs", RUNTIME_VALIDATION),
         GeneratedFile::new("runtime/src/webauthn.rs", RUNTIME_WEBAUTHN),
         GeneratedFile::new("runtime/src/webhook.rs", RUNTIME_WEBHOOK),
     ];
+    // The events of the project, as AsyncAPI: the counterpart of the OpenAPI document that sits next to each service.
+    if let Some(doc) = crate::asyncapi::asyncapi_yaml(project) {
+        files.push(GeneratedFile::new("asyncapi.yaml", doc));
+    }
     if json_adapters(project) {
         files.push(GeneratedFile::new("contracts/src/json.rs", CONTRACTS_JSON));
     }
@@ -160,7 +174,7 @@ tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 tracing = "0.1"
 tracing-subscriber = {{ version = "0.3", features = ["env-filter"] }}
-uuid = {{ version = "1", features = ["v4"] }}
+uuid = {{ version = "1", features = ["v4", "v7"] }}
 aes-gcm = "0.10"
 base64 = "0.22"
 ed25519-dalek = "2.1"
@@ -174,6 +188,8 @@ hmac = "0.13"
 sha1 = "0.11"
 zxcvbn = "3"
 ammonia = "4"
+sqids = "0.4"
+jiff = {{ version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }}
 aws-config = "1"
 aws-sdk-s3 = "1"
 async-trait = "0.1"

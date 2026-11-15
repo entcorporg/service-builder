@@ -80,17 +80,37 @@ fn bind(project: &Project, scope: &mut BTreeMap<String, Ty>, step: &Step) {
         }
         return;
     }
+    // The variant of a flag comes apart from the yes/no that `bind` holds.
+    if kind == "flag"
+        && let Some(var) = text("variantBind")
+    {
+        scope.insert(var.into(), scalar("string"));
+    }
     // An API key's id comes apart from what `bind` holds (the key, or its owner).
     if matches!(kind, "apiKeyCreate" | "apiKeyVerify")
         && let Some(var) = text("keyIdBind")
     {
         scope.insert(var.into(), scalar("string"));
     }
+    // The cursor of the next page of the audit journal: a number that may be absent.
+    if kind == "auditRead"
+        && let Some(var) = text("nextCursorBind")
+    {
+        scope.insert(
+            var.into(),
+            Ty {
+                optional: true,
+                ..scalar("int64")
+            },
+        );
+    }
     let Some(var) = text("bind") else { return };
     let ty = match kind {
-        "verifyPassword" => scalar("bool"),
+        "verifyPassword" | "flag" => scalar("bool"),
         // What is left of the quota after this request.
         "checkQuota" => scalar("int64"),
+        // The number given, one after the other.
+        "nextNumber" => scalar("int64"),
         // The score of the password, 0 to 4.
         "passwordStrength" => scalar("int32"),
         "hashPassword" | "randomToken" | "sha256" | "encrypt" | "decrypt" | "signJwt"
@@ -108,6 +128,11 @@ fn bind(project: &Project, scope: &mut BTreeMap<String, Ty>, step: &Step) {
             ..scalar("string")
         },
         "jwks" => message("Jwks"),
+        // The entries of one page of the journal.
+        "auditRead" => Ty {
+            repeated: true,
+            ..message("AuditEntry")
+        },
         "sql" => {
             let has_columns = v["columns"].as_array().is_some_and(|c| !c.is_empty());
             if !has_columns {

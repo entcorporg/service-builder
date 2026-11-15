@@ -9,6 +9,8 @@ serde.workspace = true
 serde_json.workspace = true
 heck.workspace = true
 schemars = { version = "1", features = ["derive"] }
+# Only to know whether a time zone written in a flow exists: the database of zones is bundled, not read from the machine.
+jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
 
 [dev-dependencies]
 jsonschema = { version = "0.60", default-features = false }

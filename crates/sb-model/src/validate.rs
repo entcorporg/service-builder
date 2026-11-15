@@ -87,6 +87,15 @@ pub const USAGE_TABLES: [&str; 2] = ["usage_events", "usage_daily"];
 /// What the API key steps keep in the database of the service: the keys.
 pub const API_KEYS_TABLE: &str = "api_keys";
 
+/// What the audit steps keep in the database of the service: the journal.
+pub const AUDIT_TABLE: &str = "audit_events";
+
+/// What the flag steps keep in the database of the service: the flags.
+pub const FLAGS_TABLE: &str = "feature_flags";
+
+/// What `nextNumber` keeps in the database of the service: the last number of each sequence.
+pub const SEQUENCES_TABLE: &str = "number_sequences";
+
 /// What `verifyChallenge` keeps in the database of the service: the solutions already accepted.
 pub const CHALLENGE_TABLE: &str = "challenge_uses";
 
@@ -1781,12 +1790,15 @@ impl<'a> Checker<'a> {
             if (s.uses_usage() && USAGE_TABLES.contains(&t.name.as_str()))
                 || (s.uses_challenge_check() && t.name == CHALLENGE_TABLE)
                 || (s.uses_api_keys() && t.name == API_KEYS_TABLE)
+                || (s.uses_sequences() && t.name == SEQUENCES_TABLE)
+                || (s.uses_audit() && t.name == AUDIT_TABLE)
+                || (s.uses_flags() && t.name == FLAGS_TABLE)
             {
                 self.error(
                     "E_TABLE_RESERVED",
                     format!("{tp}/name"),
                     format!(
-                        "`{}` is kept by the meter, quota, challenge or API key steps of this service, pick another name",
+                        "`{}` is kept by the meter, quota, challenge, API key, numbering, audit or flag steps of this service, pick another name",
                         t.name
                     ),
                 );
@@ -3759,6 +3771,174 @@ impl<'a> Checker<'a> {
                 }
                 false
             }
+            Step::Flag {
+                key,
+                subject,
+                properties,
+                rollout,
+                bind,
+                variant_bind,
+                ..
+            } => {
+                self.check_name_of(
+                    key,
+                    "E_FLAG_NAME",
+                    "a flag",
+                    "new_checkout`, `beta.search",
+                    &format!("{path}/key"),
+                );
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, subject, Some(&text), &format!("{path}/subject"));
+                self.plain_values(
+                    scope,
+                    properties,
+                    &format!("{path}/properties"),
+                    "properties",
+                );
+                if *rollout > 100 {
+                    self.error(
+                        "E_FLAG_ROLLOUT",
+                        format!("{path}/rollout"),
+                        "the share of subjects a flag is on for is 0 to 100 (percent)",
+                    );
+                }
+                self.check_var_name(bind, &format!("{path}/bind"));
+                scope.bind(bind.clone(), TypeRef::scalar(FieldType::Bool));
+                if let Some(variant) = variant_bind {
+                    self.check_var_name(variant, &format!("{path}/variantBind"));
+                    if variant == bind {
+                        self.error(
+                            "E_FLAG_BIND",
+                            format!("{path}/variantBind"),
+                            "the answer and the variant are two variables",
+                        );
+                    }
+                    scope.bind(variant.clone(), text);
+                }
+                false
+            }
+            Step::Audit {
+                action,
+                target_type,
+                target,
+                actor,
+                tenant,
+                before,
+                after,
+                ..
+            } => {
+                self.check_name_of(
+                    action,
+                    "E_AUDIT_ACTION",
+                    "an action",
+                    "invoice.issued`, `member.removed",
+                    &format!("{path}/action"),
+                );
+                self.check_name_of(
+                    target_type,
+                    "E_AUDIT_TARGET_TYPE",
+                    "a kind of target",
+                    "invoice`, `member",
+                    &format!("{path}/targetType"),
+                );
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, target, Some(&text), &format!("{path}/target"));
+                self.check_expr(scope, actor, Some(&text), &format!("{path}/actor"));
+                if let Some(tenant) = tenant {
+                    self.check_expr(scope, tenant, Some(&text), &format!("{path}/tenant"));
+                }
+                self.plain_values(scope, before, &format!("{path}/before"), "before");
+                self.plain_values(scope, after, &format!("{path}/after"), "after");
+                false
+            }
+            Step::AuditRead {
+                tenant,
+                target_type,
+                target,
+                action,
+                cursor,
+                limit,
+                bind,
+                next_cursor_bind,
+                ..
+            } => {
+                self.audit_schema(&format!("{path}/bind"));
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, tenant, Some(&text), &format!("{path}/tenant"));
+                for (value, name) in [
+                    (target_type, "targetType"),
+                    (target, "target"),
+                    (action, "action"),
+                ] {
+                    if let Some(value) = value {
+                        self.check_expr(scope, value, Some(&text), &format!("{path}/{name}"));
+                    }
+                }
+                if let Some(cursor) = cursor {
+                    let id = TypeRef::scalar(FieldType::Int64);
+                    self.check_expr(scope, cursor, Some(&id), &format!("{path}/cursor"));
+                }
+                if !(1..=MAX_AUDIT_PAGE).contains(limit) {
+                    self.error(
+                        "E_AUDIT_PAGE",
+                        format!("{path}/limit"),
+                        format!("a page of the journal is 1 to {MAX_AUDIT_PAGE} entries"),
+                    );
+                }
+                self.check_var_name(bind, &format!("{path}/bind"));
+                scope.bind(
+                    bind.clone(),
+                    TypeRef {
+                        ty: FieldType::Message {
+                            name: "AuditEntry".into(),
+                        },
+                        repeated: true,
+                        optional: false,
+                    },
+                );
+                if let Some(next) = next_cursor_bind {
+                    self.check_var_name(next, &format!("{path}/nextCursorBind"));
+                    if next == bind {
+                        self.error(
+                            "E_AUDIT_BIND",
+                            format!("{path}/nextCursorBind"),
+                            "the entries and the cursor of the next page are two variables",
+                        );
+                    }
+                    scope.bind(
+                        next.clone(),
+                        TypeRef {
+                            ty: FieldType::Int64,
+                            repeated: false,
+                            optional: true,
+                        },
+                    );
+                }
+                false
+            }
+            Step::NextNumber {
+                sequence,
+                scope: kept_apart,
+                start,
+                bind,
+                ..
+            } => {
+                self.check_sequence_name(sequence, &format!("{path}/sequence"));
+                if let Some(by) = kept_apart {
+                    let text = TypeRef::scalar(FieldType::String);
+                    self.check_expr(scope, by, Some(&text), &format!("{path}/scope"));
+                }
+                if *start < 0 {
+                    self.error(
+                        "E_SEQUENCE_START",
+                        format!("{path}/start"),
+                        "a sequence starts at 0 or more",
+                    );
+                }
+                self.check_var_name(bind, &format!("{path}/bind"));
+                scope.bind(bind.clone(), TypeRef::scalar(FieldType::Int64));
+                false
+            }
             Step::PasswordStrength {
                 password,
                 min_score,
@@ -4006,6 +4186,21 @@ impl<'a> Checker<'a> {
 
     /// The name of a meter: what the uses are added up under, so it is spelled the same everywhere.
     fn check_meter_name(&mut self, key: &str, path: &str) {
+        self.check_name_of(key, "E_METER_NAME", "a meter", "api_calls`, `seats", path);
+    }
+
+    /// The name of a sequence: spelled the same everywhere it is used.
+    fn check_sequence_name(&mut self, key: &str, path: &str) {
+        self.check_name_of(
+            key,
+            "E_SEQUENCE_NAME",
+            "a sequence",
+            "invoices`, `credit_notes",
+            path,
+        );
+    }
+
+    fn check_name_of(&mut self, key: &str, code: &str, what: &str, examples: &str, path: &str) {
         let ok = !key.is_empty()
             && key.len() <= 64
             && key.starts_with(|c: char| c.is_ascii_lowercase())
@@ -4014,9 +4209,11 @@ impl<'a> Checker<'a> {
             });
         if !ok {
             self.error(
-                "E_METER_NAME",
+                code,
                 path,
-                "a meter is named with lowercase letters, digits, `_`, `.` and `-`, starting with a letter (64 characters at most): `api_calls`, `seats`",
+                format!(
+                    "{what} is named with lowercase letters, digits, `_`, `.` and `-`, starting with a letter (64 characters at most): `{examples}`"
+                ),
             );
         }
     }
@@ -4088,6 +4285,73 @@ impl<'a> Checker<'a> {
                 "E_PASSKEY_SCHEMA",
                 path,
                 "starting a passkey step needs the API schema `PasskeyChallenge` (`state_id`, `options`: texts)",
+            );
+        }
+    }
+
+    /// Named plain values (the values of an audit entry, the properties of a flag): snake_case names, once each, and values that are
+    /// text, numbers, yes/no or uuids, never a message, a list, bytes or a timestamp.
+    fn plain_values(&mut self, scope: &Scope, list: &[Assignment], path: &str, what: &str) {
+        let mut seen = HashSet::new();
+        for (i, a) in list.iter().enumerate() {
+            let ap = format!("{path}/{i}");
+            if !crate::names::is_snake_ident(&a.field) || a.field.len() > 64 {
+                self.error(
+                    "E_PLAIN_FIELD",
+                    format!("{ap}/field"),
+                    "a value is named in snake_case (64 characters at most): `status`, `total_cents`",
+                );
+            } else if !seen.insert(a.field.as_str()) {
+                self.error(
+                    "E_PLAIN_FIELD",
+                    format!("{ap}/field"),
+                    format!("`{}` is given twice in `{what}`", a.field),
+                );
+            }
+            self.check_expr(scope, &a.value, None, &format!("{ap}/value"));
+            if let Ok(Some(ty)) = crate::typing::expr_type(self.project, scope, &a.value, None)
+                && (ty.repeated
+                    || matches!(
+                        ty.ty,
+                        FieldType::Message { .. } | FieldType::Bytes | FieldType::Timestamp
+                    ))
+            {
+                self.error(
+                    "E_PLAIN_VALUE",
+                    format!("{ap}/value"),
+                    format!("`{what}` keeps plain values (text, number, yes/no, uuid), and `{}` is a {ty}", a.field),
+                );
+            }
+        }
+    }
+
+    /// What `auditRead` hands over: the API schema `AuditEntry`, with the fields the journal has.
+    fn audit_schema(&mut self, path: &str) {
+        let texts = [
+            "at",
+            "actor",
+            "action",
+            "target_type",
+            "target_id",
+            "before",
+            "after",
+        ];
+        let ok = self.project.message("AuditEntry").is_some_and(|m| {
+            m.kind == MessageKind::Api
+                && texts.iter().all(|n| {
+                    m.field(n)
+                        .is_some_and(|f| f.ty == FieldType::String && !f.repeated && !f.optional)
+                })
+                && m.field("id")
+                    .is_some_and(|f| f.ty == FieldType::Int64 && !f.repeated && !f.optional)
+                && m.field("changed")
+                    .is_some_and(|f| f.ty == FieldType::String && f.repeated)
+        });
+        if !ok {
+            self.error(
+                "E_AUDIT_SCHEMA",
+                path,
+                "reading the journal needs the API schema `AuditEntry`: `id` (int64), `at`, `actor`, `action`, `target_type`, `target_id`, `before`, `after` (texts) and `changed` (a list of texts)",
             );
         }
     }
@@ -7063,6 +7327,602 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_sequence_is_numbered_in_a_transaction_and_its_table_is_the_generator_s() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_invoices(&mut p);
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        fn route(p: &Project) -> usize {
+            p.services[0]
+                .routes
+                .iter()
+                .position(|r| r.name == "issue_invoice")
+                .unwrap()
+        }
+        fn next(p: &mut Project) -> &mut Step {
+            let r = route(p);
+            &mut p.services[0].routes[r].steps[2]
+        }
+        // The name is spelled the same everywhere; the first number is zero or more; the scope is text.
+        for bad in ["", "Invoices", "credit notes", "1a", &"x".repeat(65)] {
+            let mut q = p.clone();
+            if let Step::NextNumber { sequence, .. } = next(&mut q) {
+                *sequence = bad.into();
+            }
+            assert!(
+                errors(&q).contains(&"E_SEQUENCE_NAME".to_string()),
+                "{bad:?}: {:?}",
+                errors(&q)
+            );
+        }
+        for good in ["invoices", "credit_notes", "a.b-c"] {
+            let mut q = p.clone();
+            if let Step::NextNumber { sequence, .. } = next(&mut q) {
+                *sequence = good.into();
+            }
+            assert!(errors(&q).is_empty(), "{good:?}: {:?}", errors(&q));
+        }
+        let mut q = p.clone();
+        if let Step::NextNumber { start, .. } = next(&mut q) {
+            *start = -1;
+        }
+        assert!(
+            errors(&q).contains(&"E_SEQUENCE_START".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        let mut q = p.clone();
+        if let Step::NextNumber { scope, .. } = next(&mut q) {
+            *scope = Some(Expr::Literal { value: 5.into() });
+        }
+        assert!(
+            errors(&q).contains(&"E_TYPE_MISMATCH".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        // The number is an int64 the steps after it can read, not before.
+        let mut q = p.clone();
+        let r = route(&q);
+        q.services[0].routes[r].steps.swap(2, 3);
+        assert!(
+            errors(&q)
+                .iter()
+                .any(|c| c == "E_UNKNOWN_PATH" || c == "E_EXPR_TYPE"),
+            "{:?}",
+            errors(&q)
+        );
+        // `number_sequences` is the generator's.
+        let mut q = p.clone();
+        let mut table = Table::new(SEQUENCES_TABLE, vec![Column::new("id", ColumnType::String)]);
+        table.columns[0].primary_key = true;
+        q.services[0].tables.push(table);
+        assert!(
+            errors(&q).contains(&"E_TABLE_RESERVED".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+    }
+
+    #[test]
+    fn the_identifier_functions_take_and_give_the_types_they_say() {
+        let mut p = sample::orders();
+        let mut check = |value_type: FieldType, optional: bool, value: Expr, ok: bool| {
+            route_of(&mut p).steps.insert(
+                0,
+                Step::Let {
+                    id: "i".into(),
+                    name: "made".into(),
+                    value_type,
+                    optional,
+                    repeated: false,
+                    value,
+                },
+            );
+            let found = errors(&p);
+            route_of(&mut p).steps.remove(0);
+            assert_eq!(found.is_empty(), ok, "{found:?}");
+        };
+        let int = |n: i64| Expr::Literal { value: n.into() };
+        let text = |t: &str| Expr::Literal { value: t.into() };
+        check(FieldType::Uuid, false, call(Func::NewUuidV7, vec![]), true);
+        check(
+            FieldType::Uuid,
+            false,
+            call(Func::NewUuidV7, vec![int(1)]),
+            false,
+        );
+        check(
+            FieldType::String,
+            false,
+            call(Func::ShortId, vec![int(5)]),
+            true,
+        );
+        check(
+            FieldType::String,
+            false,
+            call(Func::ShortId, vec![text("5")]),
+            false,
+        );
+        check(
+            FieldType::Int64,
+            true,
+            call(Func::FromShortId, vec![text("UkLWZg")]),
+            true,
+        );
+        // A short text may be nothing, so the number is optional; it cannot fill a required one.
+        check(
+            FieldType::Int64,
+            false,
+            call(Func::FromShortId, vec![text("UkLWZg")]),
+            false,
+        );
+        check(
+            FieldType::Int64,
+            true,
+            call(Func::FromShortId, vec![int(1)]),
+            false,
+        );
+        // Their names are the ones the compact syntax and the JSON use.
+        for (func, name) in [
+            (Func::NewUuidV7, "newUuidV7"),
+            (Func::ShortId, "shortId"),
+            (Func::FromShortId, "fromShortId"),
+        ] {
+            assert_eq!(func.name(), name);
+            assert_eq!(Func::from_name(name), Some(func));
+        }
+        assert!(!sample::orders().services[0].uses_short_ids());
+    }
+
+    #[test]
+    fn the_calendar_functions_take_instants_and_zones_and_a_zone_written_in_the_flow_must_exist() {
+        let int = |n: i64| Expr::Literal { value: n.into() };
+        let text = |t: &str| Expr::Literal { value: t.into() };
+        let mut p = sample::orders();
+        let mut check = |value_type: FieldType, optional: bool, value: Expr, ok: bool| {
+            route_of(&mut p).steps.insert(
+                0,
+                Step::Let {
+                    id: "c".into(),
+                    name: "made".into(),
+                    value_type,
+                    optional,
+                    repeated: false,
+                    value,
+                },
+            );
+            let found = errors(&p);
+            route_of(&mut p).steps.remove(0);
+            assert_eq!(found.is_empty(), ok, "{found:?}");
+        };
+        let paris = || text("Europe/Paris");
+        check(
+            FieldType::Int64,
+            false,
+            call(Func::NowSeconds, vec![]),
+            true,
+        );
+        check(
+            FieldType::Int64,
+            false,
+            call(Func::NowSeconds, vec![int(1)]),
+            false,
+        );
+        check(
+            FieldType::String,
+            false,
+            call(Func::LocalDate, vec![int(0), paris()]),
+            true,
+        );
+        check(
+            FieldType::String,
+            false,
+            call(Func::LocalTime, vec![int(0), text("UTC")]),
+            true,
+        );
+        check(
+            FieldType::Int64,
+            false,
+            call(Func::StartOfDay, vec![int(0), paris()]),
+            true,
+        );
+        check(
+            FieldType::Int64,
+            false,
+            call(Func::AddDays, vec![int(0), int(7), paris()]),
+            true,
+        );
+        check(
+            FieldType::Int64,
+            false,
+            call(Func::AddMonths, vec![int(0), int(-1), paris()]),
+            true,
+        );
+        // A text that may not be a date: the instant is optional.
+        check(
+            FieldType::Int64,
+            true,
+            call(Func::ParseLocal, vec![text("2026-03-29T10:00"), paris()]),
+            true,
+        );
+        check(
+            FieldType::Int64,
+            false,
+            call(Func::ParseLocal, vec![text("2026-03-29T10:00"), paris()]),
+            false,
+        );
+        // The types: seconds first (not a text), the zone last (not a number), days and months whole numbers.
+        check(
+            FieldType::String,
+            false,
+            call(Func::LocalDate, vec![text("0"), paris()]),
+            false,
+        );
+        check(
+            FieldType::String,
+            false,
+            call(Func::LocalDate, vec![int(0), int(1)]),
+            false,
+        );
+        check(
+            FieldType::Int64,
+            false,
+            call(Func::AddDays, vec![int(0), text("7"), paris()]),
+            false,
+        );
+        check(
+            FieldType::Int64,
+            false,
+            call(Func::AddDays, vec![int(0), paris()]),
+            false,
+        );
+        // A zone written in the flow must be in the IANA database; one that comes from the data is the runtime's to check.
+        check(
+            FieldType::String,
+            false,
+            call(Func::LocalDate, vec![int(0), text("Europe/Pariss")]),
+            false,
+        );
+        check(
+            FieldType::String,
+            false,
+            call(Func::LocalDate, vec![int(0), text("")]),
+            false,
+        );
+        check(
+            FieldType::String,
+            false,
+            call(Func::LocalDate, vec![int(0), text("America/New_York")]),
+            true,
+        );
+        check(
+            FieldType::String,
+            false,
+            call(Func::LocalDate, vec![int(0), text("UTC")]),
+            true,
+        );
+        check(
+            FieldType::Int64,
+            true,
+            call(Func::ParseLocal, vec![text("x"), text("Mars/Olympus")]),
+            false,
+        );
+        // Their names are the ones the compact syntax and the JSON use.
+        for (func, name) in [
+            (Func::NowSeconds, "nowSeconds"),
+            (Func::LocalDate, "localDate"),
+            (Func::LocalTime, "localTime"),
+            (Func::StartOfDay, "startOfDay"),
+            (Func::AddDays, "addDays"),
+            (Func::AddMonths, "addMonths"),
+            (Func::ParseLocal, "parseLocal"),
+        ] {
+            assert_eq!(func.name(), name);
+            assert_eq!(Func::from_name(name), Some(func));
+        }
+        assert!(!sample::orders().services[0].uses_time_zones());
+        assert!(
+            crate::typing::is_time_zone("Europe/Paris")
+                && !crate::typing::is_time_zone("Europe/Pariss")
+        );
+    }
+
+    fn with_audit() -> Project {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_audit(&mut p);
+        p
+    }
+
+    fn audit_step<'a>(p: &'a mut Project, route: &str, index: usize) -> &'a mut Step {
+        let r = p.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == route)
+            .unwrap();
+        &mut r.steps[index]
+    }
+
+    #[test]
+    fn the_audit_steps_are_checked_and_the_journal_schema_is_required() {
+        let p = with_audit();
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        // The name of an action and of a kind of target are spelled the same everywhere.
+        for bad in ["", "Invoice.Sent", "invoice sent", "1a", &"x".repeat(65)] {
+            let mut q = p.clone();
+            if let Step::Audit {
+                action,
+                target_type,
+                ..
+            } = audit_step(&mut q, "send_invoice", 1)
+            {
+                (*action, *target_type) = (bad.into(), bad.into());
+            }
+            let found = errors(&q);
+            assert!(
+                found.contains(&"E_AUDIT_ACTION".to_string())
+                    && found.contains(&"E_AUDIT_TARGET_TYPE".to_string()),
+                "{bad:?}: {found:?}"
+            );
+        }
+        // The values are named, once each, and plain.
+        let lit = |v: &str| Expr::Literal { value: v.into() };
+        let mut q = p.clone();
+        if let Step::Audit { before, .. } = audit_step(&mut q, "send_invoice", 1) {
+            before.push(Assignment {
+                field: "Bad Name".into(),
+                value: lit("x"),
+            });
+            before.push(Assignment {
+                field: "status".into(),
+                value: lit("again"),
+            });
+        }
+        assert_eq!(
+            errors(&q).iter().filter(|c| *c == "E_PLAIN_FIELD").count(),
+            2,
+            "{:?}",
+            errors(&q)
+        );
+        // A whole message, a list and a timestamp are not plain values.
+        let mut q = p.clone();
+        if let Step::Audit { after, .. } = audit_step(&mut q, "send_invoice", 1) {
+            after.push(Assignment {
+                field: "claims".into(),
+                value: Expr::Path {
+                    path: "claims".into(),
+                },
+            });
+            after.push(Assignment {
+                field: "roles".into(),
+                value: Expr::Path {
+                    path: "claims.roles".into(),
+                },
+            });
+        }
+        assert_eq!(
+            errors(&q).iter().filter(|c| *c == "E_PLAIN_VALUE").count(),
+            2,
+            "{:?}",
+            errors(&q)
+        );
+        // The target, the actor and the company are text.
+        let mut q = p.clone();
+        if let Step::Audit {
+            target,
+            actor,
+            tenant,
+            ..
+        } = audit_step(&mut q, "send_invoice", 1)
+        {
+            (*target, *actor, *tenant) = (
+                Expr::Literal { value: 1.into() },
+                Expr::Literal { value: 2.into() },
+                Some(Expr::Literal { value: 3.into() }),
+            );
+        }
+        assert_eq!(
+            errors(&q)
+                .iter()
+                .filter(|c| *c == "E_TYPE_MISMATCH")
+                .count(),
+            3,
+            "{:?}",
+            errors(&q)
+        );
+        // Reading: a page of 1 to 200, a cursor that is a number, and the schema `AuditEntry` as the journal has it.
+        for bad in [0, MAX_AUDIT_PAGE + 1] {
+            let mut q = p.clone();
+            if let Step::AuditRead { limit, .. } = audit_step(&mut q, "audit_journal", 1) {
+                *limit = bad;
+            }
+            assert!(
+                errors(&q).contains(&"E_AUDIT_PAGE".to_string()),
+                "{bad}: {:?}",
+                errors(&q)
+            );
+        }
+        let mut q = p.clone();
+        if let Step::AuditRead {
+            cursor,
+            tenant,
+            next_cursor_bind,
+            bind,
+            ..
+        } = audit_step(&mut q, "audit_journal", 1)
+        {
+            *cursor = Some(lit("x"));
+            *tenant = Expr::Literal { value: 1.into() };
+            *next_cursor_bind = Some(bind.clone());
+        }
+        let found = errors(&q);
+        assert!(
+            found.contains(&"E_AUDIT_BIND".to_string())
+                && found.iter().filter(|c| *c == "E_TYPE_MISMATCH").count() >= 2,
+            "{found:?}"
+        );
+        let mut q = p.clone();
+        q.messages.retain(|m| m.name != "AuditEntry");
+        assert!(
+            errors(&q)
+                .iter()
+                .any(|c| c == "E_AUDIT_SCHEMA" || c == "E_UNKNOWN_MESSAGE"),
+            "{:?}",
+            errors(&q)
+        );
+        let mut q = p.clone();
+        q.messages
+            .iter_mut()
+            .find(|m| m.name == "AuditEntry")
+            .unwrap()
+            .fields
+            .retain(|f| f.name != "changed");
+        assert!(
+            errors(&q).contains(&"E_AUDIT_SCHEMA".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        // The entries and the next cursor can be read after the step, not before; the journal table is the generator's.
+        let mut q = p.clone();
+        let r = q.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == "audit_journal")
+            .unwrap();
+        r.steps.swap(1, 2);
+        assert!(!errors(&q).is_empty());
+        let mut q = p.clone();
+        let mut table = Table::new(AUDIT_TABLE, vec![Column::new("id", ColumnType::String)]);
+        table.columns[0].primary_key = true;
+        q.services[0].tables.push(table);
+        assert!(
+            errors(&q).contains(&"E_TABLE_RESERVED".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+    }
+
+    #[test]
+    fn a_flag_names_its_subject_its_properties_and_what_it_starts_from() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_flags(&mut p);
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        fn flag(p: &mut Project) -> &mut Step {
+            let r = p.services[0]
+                .routes
+                .iter_mut()
+                .find(|r| r.name == "checkout_flag")
+                .unwrap();
+            &mut r.steps[1]
+        }
+        for bad in ["", "New Checkout", "1a", &"x".repeat(65)] {
+            let mut q = p.clone();
+            if let Step::Flag { key, .. } = flag(&mut q) {
+                *key = bad.into();
+            }
+            assert!(
+                errors(&q).contains(&"E_FLAG_NAME".to_string()),
+                "{bad:?}: {:?}",
+                errors(&q)
+            );
+        }
+        for good in ["new_checkout", "beta.search", "a-b"] {
+            let mut q = p.clone();
+            if let Step::Flag { key, .. } = flag(&mut q) {
+                *key = good.into();
+            }
+            assert!(errors(&q).is_empty(), "{good:?}: {:?}", errors(&q));
+        }
+        let mut q = p.clone();
+        if let Step::Flag { rollout, .. } = flag(&mut q) {
+            *rollout = 101;
+        }
+        assert!(
+            errors(&q).contains(&"E_FLAG_ROLLOUT".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        for edge in [0u8, 100] {
+            let mut q = p.clone();
+            if let Step::Flag { rollout, .. } = flag(&mut q) {
+                *rollout = edge;
+            }
+            assert!(errors(&q).is_empty(), "{edge}: {:?}", errors(&q));
+        }
+        // The subject is text; the properties are named plain values, once each.
+        let mut q = p.clone();
+        if let Step::Flag {
+            subject,
+            properties,
+            ..
+        } = flag(&mut q)
+        {
+            *subject = Expr::Literal { value: 1.into() };
+            properties.push(Assignment {
+                field: "Bad Name".into(),
+                value: Expr::Literal { value: "x".into() },
+            });
+            properties.push(Assignment {
+                field: "tenant".into(),
+                value: Expr::Literal {
+                    value: "again".into(),
+                },
+            });
+            properties.push(Assignment {
+                field: "roles".into(),
+                value: Expr::Path {
+                    path: "claims.roles".into(),
+                },
+            });
+        }
+        let found = errors(&q);
+        assert!(found.contains(&"E_TYPE_MISMATCH".to_string()), "{found:?}");
+        assert_eq!(
+            found.iter().filter(|c| *c == "E_PLAIN_FIELD").count(),
+            2,
+            "{found:?}"
+        );
+        assert_eq!(
+            found.iter().filter(|c| *c == "E_PLAIN_VALUE").count(),
+            1,
+            "{found:?}"
+        );
+        // The answer is a yes/no and the variant a text, two variables that the steps after can read, not before.
+        let mut q = p.clone();
+        if let Step::Flag {
+            variant_bind, bind, ..
+        } = flag(&mut q)
+        {
+            *variant_bind = Some(bind.clone());
+        }
+        assert!(
+            errors(&q).contains(&"E_FLAG_BIND".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        let mut q = p.clone();
+        q.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == "checkout_flag")
+            .unwrap()
+            .steps
+            .swap(1, 2);
+        assert!(!errors(&q).is_empty());
+        // The table of the flags is the generator's.
+        let mut q = p.clone();
+        let mut table = Table::new(FLAGS_TABLE, vec![Column::new("id", ColumnType::String)]);
+        table.columns[0].primary_key = true;
+        q.services[0].tables.push(table);
+        assert!(
+            errors(&q).contains(&"E_TABLE_RESERVED".to_string()),
+            "{:?}",
+            errors(&q)
+        );
     }
 
     #[test]

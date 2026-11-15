@@ -12,8 +12,10 @@ pub mod http_client;
 pub mod jobs;
 #[cfg(feature = "html")]
 pub mod html;
+pub mod flags;
 pub mod jwt;
 pub mod api_key;
+pub mod audit;
 pub mod challenge;
 pub mod logic;
 #[cfg(feature = "live")]
@@ -22,9 +24,14 @@ pub mod outbox;
 #[cfg(feature = "password-strength")]
 pub mod password;
 pub mod rate_limit;
+pub mod sequence;
+#[cfg(feature = "short-id")]
+pub mod short_id;
 pub mod resilience;
 #[cfg(feature = "s3")]
 pub mod s3;
+#[cfg(feature = "time-zones")]
+pub mod time_zone;
 pub mod totp;
 pub mod usage;
 pub mod validation;

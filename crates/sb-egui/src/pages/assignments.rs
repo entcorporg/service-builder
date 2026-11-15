@@ -339,6 +339,16 @@ fn func_label(f: Func) -> &'static str {
         Func::ParseDouble => "Lire un décimal dans un texte",
         Func::Default => "Valeur par défaut si absente",
         Func::NewUuid => "Nouvel identifiant (UUID)",
+        Func::NewUuidV7 => "Nouvel identifiant triable (UUID v7)",
+        Func::ShortId => "Nombre en identifiant court (UkLWZg)",
+        Func::FromShortId => "Identifiant court en nombre",
+        Func::NowSeconds => "Maintenant (secondes depuis 1970)",
+        Func::LocalDate => "Jour d’un instant dans un fuseau (2026-03-29)",
+        Func::LocalTime => "Date et heure locales d’un instant (avec décalage)",
+        Func::StartOfDay => "Début du jour dans un fuseau (secondes)",
+        Func::AddDays => "Ajouter des jours (même heure sur l’horloge)",
+        Func::AddMonths => "Ajouter des mois (même heure sur l’horloge)",
+        Func::ParseLocal => "Lire une date et heure locales (secondes)",
         Func::ListLength => "Nombre d’éléments d’une liste",
     }
 }
@@ -381,7 +391,35 @@ fn arg_spec(f: Func, i: usize) -> (String, Option<Field>) {
             ["Valeur (peut être absente)", "Sinon"][i.min(1)].into(),
             None,
         ),
-        Func::NewUuid => (String::new(), None),
+        Func::NewUuid | Func::NewUuidV7 => (String::new(), None),
+        Func::ShortId => (
+            "Nombre (entier 64 bits, 0 ou plus)".into(),
+            Some(Field::new("", FieldType::Int64)),
+        ),
+        Func::FromShortId => ("Identifiant court".into(), text()),
+        Func::NowSeconds => (String::new(), None),
+        Func::LocalDate | Func::LocalTime | Func::StartOfDay => match i {
+            0 => (
+                "Instant (secondes depuis 1970)".into(),
+                Some(Field::new("", FieldType::Int64)),
+            ),
+            _ => ("Fuseau (Europe/Paris)".into(), text()),
+        },
+        Func::AddDays | Func::AddMonths => match i {
+            0 => (
+                "Instant (secondes depuis 1970)".into(),
+                Some(Field::new("", FieldType::Int64)),
+            ),
+            1 => (
+                if f == Func::AddDays { "Jours" } else { "Mois" }.into(),
+                Some(Field::new("", FieldType::Int64)),
+            ),
+            _ => ("Fuseau (Europe/Paris)".into(), text()),
+        },
+        Func::ParseLocal => (
+            ["Texte (2026-03-29T10:00)", "Fuseau (Europe/Paris)"][i.min(1)].into(),
+            text(),
+        ),
         Func::ListLength => (
             "Liste".into(),
             list(FieldType::Message { name: "*".into() }),

@@ -139,8 +139,8 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
           DRAGONFLY_URL: redis://localhost:6379
       # The meters and quotas against a real PostgreSQL: the periods, the view, the idempotency keys and the lock that keeps two
-      # requests from taking the last unit. The proof-of-work challenges: a solution is worth one form, for every replica. The API keys: only the hash is stored, one 401 whatever is wrong.
-      - run: "cargo test -p eda-runtime --lib -- --include-ignored usage:: challenge:: api_key::"
+      # requests from taking the last unit. The proof-of-work challenges: a solution is worth one form, for every replica. The API keys: only the hash is stored, one 401 whatever is wrong. The numbers without a gap: a failed run gives its number back. The audit journal: append-only, read by company, page by page. The feature flags: a row an operator changes, never overwritten by a deployment.
+      - run: "cargo test -p eda-runtime --lib -- --include-ignored usage:: challenge:: api_key:: sequence:: audit:: flags::"
         working-directory: ${{ runner.temp }}/generated
         env:
           CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
@@ -151,6 +151,16 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
       # The circuit breaker and the bulkhead of the outbound calls (and the client itself), against a fake API on a local port.
+      - run: "cargo test -p eda-runtime --features time-zones --lib time_zone::"
+        working-directory: ${{ runner.temp }}/generated
+        env:
+          CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
+      # Calendar arithmetic in a zone: the days of 23 and 25 hours, the end of a month, the time that does not exist.
+      - run: "cargo test -p eda-runtime --features short-id --lib -- short_id:: logic::"
+        working-directory: ${{ runner.temp }}/generated
+        env:
+          CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
+      # The short identifiers (Sqids) and the UUIDs that sort by time.
       - run: "cargo test -p eda-runtime --features html --lib html::"
         working-directory: ${{ runner.temp }}/generated
         env:
@@ -168,6 +178,14 @@ jobs:
           for doc in "$RUNNER_TEMP"/generated/services/*/openapi.json; do
             "$RUNNER_TEMP/oas/bin/python" -m openapi_spec_validator "$doc"
           done
+
+      # The AsyncAPI document of the topics, with the official parser.
+      - name: Validate the AsyncAPI document
+        run: |
+          mkdir -p "$RUNNER_TEMP/asyncapi" && cd "$RUNNER_TEMP/asyncapi"
+          npm init -y >/dev/null && npm install --silent @asyncapi/parser@3
+          cp "$GITHUB_WORKSPACE/scripts/validate-asyncapi.mjs" .
+          node validate-asyncapi.mjs "$RUNNER_TEMP/generated/asyncapi.yaml"
 
   generated-realtime:
     # The real-time service is tested for real: its own tests, then the whole of it against a DragonflyDB, over real sockets.

@@ -209,6 +209,12 @@ fn cargo_toml(service: &Service) -> String {
     if service.uses_html_sanitizer() {
         features.push("\"html\"");
     }
+    if service.uses_short_ids() {
+        features.push("\"short-id\"");
+    }
+    if service.uses_time_zones() {
+        features.push("\"time-zones\"");
+    }
     let passkeys = if features.is_empty() {
         String::new()
     } else {
@@ -695,6 +701,26 @@ fn schema_rs(service: &Service) -> String {
         c.line("eda_runtime::webauthn::ADD_STATES_ORIGIN,");
         c.line("eda_runtime::webauthn::CREATE_CREDENTIALS_TABLE,");
         c.line("eda_runtime::webauthn::CREATE_CREDENTIALS_INDEX,");
+    }
+    if service.uses_flags() {
+        // The feature flags: one row each, changed by an operator without a deployment.
+        c.line("eda_runtime::flags::CREATE_TABLE,");
+    }
+    if service.uses_audit() {
+        // The journal: what was done, by whom, to what, and a trigger that keeps it append-only.
+        for statement in [
+            "CREATE_TABLE",
+            "CREATE_TENANT_INDEX",
+            "CREATE_TARGET_INDEX",
+            "CREATE_GUARD_FUNCTION",
+            "CREATE_GUARD_TRIGGER",
+        ] {
+            c.line(format!("eda_runtime::audit::{statement},"));
+        }
+    }
+    if service.uses_sequences() {
+        // The numbers given without gaps: the last one of each sequence.
+        c.line("eda_runtime::sequence::CREATE_TABLE,");
     }
     if service.uses_api_keys() {
         // The keys issued to the clients that are machines: only the hash of each secret.
@@ -2534,6 +2560,163 @@ fn steps(
                     "eda_runtime::api_key::revoke(&mut tx, &({key_id}), {owner}).await?;"
                 ));
             }
+            Step::Flag {
+                key,
+                subject,
+                properties,
+                enabled,
+                rollout,
+                bind,
+                variant_bind,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let subject = lower(project, scope, subject, &text)?;
+                let mut props = String::from("eda_runtime::flags::Properties::new()");
+                for a in properties {
+                    let ty = sb_model::typing::expr_type(project, scope, &a.value, None)
+                        .map_err(CodegenError::Internal)?
+                        .ok_or_else(|| {
+                            CodegenError::Internal(format!("`{}` of the flag has no type", a.field))
+                        })?;
+                    props.push_str(&format!(
+                        ".set({:?}, {})",
+                        a.field,
+                        lower(project, scope, &a.value, &ty)?
+                    ));
+                }
+                c.line(format!(
+                    "let __decision = eda_runtime::flags::evaluate(&mut tx, {key:?}, &({subject}), &{props}, eda_runtime::flags::Start {{ enabled: {enabled}, rollout: {rollout} }}).await?;"
+                ));
+                c.line(format!("let {bind}: bool = __decision.on;"));
+                scope.bind(bind.clone(), TypeRef::scalar(FieldType::Bool));
+                if let Some(variant) = variant_bind {
+                    c.line(format!("let {variant}: String = __decision.variant;"));
+                    scope.bind(variant.clone(), text);
+                }
+            }
+            Step::Audit {
+                action,
+                target_type,
+                target,
+                actor,
+                tenant,
+                before,
+                after,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let target = lower(project, scope, target, &text)?;
+                let actor = lower(project, scope, actor, &text)?;
+                let tenant = match tenant {
+                    Some(t) => format!("Some(&({}))", lower(project, scope, t, &text)?),
+                    None => "None".to_string(),
+                };
+                // The values, named: each one is written as JSON, whatever plain type it has.
+                let values = |list: &[sb_model::Assignment]| -> Result<String, CodegenError> {
+                    if list.is_empty() {
+                        return Ok("None".to_string());
+                    }
+                    let mut out = String::from("Some(eda_runtime::audit::Values::new()");
+                    for a in list {
+                        let ty = sb_model::typing::expr_type(project, scope, &a.value, None)
+                            .map_err(CodegenError::Internal)?
+                            .ok_or_else(|| {
+                                CodegenError::Internal(format!(
+                                    "`{}` of the audit has no type",
+                                    a.field
+                                ))
+                            })?;
+                        out.push_str(&format!(
+                            ".set({:?}, {})",
+                            a.field,
+                            lower(project, scope, &a.value, &ty)?
+                        ));
+                    }
+                    out.push(')');
+                    Ok(out)
+                };
+                let (before, after) = (values(before)?, values(after)?);
+                c.line(format!(
+                    "eda_runtime::audit::record(&mut tx, eda_runtime::audit::Event {{ action: {action:?}, target_type: {target_type:?}, target: &({target}), actor: &({actor}), tenant: {tenant}, before: {before}, after: {after} }}).await?;"
+                ));
+            }
+            Step::AuditRead {
+                tenant,
+                target_type,
+                target,
+                action,
+                cursor,
+                limit,
+                bind,
+                next_cursor_bind,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let tenant = lower(project, scope, tenant, &text)?;
+                let optional_text = |value: &Option<Expr>| -> Result<String, CodegenError> {
+                    Ok(match value {
+                        Some(v) => format!("Some(&({}))", lower(project, scope, v, &text)?),
+                        None => "None".to_string(),
+                    })
+                };
+                let (target_type, target, action) = (
+                    optional_text(target_type)?,
+                    optional_text(target)?,
+                    optional_text(action)?,
+                );
+                let cursor = match cursor {
+                    Some(c) => format!(
+                        "Some({})",
+                        lower(project, scope, c, &TypeRef::scalar(FieldType::Int64))?
+                    ),
+                    None => "None".to_string(),
+                };
+                c.line(format!(
+                    "let __page = eda_runtime::audit::read(&mut tx, eda_runtime::audit::Filter {{ tenant: &({tenant}), target_type: {}, target: {}, action: {}, cursor: {cursor}, limit: {limit} }}).await?;",
+                    target_type, target, action
+                ));
+                if let Some(next) = next_cursor_bind {
+                    c.line(format!("let {next}: Option<i64> = __page.next;"));
+                    scope.bind(
+                        next.clone(),
+                        TypeRef {
+                            ty: FieldType::Int64,
+                            repeated: false,
+                            optional: true,
+                        },
+                    );
+                }
+                c.line(format!(
+                    "let {bind}: Vec<pb::AuditEntry> = __page.entries.into_iter().map(|e| pb::AuditEntry {{ id: e.id, at: e.at, actor: e.actor, action: e.action, target_type: e.target_type, target_id: e.target_id, before: e.before, after: e.after, changed: e.changed, ..Default::default() }}).collect();"
+                ));
+                scope.bind(
+                    bind.clone(),
+                    TypeRef {
+                        ty: FieldType::Message {
+                            name: "AuditEntry".into(),
+                        },
+                        repeated: true,
+                        optional: false,
+                    },
+                );
+            }
+            Step::NextNumber {
+                sequence,
+                scope: kept_apart,
+                start,
+                bind,
+                ..
+            } => {
+                let kept_apart = match kept_apart {
+                    Some(by) => lower(project, scope, by, &TypeRef::scalar(FieldType::String))?,
+                    None => "String::new()".to_string(),
+                };
+                c.line(format!(
+                    "let {bind}: i64 = eda_runtime::sequence::next(&mut tx, {sequence:?}, &({kept_apart}), {start}_i64).await?;"
+                ));
+                scope.bind(bind.clone(), TypeRef::scalar(FieldType::Int64));
+            }
             Step::PasswordStrength {
                 password,
                 min_score,
@@ -3668,6 +3851,10 @@ fn describe(step: &Step) -> String {
         ),
         Step::VerifyChallenge { .. } => "verify the challenge".into(),
         Step::PasswordStrength { .. } => "judge the password".into(),
+        Step::Flag { key, bind, .. } => format!("flag {key} into {bind}"),
+        Step::Audit { action, .. } => format!("audit {action}"),
+        Step::AuditRead { bind, .. } => format!("read the audit journal into {bind}"),
+        Step::NextNumber { sequence, bind, .. } => format!("next number of {sequence} into {bind}"),
         Step::ApiKeyCreate { bind, .. } => format!("issue an API key into {bind}"),
         Step::ApiKeyVerify { bind, .. } => format!("check the API key, its owner into {bind}"),
         Step::ApiKeyRevoke { .. } => "revoke an API key".into(),

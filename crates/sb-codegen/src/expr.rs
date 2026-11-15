@@ -302,6 +302,44 @@ fn call_code(
             )
         }
         NewUuid => "eda_runtime::logic::new_uuid()".to_string(),
+        NewUuidV7 => "eda_runtime::logic::new_uuid_v7()".to_string(),
+        ShortId => format!(
+            "eda_runtime::short_id::encode({})?",
+            arg(0, &TypeRef::scalar(FieldType::Int64))?
+        ),
+        NowSeconds => "eda_runtime::time_zone::now_seconds()".to_string(),
+        LocalDate | LocalTime | StartOfDay => {
+            let function = match func {
+                LocalDate => "local_date",
+                LocalTime => "local_time",
+                _ => "start_of_day",
+            };
+            format!(
+                "eda_runtime::time_zone::{function}({}, &({}))?",
+                arg(0, &TypeRef::scalar(FieldType::Int64))?,
+                arg(1, &text)?
+            )
+        }
+        AddDays | AddMonths => {
+            let function = if func == AddDays {
+                "add_days"
+            } else {
+                "add_months"
+            };
+            let int = TypeRef::scalar(FieldType::Int64);
+            format!(
+                "eda_runtime::time_zone::{function}({}, {}, &({}))?",
+                arg(0, &int)?,
+                arg(1, &int)?,
+                arg(2, &text)?
+            )
+        }
+        ParseLocal => format!(
+            "eda_runtime::time_zone::parse_local(&({}), &({}))?",
+            arg(0, &text)?,
+            arg(1, &text)?
+        ),
+        FromShortId => format!("eda_runtime::short_id::decode(&({}))", arg(0, &text)?),
         ListLength => {
             let from = typed(project, scope, &args[0])?;
             format!("({}).len() as i64", arg(0, &from)?)

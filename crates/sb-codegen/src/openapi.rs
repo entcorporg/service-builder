@@ -99,7 +99,7 @@ pub fn openapi_json(project: &Project, service: &Service) -> Option<String> {
 
 /// The schemas the operations refer to, collected as they are met.
 #[derive(Default)]
-struct Schemas {
+pub(crate) struct Schemas {
     names: Vec<String>,
 }
 
@@ -113,7 +113,7 @@ impl Schemas {
         name
     }
 
-    fn reference(&mut self, message: &str) -> Value {
+    pub(crate) fn reference(&mut self, message: &str) -> Value {
         if !self.names.iter().any(|n| n == message) {
             self.names.push(message.to_string());
         }
@@ -121,7 +121,7 @@ impl Schemas {
     }
 
     /// The schema of every message met, and the ones nested in them.
-    fn used(&mut self, project: &Project) -> BTreeMap<String, Value> {
+    pub(crate) fn used(&mut self, project: &Project) -> BTreeMap<String, Value> {
         let mut out = BTreeMap::new();
         let mut i = 0;
         while i < self.names.len() {

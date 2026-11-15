@@ -952,6 +952,10 @@ pub fn showcase() -> Project {
     add_notes(&mut p);
     add_usage(&mut p);
     add_api_keys(&mut p);
+    add_invoices(&mut p);
+    add_calendar(&mut p);
+    add_audit(&mut p);
+    add_flags(&mut p);
     add_sql_reads(&mut p);
     add_mailer(&mut p);
     add_mail_design(&mut p);
@@ -1929,6 +1933,336 @@ pub fn add_api_keys(p: &mut Project) {
             Step::Respond {
                 id: "k8".into(),
                 fields: vec![set("owner", path("owner"))],
+                status: None,
+                cookies: vec![],
+                headers: vec![],
+            },
+        ],
+    });
+}
+
+/// A route that tells the calendar of a visitor from the time zone in its path: the day it is for them, when that day began (not a
+/// multiple of 86 400 seconds: a day is 23 or 25 hours when the clocks change), the same time next week and next month on their
+/// clock.
+// (The variable is `instant`, not `now`: in the compact syntax of the editor `now` is the clock of the database.)
+pub fn add_calendar(p: &mut Project) {
+    p.messages.push(api(
+        "CalendarRequest",
+        vec![field("zone", FieldType::String)],
+    ));
+    p.messages.push(api(
+        "CalendarAnswer",
+        vec![
+            field("today", FieldType::String),
+            field("day_start", FieldType::Int64),
+            field("next_week", FieldType::Int64),
+            field("next_month", FieldType::Int64),
+            field("paris_now", FieldType::String),
+        ],
+    ));
+    let zone = || path("input.zone");
+    p.services[0].routes.push(Route {
+        name: "calendar".into(),
+        method: HttpMethod::Get,
+        path: "/calendar/{zone}".into(),
+        request: "CalendarRequest".into(),
+        response: "CalendarAnswer".into(),
+        status: 200,
+        steps: vec![
+            Step::Let {
+                id: "t1".into(),
+                name: "instant".into(),
+                value_type: FieldType::Int64,
+                optional: false,
+                repeated: false,
+                value: call(Func::NowSeconds, vec![]),
+            },
+            Step::Respond {
+                id: "t2".into(),
+                fields: vec![
+                    set(
+                        "today",
+                        call(Func::LocalDate, vec![path("instant"), zone()]),
+                    ),
+                    set(
+                        "day_start",
+                        call(Func::StartOfDay, vec![path("instant"), zone()]),
+                    ),
+                    set(
+                        "next_week",
+                        call(Func::AddDays, vec![path("instant"), lit(7), zone()]),
+                    ),
+                    set(
+                        "next_month",
+                        call(Func::AddMonths, vec![path("instant"), lit(1), zone()]),
+                    ),
+                    // A zone written in the flow is checked when the project is: a typo would be a 400 at every call.
+                    set(
+                        "paris_now",
+                        call(Func::LocalTime, vec![path("instant"), lit("Europe/Paris")]),
+                    ),
+                ],
+                status: None,
+                cookies: vec![],
+                headers: vec![],
+            },
+        ],
+    });
+}
+
+/// The audit journal: sending an invoice leaves a trace of who did it and what moved (`draft` to `sent`), written in the transaction of
+/// the route, and a route reads the journal of the company, newest first, a page at a time. Needs [`add_jwt`], whose `AccessClaims`
+/// and signing key it uses.
+pub fn add_audit(p: &mut Project) {
+    let string = || FieldType::String;
+    let bearer = || {
+        let mut token = field("token", string());
+        token.lenient = true; // the flow answers 401 itself
+        token.source = Some(RequestSource::Header {
+            name: "Authorization".into(),
+        });
+        token
+    };
+    p.messages.push(api(
+        "AuditEntry",
+        vec![
+            field("id", FieldType::Int64),
+            field("at", string()),
+            field("actor", string()),
+            field("action", string()),
+            field("target_type", string()),
+            field("target_id", string()),
+            field("before", string()),
+            field("after", string()),
+            {
+                let mut changed = field("changed", string());
+                changed.repeated = true;
+                changed
+            },
+        ],
+    ));
+    p.messages.push(api(
+        "InvoiceSend",
+        vec![bearer(), field("invoice_id", string())],
+    ));
+    p.messages
+        .push(api("InvoiceSent", vec![field("sent", FieldType::Bool)]));
+    let mut cursor = field("cursor", FieldType::Int64);
+    cursor.optional = true;
+    p.messages.push(api("AuditQuery", vec![bearer(), cursor]));
+    let mut entries = msg_field("entries", "AuditEntry");
+    entries.repeated = true;
+    let mut next = field("next_cursor", FieldType::Int64);
+    next.optional = true;
+    p.messages.push(api("AuditPage", vec![entries, next]));
+    let verify_jwt = |id: &str| Step::VerifyJwt {
+        id: id.into(),
+        token: path("input.token"),
+        bearer: true,
+        source: JwksSource::Keys {
+            key_envs: vec!["JWT_SIGNING_KEY".into()],
+        },
+        issuer: "orders".into(),
+        schema: "AccessClaims".into(),
+        bind: "claims".into(),
+    };
+    let routes = &mut p.services[0].routes;
+    routes.push(Route {
+        name: "send_invoice".into(),
+        method: HttpMethod::Post,
+        path: "/tenant/invoices/{invoice_id}/send".into(),
+        request: "InvoiceSend".into(),
+        response: "InvoiceSent".into(),
+        status: 200,
+        steps: vec![
+            verify_jwt("a1"),
+            // The trace of the change, in the transaction of the change: both are kept, or neither.
+            Step::Audit {
+                id: "a2".into(),
+                action: "invoice.sent".into(),
+                target_type: "invoice".into(),
+                target: path("input.invoice_id"),
+                actor: path("claims.sub"),
+                tenant: Some(path("claims.tid")),
+                before: vec![set("status", lit("draft"))],
+                after: vec![set("status", lit("sent"))],
+            },
+            Step::Respond {
+                id: "a3".into(),
+                fields: vec![set("sent", lit(true))],
+                status: None,
+                cookies: vec![],
+                headers: vec![],
+            },
+        ],
+    });
+    routes.push(Route {
+        name: "audit_journal".into(),
+        method: HttpMethod::Get,
+        path: "/tenant/audit".into(),
+        request: "AuditQuery".into(),
+        response: "AuditPage".into(),
+        status: 200,
+        steps: vec![
+            verify_jwt("a4"),
+            // A company reads its own entries, newest first; the cursor is the id of the last entry of the page before.
+            Step::AuditRead {
+                id: "a5".into(),
+                tenant: path("claims.tid"),
+                target_type: None,
+                target: None,
+                action: None,
+                cursor: Some(call(
+                    Func::Default,
+                    vec![path("input.cursor"), lit(i64::MAX)],
+                )),
+                limit: DEFAULT_AUDIT_PAGE,
+                bind: "entries".into(),
+                next_cursor_bind: Some("next_cursor".into()),
+            },
+            Step::Respond {
+                id: "a6".into(),
+                fields: vec![
+                    set("entries", path("entries")),
+                    set("next_cursor", path("next_cursor")),
+                ],
+                status: None,
+                cookies: vec![],
+                headers: vec![],
+            },
+        ],
+    });
+}
+
+/// A feature flag: the new checkout is shipped dark and starts at a quarter of the accounts; an operator widens or narrows it with one
+/// statement on `feature_flags`, with no deployment. The account is the subject (so it always gets the same answer), its company a
+/// property a rule can look at. Needs [`add_jwt`], whose `AccessClaims` and signing key it uses.
+pub fn add_flags(p: &mut Project) {
+    let mut token = field("token", FieldType::String);
+    token.lenient = true; // the flow answers 401 itself
+    token.source = Some(RequestSource::Header {
+        name: "Authorization".into(),
+    });
+    p.messages.push(api("FlagRequest", vec![token]));
+    p.messages.push(api(
+        "FlagAnswer",
+        vec![
+            field("new_checkout", FieldType::Bool),
+            field("variant", FieldType::String),
+        ],
+    ));
+    p.services[0].routes.push(Route {
+        name: "checkout_flag".into(),
+        method: HttpMethod::Get,
+        path: "/checkout/flag".into(),
+        request: "FlagRequest".into(),
+        response: "FlagAnswer".into(),
+        status: 200,
+        steps: vec![
+            Step::VerifyJwt {
+                id: "f1".into(),
+                token: path("input.token"),
+                bearer: true,
+                source: JwksSource::Keys {
+                    key_envs: vec!["JWT_SIGNING_KEY".into()],
+                },
+                issuer: "orders".into(),
+                schema: "AccessClaims".into(),
+                bind: "claims".into(),
+            },
+            Step::Flag {
+                id: "f2".into(),
+                key: "new_checkout".into(),
+                subject: path("claims.sub"),
+                properties: vec![set("tenant", path("claims.tid"))],
+                enabled: true,
+                rollout: 25,
+                bind: "new_checkout".into(),
+                variant_bind: Some("variant".into()),
+            },
+            Step::Respond {
+                id: "f3".into(),
+                fields: vec![
+                    set("new_checkout", path("new_checkout")),
+                    set("variant", path("variant")),
+                ],
+                status: None,
+                cookies: vec![],
+                headers: vec![],
+            },
+        ],
+    });
+}
+
+/// An invoice route: the number is taken **last**, right before it is written with, from a sequence of the company and the year
+/// (`2026`), so the numbers of a year follow one another without a hole even when a run fails; the reference a person reads out
+/// is the short text of the number, and the identifier is a UUID that sorts by date. Needs [`add_jwt`], whose `AccessClaims` and
+/// signing key it uses.
+pub fn add_invoices(p: &mut Project) {
+    let mut token = field("token", FieldType::String);
+    token.lenient = true; // the flow answers 401 itself
+    token.source = Some(RequestSource::Header {
+        name: "Authorization".into(),
+    });
+    p.messages.push(api("InvoiceRequest", vec![token]));
+    p.messages.push(api(
+        "InvoiceIssued",
+        vec![
+            field("number", FieldType::Int64),
+            field("reference", FieldType::String),
+            field("invoice_id", FieldType::Uuid),
+        ],
+    ));
+    p.services[0].routes.push(Route {
+        name: "issue_invoice".into(),
+        method: HttpMethod::Post,
+        path: "/tenant/invoices".into(),
+        request: "InvoiceRequest".into(),
+        response: "InvoiceIssued".into(),
+        status: 201,
+        steps: vec![
+            Step::VerifyJwt {
+                id: "v1".into(),
+                token: path("input.token"),
+                bearer: true,
+                source: JwksSource::Keys {
+                    key_envs: vec!["JWT_SIGNING_KEY".into()],
+                },
+                issuer: "orders".into(),
+                schema: "AccessClaims".into(),
+                bind: "claims".into(),
+            },
+            Step::Let {
+                id: "v2".into(),
+                name: "invoice_id".into(),
+                value_type: FieldType::Uuid,
+                optional: false,
+                repeated: false,
+                value: call(Func::NewUuidV7, vec![]),
+            },
+            // Last before the write: the runs of this company and year wait for one another from here.
+            Step::NextNumber {
+                id: "v3".into(),
+                sequence: "invoices".into(),
+                scope: Some(template("{claims.tid}-2026")),
+                start: DEFAULT_SEQUENCE_START,
+                bind: "number".into(),
+            },
+            Step::Let {
+                id: "v4".into(),
+                name: "reference".into(),
+                value_type: FieldType::String,
+                optional: false,
+                repeated: false,
+                value: call(Func::ShortId, vec![path("number")]),
+            },
+            Step::Respond {
+                id: "v5".into(),
+                fields: vec![
+                    set("number", path("number")),
+                    set("reference", path("reference")),
+                    set("invoice_id", path("invoice_id")),
+                ],
                 status: None,
                 cookies: vec![],
                 headers: vec![],

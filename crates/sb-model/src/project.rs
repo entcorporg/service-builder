@@ -1098,6 +1098,107 @@ pub enum Step {
     /// Routes only, in a service that serves a challenge.
     #[serde(rename_all = "camelCase")]
     VerifyChallenge { id: String, payload: Expr },
+    /// Asks whether a **feature flag** is on for a subject (an account, a company): the way to ship code dark, turn it on for a few
+    /// and then for all, and turn it off again, **without deploying**. The flag lives in the table `feature_flags` of the service's
+    /// database, which an operator changes with one statement (`UPDATE feature_flags SET rollout_percent = 25 WHERE key = 'x'`); the
+    /// step only says what it starts from when the table has no row for the key yet (`enabled`, `rollout`: the row is then
+    /// written, and never overwritten by a deployment). A flag is **on** for a subject when it is enabled, every one of its
+    /// `rules` matches the `properties` the step gives (`plan` in `pro`, `team`...), and the subject falls in the share of the
+    /// rollout: the subject and the key are hashed to a number from 0 to 99, so **the same subject always gets the same
+    /// answer**, and raising the percentage only adds subjects, it never takes one away. With `variants` in the row (`blue` 50,
+    /// `red` 50) the subjects that are on get one of them, as stably. `bind` receives the answer (a bool), `variantBind` the
+    /// variant (a text; empty when the flag is off or has none).
+    #[serde(rename_all = "camelCase")]
+    Flag {
+        id: String,
+        /// The flag: `new_checkout`, `beta.search`.
+        key: String,
+        /// Who is asked about (a text): what the rollout is stable for.
+        subject: Expr,
+        /// What the rules of the flag can look at: `plan = "pro"`, `country = "FR"`. Plain values, named.
+        #[serde(default)]
+        properties: Vec<Assignment>,
+        /// Whether the flag is on when the table has no row for it yet (it is written then, so it can be changed).
+        #[serde(default)]
+        enabled: bool,
+        /// The share of subjects it is on for when the table has no row yet: 0 to 100.
+        #[serde(default = "default_flag_rollout")]
+        rollout: u8,
+        bind: String,
+        #[serde(default)]
+        variant_bind: Option<String>,
+    },
+    /// Writes what happened to the audit journal: who (`actor`) did what (`action`, `invoice.issued`) to what (`targetType` and
+    /// `target`), for which company (`tenant`), with the values `before` and `after` the change. A row of the table
+    /// `audit_events` of the service's database, written **in the transaction of the handler**: the change and its trace commit
+    /// together, or neither does, so the journal never tells of something that did not happen nor misses something that did. The
+    /// table is **append-only**: a trigger refuses an update and a delete. The values are plain (text, number, bool, uuid), named
+    /// (`status = "draft"`); the fields whose value is not the same before and after are kept apart (`changed`).
+    #[serde(rename_all = "camelCase")]
+    Audit {
+        id: String,
+        /// What was done: `domain.action`, lowercase letters, digits and `_.-` (`invoice.issued`, `member.removed`).
+        action: String,
+        /// The kind of thing it was done to: `invoice`, `member` (the same spelling everywhere).
+        target_type: String,
+        /// Which one: its identifier (a text).
+        target: Expr,
+        /// Who did it: the account, the API key, the job (a text).
+        actor: Expr,
+        /// For which company; left out, the entry is not any company's.
+        #[serde(default)]
+        tenant: Option<Expr>,
+        /// The values before the change, one `name = value` each.
+        #[serde(default)]
+        before: Vec<Assignment>,
+        /// The values after the change, one `name = value` each.
+        #[serde(default)]
+        after: Vec<Assignment>,
+    },
+    /// Reads the journal of a company, **newest first**, a page at a time. `tenant` is required: a company reads its own entries and
+    /// no one else's. Filtered by `targetType`, `target` and `action` when given. `bind` receives the entries, a list of the API
+    /// schema `AuditEntry` (`id`, `at`, `actor`, `action`, `target_type`, `target_id`, `before`, `after`: texts, `before` and `after`
+    /// being JSON, and `changed`: a list of texts, and `id` a number); `nextCursorBind` the `cursor` of the next page (an optional
+    /// int64, absent on the last one): to be given back as `cursor` to read the entries older than the last of this page.
+    #[serde(rename_all = "camelCase")]
+    AuditRead {
+        id: String,
+        tenant: Expr,
+        #[serde(default)]
+        target_type: Option<Expr>,
+        #[serde(default)]
+        target: Option<Expr>,
+        #[serde(default)]
+        action: Option<Expr>,
+        /// The `id` of the last entry already read (an `int64`); left out, the newest.
+        #[serde(default)]
+        cursor: Option<Expr>,
+        /// Entries in a page: 1 to 200, 50 by default.
+        #[serde(default = "default_audit_page")]
+        limit: u32,
+        bind: String,
+        #[serde(default)]
+        next_cursor_bind: Option<String>,
+    },
+    /// The next number of a sequence **without gaps**, for what the law asks to be numbered one after the other (invoices, credit
+    /// notes): 1, 2, 3... In the table `number_sequences` of the service's database, in the transaction of the handler: the row of
+    /// the sequence is locked until the transaction ends, so two runs cannot get the same number, and a run that fails gives its
+    /// number back (the next one gets it), which a database sequence (`SERIAL`) never does. The price: runs that number the same
+    /// sequence and scope wait for one another, so number at the **end** of the run, right before the write. `scope` makes one
+    /// sequence per value (a company, a year: `2026`): each counts from `start`. `bind` receives the number (an `int64`).
+    #[serde(rename_all = "camelCase")]
+    NextNumber {
+        id: String,
+        /// The sequence: `invoices`, `credit_notes`.
+        sequence: String,
+        /// What the numbering is kept apart by (a text: the company, the year); left out, one for the whole service.
+        #[serde(default)]
+        scope: Option<Expr>,
+        /// The first number of a sequence (1 by default).
+        #[serde(default = "default_sequence_start")]
+        start: i64,
+        bind: String,
+    },
     /// Records a use of a meter for a tenant: `amount` units of `key` (API calls, seats, megabytes) in the table
     /// `usage_events` of the service's database, in the transaction of the handler, so that the use and what it pays for commit
     /// together. A negative amount gives units back (a seat released). With `idempotency_key`, a second use with the same text
@@ -2018,6 +2119,10 @@ impl Step {
             | Step::Sql { id, .. }
             | Step::Fail { id, .. }
             | Step::RateLimit { id, .. }
+            | Step::NextNumber { id, .. }
+            | Step::Flag { id, .. }
+            | Step::Audit { id, .. }
+            | Step::AuditRead { id, .. }
             | Step::Meter { id, .. }
             | Step::CheckQuota { id, .. }
             | Step::VerifyChallenge { id, .. }
@@ -2118,6 +2223,28 @@ impl Default for CircuitConfig {
             open_secs: DEFAULT_CIRCUIT_OPEN_SECS,
         }
     }
+}
+
+/// The share of subjects a flag is on for when nothing says otherwise: all of them (when it is enabled).
+pub const DEFAULT_FLAG_ROLLOUT: u8 = 100;
+
+fn default_flag_rollout() -> u8 {
+    DEFAULT_FLAG_ROLLOUT
+}
+
+/// Entries in a page of the audit journal, and the most.
+pub const DEFAULT_AUDIT_PAGE: u32 = 50;
+pub const MAX_AUDIT_PAGE: u32 = 200;
+
+fn default_audit_page() -> u32 {
+    DEFAULT_AUDIT_PAGE
+}
+
+/// The first number of a sequence.
+pub const DEFAULT_SEQUENCE_START: i64 = 1;
+
+fn default_sequence_start() -> i64 {
+    DEFAULT_SEQUENCE_START
 }
 
 /// The score under which `passwordStrength` refuses a password: "safely unguessable".
@@ -2266,8 +2393,41 @@ pub enum Func {
     Default,
     /// A new random UUID (v4), as a uuid.
     NewUuid,
+    /// A new UUID version 7, as a uuid: the first 48 bits are the time in milliseconds, so the identifiers **sort in the order
+    /// they were made**. A primary key that is a v7 fills the index of its table from its end, not at random places: inserts stay
+    /// fast on a large table, and a listing by identifier is a listing by date.
+    NewUuidV7,
+    /// `shortId(number)`: a whole number (an int64, zero or more) as a short text of letters and digits (`UkLWZg`, at least six
+    /// characters), for an address a person reads or pastes: `/invoices/UkLWZg`. Sqids: the same number is always the same text,
+    /// and `fromShortId` gives the number back. **It hides the order of the numbers from the eye, not from a person who wants to
+    /// find it**: it is not a secret and protects nothing, access still has to be checked.
+    ShortId,
+    /// `fromShortId(text)`: the number a text made by `shortId` stands for, absent when the text is not one (anything else, even
+    /// something that looks like one, is absent: only the exact text `shortId` makes is read).
+    FromShortId,
     /// Number of elements of a list (int64).
     ListLength,
+    /// The current instant, in whole seconds since 1970 (int64): what the functions below take and give.
+    NowSeconds,
+    /// `localDate(seconds, zone)`: the calendar day of an instant in a time zone, as `2026-03-29` (a text). A report "per day" is
+    /// per day **of someone**: 23:30 in Paris is already the next day in Tokyo.
+    LocalDate,
+    /// `localTime(seconds, zone)`: an instant as the local date and time with the offset of the zone then, as
+    /// `2026-03-29T03:30:00+02:00` (RFC 3339, a text).
+    LocalTime,
+    /// `startOfDay(seconds, zone)`: the instant (seconds, int64) at which the day of `seconds` began in the zone. A day is not 86400
+    /// seconds: it is 82800 the day the clocks go forward and 90000 the day they go back.
+    StartOfDay,
+    /// `addDays(seconds, days, zone)`: the instant `days` calendar days later (or earlier, if negative) **at the same time on the
+    /// clock** in the zone: a day later at 09:00 is 09:00 the next day, 23 or 25 hours after across a change of time.
+    AddDays,
+    /// `addMonths(seconds, months, zone)`: the same on the clock `months` calendar months later; the 31st plus a month is the last
+    /// day of the next month (`January 31` gives `February 28`).
+    AddMonths,
+    /// `parseLocal(text, zone)`: the instant (seconds, int64) of a date and time written without offset, `2026-03-29T10:00:00` or
+    /// `2026-03-29 10:00` (a date alone is its midnight), read in the zone; absent when the text is not one. A time that does not
+    /// exist (the hour skipped when the clocks go forward) is moved forward by the gap, one that happens twice is the first.
+    ParseLocal,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -2599,6 +2759,57 @@ impl Service {
             });
         }
         used
+    }
+
+    /// Whether a step of the service asks about a feature flag: its database then holds `feature_flags`.
+    pub fn uses_flags(&self) -> bool {
+        let mut used = false;
+        for step in self.handler_steps() {
+            step.walk(&mut |s| used |= matches!(s, Step::Flag { .. }));
+        }
+        used
+    }
+
+    /// Whether a step of the service writes to or reads the audit journal: its database then holds `audit_events`.
+    pub fn uses_audit(&self) -> bool {
+        let mut used = false;
+        for step in self.handler_steps() {
+            step.walk(&mut |s| used |= matches!(s, Step::Audit { .. } | Step::AuditRead { .. }));
+        }
+        used
+    }
+
+    /// Whether a step of the service takes a number from a sequence: its database then holds `number_sequences`.
+    pub fn uses_sequences(&self) -> bool {
+        let mut used = false;
+        for step in self.handler_steps() {
+            step.walk(&mut |s| used |= matches!(s, Step::NextNumber { .. }));
+        }
+        used
+    }
+
+    /// Whether an expression of the service works in a time zone: the runtime then brings the zones in (`time-zones`).
+    pub fn uses_time_zones(&self) -> bool {
+        serde_json::to_string(self).is_ok_and(|json| {
+            [
+                "nowSeconds",
+                "localDate",
+                "localTime",
+                "startOfDay",
+                "addDays",
+                "addMonths",
+                "parseLocal",
+            ]
+            .iter()
+            .any(|f| json.contains(&format!("\"func\":\"{f}\"")))
+        })
+    }
+
+    /// Whether an expression of the service makes or reads a short identifier: the runtime then brings Sqids in (`short-id`).
+    pub fn uses_short_ids(&self) -> bool {
+        serde_json::to_string(self).is_ok_and(|json| {
+            json.contains("\"func\":\"shortId\"") || json.contains("\"func\":\"fromShortId\"")
+        })
     }
 
     /// Whether an expression of the service cleans an HTML text: the runtime then brings the sanitizer in (`html`). Looked for in

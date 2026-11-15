@@ -618,9 +618,10 @@ mod tests {
         for base in [sample::orders(), sample::showcase()] {
             assert_eq!(errors(&base), 0);
 
-            // The steps of JWKS, TOTP and passkeys require schemas of these names: renaming one is a validation
-            // error, by design (the Problems page says so).
-            const RESERVED: [&str; 4] = ["Jwk", "Jwks", "TotpSetup", "PasskeyChallenge"];
+            // The steps of JWKS, TOTP, passkeys and the audit journal require schemas of these names: renaming one is a
+            // validation error, by design (the Problems page says so).
+            const RESERVED: [&str; 5] =
+                ["Jwk", "Jwks", "TotpSetup", "PasskeyChallenge", "AuditEntry"];
             for m in base
                 .messages
                 .iter()
