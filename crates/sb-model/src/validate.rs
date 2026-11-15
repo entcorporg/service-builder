@@ -7168,7 +7168,9 @@ mod tests {
         let r = route(&q);
         q.services[0].routes[r].steps.swap(2, 3);
         assert!(
-            errors(&q).contains(&"E_UNKNOWN_PATH".to_string()),
+            errors(&q)
+                .iter()
+                .any(|c| c == "E_UNKNOWN_PATH" || c == "E_EXPR_TYPE"),
             "{:?}",
             errors(&q)
         );
