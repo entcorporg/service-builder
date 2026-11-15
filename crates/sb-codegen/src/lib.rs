@@ -1611,12 +1611,12 @@ mod tests {
         let api = file(&files, "services/orders/src/flows/api.rs").replace('\n', " ");
         let api = api.split_whitespace().collect::<Vec<_>>().join(" ");
         for expected in [
-            "let now: i64 = eda_runtime::time_zone::now_seconds();",
-            "today: eda_runtime::time_zone::local_date(now.clone(), &(input.zone.clone()))?",
-            "day_start: eda_runtime::time_zone::start_of_day(now.clone(), &(input.zone.clone()))?",
-            "next_week: eda_runtime::time_zone::add_days(now.clone(), 7, &(input.zone.clone()))?",
-            "next_month: eda_runtime::time_zone::add_months(now.clone(), 1, &(input.zone.clone()))?",
-            "paris_now: eda_runtime::time_zone::local_time(now.clone(), &(\"Europe/Paris\".to_string()))?",
+            "let instant: i64 = eda_runtime::time_zone::now_seconds();",
+            "today: eda_runtime::time_zone::local_date(instant.clone(), &(input.zone.clone()))?",
+            "day_start: eda_runtime::time_zone::start_of_day(instant.clone(), &(input.zone.clone()))?",
+            "next_week: eda_runtime::time_zone::add_days(instant.clone(), 7, &(input.zone.clone()))?",
+            "next_month: eda_runtime::time_zone::add_months(instant.clone(), 1, &(input.zone.clone()))?",
+            "paris_now: eda_runtime::time_zone::local_time(instant.clone(), &(\"Europe/Paris\".to_string()))?",
         ] {
             assert!(api.contains(expected), "{expected}\n{api}");
         }

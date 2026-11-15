@@ -440,7 +440,8 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
   instant hors des années comptées). Seul le service qui les emploie compile Jiff (feature `time-zones`). **Limites** : pas de type
   « date » ni « heure locale » dans le modèle (un `timestamp` de message reste un `Timestamp` protobuf que les expressions ne lisent
   pas : on passe par des secondes ou du texte), et le fuseau d'un locataire est une valeur qu'on lit et qu'on passe, pas un réglage
-  du locataire.
+  du locataire. Ne nommez pas une variable `now` : dans la syntaxe compacte de l'éditeur, `now` est l'horloge de la base (`Expr::Now`),
+  et la variable serait relue comme elle.
 - **Règles de champ** : un champ texte (`string`, `uuid`) d'un schéma API peut porter des règles (`rules`), vérifiées par le
   handler généré **avant toute étape**, dans l'ordre des champs ; la première qui échoue répond `400 { "error": "champ : … " }`.
   - `length` (`min`, `max`) : entre `min` et `max` **caractères** (pas octets), texte rogné avant d'être compté ; la borne

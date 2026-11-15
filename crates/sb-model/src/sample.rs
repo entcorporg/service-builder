@@ -1942,6 +1942,7 @@ pub fn add_api_keys(p: &mut Project) {
 /// A route that tells the calendar of a visitor from the time zone in its path: the day it is for them, when that day began (not a
 /// multiple of 86 400 seconds: a day is 23 or 25 hours when the clocks change), the same time next week and next month on their
 /// clock.
+// (The variable is `instant`, not `now`: in the compact syntax of the editor `now` is the clock of the database.)
 pub fn add_calendar(p: &mut Project) {
     p.messages.push(api(
         "CalendarRequest",
@@ -1968,7 +1969,7 @@ pub fn add_calendar(p: &mut Project) {
         steps: vec![
             Step::Let {
                 id: "t1".into(),
-                name: "now".into(),
+                name: "instant".into(),
                 value_type: FieldType::Int64,
                 optional: false,
                 repeated: false,
@@ -1977,23 +1978,26 @@ pub fn add_calendar(p: &mut Project) {
             Step::Respond {
                 id: "t2".into(),
                 fields: vec![
-                    set("today", call(Func::LocalDate, vec![path("now"), zone()])),
+                    set(
+                        "today",
+                        call(Func::LocalDate, vec![path("instant"), zone()]),
+                    ),
                     set(
                         "day_start",
-                        call(Func::StartOfDay, vec![path("now"), zone()]),
+                        call(Func::StartOfDay, vec![path("instant"), zone()]),
                     ),
                     set(
                         "next_week",
-                        call(Func::AddDays, vec![path("now"), lit(7), zone()]),
+                        call(Func::AddDays, vec![path("instant"), lit(7), zone()]),
                     ),
                     set(
                         "next_month",
-                        call(Func::AddMonths, vec![path("now"), lit(1), zone()]),
+                        call(Func::AddMonths, vec![path("instant"), lit(1), zone()]),
                     ),
                     // A zone written in the flow is checked when the project is: a typo would be a 400 at every call.
                     set(
                         "paris_now",
-                        call(Func::LocalTime, vec![path("now"), lit("Europe/Paris")]),
+                        call(Func::LocalTime, vec![path("instant"), lit("Europe/Paris")]),
                     ),
                 ],
                 status: None,
