@@ -684,6 +684,11 @@ fn schema_rs(service: &Service) -> String {
         c.line("eda_runtime::webauthn::CREATE_CREDENTIALS_TABLE,");
         c.line("eda_runtime::webauthn::CREATE_CREDENTIALS_INDEX,");
     }
+    if service.uses_api_keys() {
+        // The keys issued to the clients that are machines: only the hash of each secret.
+        c.line("eda_runtime::api_key::CREATE_TABLE,");
+        c.line("eda_runtime::api_key::CREATE_OWNER_INDEX,");
+    }
     if service.uses_challenge_check() {
         // The solutions already accepted: a solution is worth one form, for every replica.
         c.line("eda_runtime::challenge::CREATE_USES_TABLE,");
@@ -2414,6 +2419,81 @@ fn steps(
                     ));
                 }
             }
+            Step::ApiKeyCreate {
+                owner,
+                name,
+                scopes,
+                expires_in_secs,
+                bind,
+                key_id_bind,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let owner = lower(project, scope, owner, &text)?;
+                let name = lower(project, scope, name, &text)?;
+                let scopes: Vec<String> = scopes.iter().map(|s| format!("{s:?}")).collect();
+                let expires = match expires_in_secs {
+                    Some(seconds) => format!(
+                        "Some({})",
+                        lower(project, scope, seconds, &TypeRef::scalar(FieldType::Int64))?
+                    ),
+                    None => "None".to_string(),
+                };
+                let call = format!(
+                    "eda_runtime::api_key::create(&mut tx, &({owner}), &({name}), &[{}], {expires}).await?",
+                    scopes.join(", ")
+                );
+                match key_id_bind {
+                    // The key is shown once: it is only what `bind` holds, and what the client is answered.
+                    Some(kid) => c.line(format!(
+                        "let ({bind}, {kid}): (String, String) = {{ let created = {call}; (created.key, created.key_id) }};"
+                    )),
+                    None => c.line(format!("let {bind}: String = {call}.key;")),
+                };
+                scope.bind(bind.clone(), text.clone());
+                if let Some(kid) = key_id_bind {
+                    scope.bind(kid.clone(), text);
+                }
+            }
+            Step::ApiKeyVerify {
+                key,
+                scope: needed,
+                bind,
+                key_id_bind,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let key = lower(project, scope, key, &text)?;
+                let needed = match needed {
+                    Some(needed) => format!("Some({needed:?})"),
+                    None => "None".to_string(),
+                };
+                let call =
+                    format!("eda_runtime::api_key::verify(&mut tx, &({key}), {needed}).await?");
+                match key_id_bind {
+                    Some(kid) => c.line(format!(
+                        "let ({bind}, {kid}): (String, String) = {{ let verified = {call}; (verified.owner, verified.key_id) }};"
+                    )),
+                    None => c.line(format!("let {bind}: String = {call}.owner;")),
+                };
+                scope.bind(bind.clone(), text.clone());
+                if let Some(kid) = key_id_bind {
+                    scope.bind(kid.clone(), text);
+                }
+            }
+            Step::ApiKeyRevoke { key_id, owner, .. } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let key_id = lower(project, scope, key_id, &text)?;
+                let owner = match owner {
+                    Some(owner) => {
+                        format!("Some(({}).as_str())", lower(project, scope, owner, &text)?)
+                    }
+                    None => "None".to_string(),
+                };
+                c.line(format!(
+                    "eda_runtime::api_key::revoke(&mut tx, &({key_id}), {owner}).await?;"
+                ));
+            }
             Step::PasswordStrength {
                 password,
                 min_score,
@@ -3524,6 +3604,9 @@ fn describe(step: &Step) -> String {
         ),
         Step::VerifyChallenge { .. } => "verify the challenge".into(),
         Step::PasswordStrength { .. } => "judge the password".into(),
+        Step::ApiKeyCreate { bind, .. } => format!("issue an API key into {bind}"),
+        Step::ApiKeyVerify { bind, .. } => format!("check the API key, its owner into {bind}"),
+        Step::ApiKeyRevoke { .. } => "revoke an API key".into(),
         Step::Meter { key, .. } => format!("meter {key}"),
         Step::CheckQuota { key, .. } => format!("check the quota of {key}"),
         Step::HashPassword { bind, .. } => format!("hash password into {bind}"),

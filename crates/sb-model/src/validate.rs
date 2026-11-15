@@ -84,6 +84,9 @@ struct Env<'a> {
 /// What the meter and quota steps keep in the database of the service: the table of the uses and the view that adds them up.
 pub const USAGE_TABLES: [&str; 2] = ["usage_events", "usage_daily"];
 
+/// What the API key steps keep in the database of the service: the keys.
+pub const API_KEYS_TABLE: &str = "api_keys";
+
 /// What `verifyChallenge` keeps in the database of the service: the solutions already accepted.
 pub const CHALLENGE_TABLE: &str = "challenge_uses";
 
@@ -1765,12 +1768,13 @@ impl<'a> Checker<'a> {
             }
             if (s.uses_usage() && USAGE_TABLES.contains(&t.name.as_str()))
                 || (s.uses_challenge_check() && t.name == CHALLENGE_TABLE)
+                || (s.uses_api_keys() && t.name == API_KEYS_TABLE)
             {
                 self.error(
                     "E_TABLE_RESERVED",
                     format!("{tp}/name"),
                     format!(
-                        "`{}` is kept by the meter, quota or challenge steps of this service, pick another name",
+                        "`{}` is kept by the meter, quota, challenge or API key steps of this service, pick another name",
                         t.name
                     ),
                 );
@@ -3652,6 +3656,94 @@ impl<'a> Checker<'a> {
                 self.check_expr(scope, key, Some(&text), &format!("{path}/key"));
                 false
             }
+            Step::ApiKeyCreate {
+                owner,
+                name,
+                scopes,
+                expires_in_secs,
+                bind,
+                key_id_bind,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, owner, Some(&text), &format!("{path}/owner"));
+                self.check_expr(scope, name, Some(&text), &format!("{path}/name"));
+                for (i, name) in scopes.iter().enumerate() {
+                    self.check_api_scope(name, &format!("{path}/scopes/{i}"));
+                }
+                if let Some(seconds) = expires_in_secs {
+                    let seconds_type = TypeRef::scalar(FieldType::Int64);
+                    self.check_expr(
+                        scope,
+                        seconds,
+                        Some(&seconds_type),
+                        &format!("{path}/expiresInSecs"),
+                    );
+                }
+                self.check_var_name(bind, &format!("{path}/bind"));
+                scope.bind(bind.clone(), text.clone());
+                if let Some(kid) = key_id_bind {
+                    self.check_var_name(kid, &format!("{path}/keyIdBind"));
+                    if kid == bind {
+                        self.error(
+                            "E_API_KEY_BIND",
+                            format!("{path}/keyIdBind"),
+                            "the key and its id are two variables",
+                        );
+                    }
+                    scope.bind(kid.clone(), text);
+                }
+                false
+            }
+            Step::ApiKeyVerify {
+                key,
+                scope: needed,
+                bind,
+                key_id_bind,
+                ..
+            } => {
+                if !matches!(env.handler, Handler::Route { .. }) {
+                    self.error(
+                        "E_API_KEY_OUTSIDE_ROUTE",
+                        path,
+                        "a bad key is answered with a 401: it only makes sense in an HTTP route",
+                    );
+                }
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, key, Some(&text), &format!("{path}/key"));
+                if let Some(needed) = needed {
+                    self.check_api_scope(needed, &format!("{path}/scope"));
+                }
+                self.check_var_name(bind, &format!("{path}/bind"));
+                scope.bind(bind.clone(), text.clone());
+                if let Some(kid) = key_id_bind {
+                    self.check_var_name(kid, &format!("{path}/keyIdBind"));
+                    if kid == bind {
+                        self.error(
+                            "E_API_KEY_BIND",
+                            format!("{path}/keyIdBind"),
+                            "the owner and the id of the key are two variables",
+                        );
+                    }
+                    scope.bind(kid.clone(), text);
+                }
+                false
+            }
+            Step::ApiKeyRevoke { key_id, owner, .. } => {
+                if !matches!(env.handler, Handler::Route { .. }) {
+                    self.error(
+                        "E_API_KEY_OUTSIDE_ROUTE",
+                        path,
+                        "an unknown key is answered with a 404: it only makes sense in an HTTP route",
+                    );
+                }
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, key_id, Some(&text), &format!("{path}/keyId"));
+                if let Some(owner) = owner {
+                    self.check_expr(scope, owner, Some(&text), &format!("{path}/owner"));
+                }
+                false
+            }
             Step::PasswordStrength {
                 password,
                 min_score,
@@ -3837,6 +3929,22 @@ impl<'a> Checker<'a> {
                 }
                 false
             }
+        }
+    }
+
+    /// The name of what an API key may do: the same spelling in the key and in the route that asks for it.
+    fn check_api_scope(&mut self, name: &str, path: &str) {
+        let ok = !name.is_empty()
+            && name.len() <= 64
+            && name.chars().all(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '.' | ':' | '-')
+            });
+        if !ok {
+            self.error(
+                "E_API_KEY_SCOPE",
+                path,
+                "a scope is named with lowercase letters, digits and `_.:-` (64 characters at most): `orders:read`",
+            );
         }
     }
 
@@ -6518,6 +6626,171 @@ mod tests {
             .push(strength(3, lit("x"), None));
         assert!(
             errors(&q).contains(&"E_PASSWORD_OUTSIDE_ROUTE".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+    }
+
+    fn with_api_keys() -> Project {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_api_keys(&mut p);
+        p
+    }
+
+    fn api_route<'a>(p: &'a mut Project, name: &str) -> &'a mut Route {
+        p.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == name)
+            .unwrap()
+    }
+
+    #[test]
+    fn the_api_key_steps_are_valid_and_checked() {
+        let mut p = with_api_keys();
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        // A scope is spelled the same in the key and in the route that asks for it.
+        for bad in ["", "Orders", "orders read", "a/b", &"x".repeat(65)] {
+            let mut q = p.clone();
+            if let Step::ApiKeyVerify { scope, .. } =
+                &mut api_route(&mut q, "machine_orders").steps[0]
+            {
+                *scope = Some(bad.into());
+            }
+            assert!(
+                errors(&q).contains(&"E_API_KEY_SCOPE".to_string()),
+                "{bad:?}: {:?}",
+                errors(&q)
+            );
+            let mut q = p.clone();
+            if let Step::ApiKeyCreate { scopes, .. } =
+                &mut api_route(&mut q, "issue_api_key").steps[1]
+            {
+                scopes.push(bad.into());
+            }
+            assert!(
+                errors(&q).contains(&"E_API_KEY_SCOPE".to_string()),
+                "{bad:?}: {:?}",
+                errors(&q)
+            );
+        }
+        // The key and its id are two variables, and neither is a reserved name.
+        let mut q = p.clone();
+        if let Step::ApiKeyCreate {
+            bind, key_id_bind, ..
+        } = &mut api_route(&mut q, "issue_api_key").steps[1]
+        {
+            *key_id_bind = Some(bind.clone());
+        }
+        assert!(
+            errors(&q).contains(&"E_API_KEY_BIND".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        let mut q = p.clone();
+        if let Step::ApiKeyVerify { bind, .. } = &mut api_route(&mut q, "machine_orders").steps[0] {
+            *bind = "input".into();
+        }
+        assert!(
+            errors(&q).contains(&"E_RESERVED_NAME".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        // The owner, the name and the key are text; the lifetime is a whole number.
+        let mut q = p.clone();
+        if let Step::ApiKeyCreate {
+            expires_in_secs,
+            name,
+            ..
+        } = &mut api_route(&mut q, "issue_api_key").steps[1]
+        {
+            *expires_in_secs = Some(Expr::Literal {
+                value: "soon".into(),
+            });
+            *name = Expr::Literal { value: 1.into() };
+        }
+        assert_eq!(
+            errors(&q)
+                .iter()
+                .filter(|c| *c == "E_TYPE_MISMATCH")
+                .count(),
+            2,
+            "{:?}",
+            errors(&q)
+        );
+        let mut q = p.clone();
+        if let Step::ApiKeyVerify { key, .. } = &mut api_route(&mut q, "machine_orders").steps[0] {
+            *key = Expr::Literal { value: 1.into() };
+        }
+        assert!(
+            errors(&q).contains(&"E_TYPE_MISMATCH".to_string()),
+            "{:?}",
+            errors(&q)
+        );
+        // What the key step binds can be read after it.
+        if let Step::Respond { fields, .. } = api_route(&mut p, "machine_orders")
+            .steps
+            .last_mut()
+            .unwrap()
+        {
+            fields[0].value = Expr::Path {
+                path: "nobody".into(),
+            };
+        }
+        assert!(
+            errors(&p).contains(&"E_UNKNOWN_PATH".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+    }
+
+    #[test]
+    fn a_bad_key_is_answered_so_the_check_and_the_revocation_belong_to_a_route_and_the_table_is_reserved()
+     {
+        let p = with_api_keys();
+        // A job has no one to answer 401 or 404: issuing a key is fine, checking or revoking one is not.
+        let mut q = p.clone();
+        let create = api_route(&mut q, "issue_api_key").steps[1].clone();
+        let verify = api_route(&mut q, "machine_orders").steps[0].clone();
+        let revoke = api_route(&mut q, "revoke_api_key").steps[1].clone();
+        let lit = |v: &str| Expr::Literal { value: v.into() };
+        let mut create = create;
+        if let Step::ApiKeyCreate {
+            owner,
+            name,
+            key_id_bind,
+            ..
+        } = &mut create
+        {
+            (*owner, *name, *key_id_bind) = (lit("acme"), lit("robot"), None);
+        }
+        q.services[0].jobs[0].steps.push(create);
+        assert!(errors(&q).is_empty(), "{:?}", errors(&q));
+        let (mut verify, mut revoke) = (verify, revoke);
+        if let Step::ApiKeyVerify { key, .. } = &mut verify {
+            *key = lit("sbk");
+        }
+        if let Step::ApiKeyRevoke { key_id, owner, .. } = &mut revoke {
+            (*key_id, *owner) = (lit("x"), None);
+        }
+        q.services[0].jobs[0].steps.extend([verify, revoke]);
+        assert_eq!(
+            errors(&q)
+                .iter()
+                .filter(|c| *c == "E_API_KEY_OUTSIDE_ROUTE")
+                .count(),
+            2,
+            "{:?}",
+            errors(&q)
+        );
+        // The service keeps `api_keys`.
+        let mut q = p.clone();
+        let mut table = Table::new(API_KEYS_TABLE, vec![Column::new("id", ColumnType::String)]);
+        table.columns[0].primary_key = true;
+        q.services[0].tables.push(table);
+        assert!(
+            errors(&q).contains(&"E_TABLE_RESERVED".to_string()),
             "{:?}",
             errors(&q)
         );

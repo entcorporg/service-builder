@@ -97,6 +97,25 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                 }
             }
             Step::RateLimit { key, .. } => expr(key, &format!("{path}/key"), out),
+            Step::ApiKeyCreate {
+                owner,
+                name,
+                expires_in_secs,
+                ..
+            } => {
+                expr(owner, &format!("{path}/owner"), out);
+                expr(name, &format!("{path}/name"), out);
+                if let Some(seconds) = expires_in_secs {
+                    expr(seconds, &format!("{path}/expiresInSecs"), out);
+                }
+            }
+            Step::ApiKeyVerify { key, .. } => expr(key, &format!("{path}/key"), out),
+            Step::ApiKeyRevoke { key_id, owner, .. } => {
+                expr(key_id, &format!("{path}/keyId"), out);
+                if let Some(owner) = owner {
+                    expr(owner, &format!("{path}/owner"), out);
+                }
+            }
             Step::PasswordStrength {
                 password, inputs, ..
             } => {

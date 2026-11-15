@@ -233,6 +233,13 @@ fn step_statuses(route: &Route) -> Vec<(u16, String, bool)> {
                     "The challenge is missing, wrong, expired or already used".into(),
                     false,
                 )),
+                Step::ApiKeyVerify { scope, .. } => {
+                    out.push((401, "The API key is missing or not valid".into(), false));
+                    scope
+                        .as_ref()
+                        .map(|_| (403, "The API key is not allowed to do this".into(), false))
+                }
+                Step::ApiKeyRevoke { .. } => Some((404, "No such API key".into(), false)),
                 Step::PasswordStrength { .. } => Some((
                     400,
                     "The password is too easy to guess, or is in a known breach".into(),

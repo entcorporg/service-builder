@@ -51,7 +51,7 @@ vérité : le canvas, l'inspecteur et le code généré en sont des vues.
   Un producteur sans étape *Publier* donne un avertissement. Les projets enregistrés avant (`schemaVersion` 1) sont
   migrés à l'ouverture : tout service qui publiait sur un topic en devient producteur.
 - **Services** : des RPC (gRPC), des routes HTTP, des consumers (Kafka) et des tâches planifiées. Chacun contient une **liste d'étapes**.
-- **Étapes** : `log`, `let`, `publish`, `publishLive`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `rateLimit`, `checkQuota`, `verifyChallenge`, `passwordStrength` et `verifyHmac` (routes HTTP), `meter`, `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
+- **Étapes** : `log`, `let`, `publish`, `publishLive`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `rateLimit`, `checkQuota`, `verifyChallenge`, `passwordStrength`, `apiKeyVerify`, `apiKeyRevoke` et `verifyHmac` (routes HTTP), `meter`, `apiKeyCreate`, `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
   Une liste d'étapes est un arbre (pas un graphe arbitraire) : cela se génère en Rust structuré et s'édite comme
   une pile de blocs, comme dans un page builder.
 
@@ -327,6 +327,26 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
   redirection), la comparaison se fait sur place ; l'adresse est `PWNED_PASSWORDS_URL` (un miroir peut être nommé). Si l'API ne
   répond pas en 3 s, le mot de passe **passe** (et le journal le dit) : on n'arrête pas les inscriptions parce qu'un autre
   service est tombé. Routes seulement (`E_PASSWORD_OUTSIDE_ROUTE`). Limite : la vérification de fuite sort du réseau du projet.
+- **Clés d'API** : pour un client qui est une machine, pas une personne. Trois étapes, dans la base du service (table `api_keys`,
+  créée avec le schéma, nom réservé : `E_TABLE_RESERVED`), **dans la transaction du handler**.
+  - `apiKeyCreate { owner, name, scopes, expiresInSecs?, bind, keyIdBind? }` émet `sbk_<id>_<secret>` : un préfixe lisible (un
+    scanner de secrets reconnaît une clé qui fuit), l'**id** (16 caractères hexadécimaux : ce que les listes et la révocation
+    nomment, pas un secret) et le **secret** (256 bits aléatoires). **Seul le SHA-256 du secret est stocké** (assez aléatoire pour
+    se passer d'un hachage lent) : la table, si elle fuit, ne donne aucune clé. `bind` reçoit la clé entière, **qu'on ne
+    retrouve plus** : elle est montrée une fois, dans la réponse. `owner` (société, compte) est ce pour quoi la route agit ensuite ;
+    `scopes` ce que la clé peut faire (`orders:read` : minuscules, chiffres, `_.:-`, `E_API_KEY_SCOPE`) ; `expiresInSecs` (`int64`
+    strictement positif, sinon 400) la validité.
+  - `apiKeyVerify { key, scope?, bind, keyIdBind? }`, **première étape** d'une route machine, lit la clé (le champ de la requête la
+    prend dans un en-tête, `X-API-Key` ou `Authorization` : un `Bearer ` est retiré). Une clé absente, mal formée, inconnue,
+    fausse, révoquée ou expirée donne **le même 401** (la raison reste dans le journal) ; le secret est comparé en temps
+    constant et un id inconnu coûte autant qu'un secret faux ; une bonne clé sans la `scope` demandée donne un 403. `bind`
+    reçoit le propriétaire. La date du dernier usage est écrite au plus **une fois par minute** et par clé.
+  - `apiKeyRevoke { keyId, owner? }` révoque, définitivement. Un 404, le même, pour une clé inconnue, déjà révoquée ou, avec
+    `owner`, d'un autre propriétaire : une société révoque ses clés et pas celles des autres. **Rotation** : émettre la nouvelle
+    clé, puis révoquer l'ancienne.
+  - `apiKeyVerify` et `apiKeyRevoke` : routes seulement (`E_API_KEY_OUTSIDE_ROUTE`). Limites : pas d'étape « lister » (la table
+    n'est pas une table du modèle, les étapes `sql` ne la voient pas : à garder si on veut afficher les clés d'une société), pas
+    de limite de débit propre à une clé (utiliser `rateLimit` ou `checkQuota` avec le propriétaire en clé).
 - **Règles de champ** : un champ texte (`string`, `uuid`) d'un schéma API peut porter des règles (`rules`), vérifiées par le
   handler généré **avant toute étape**, dans l'ordre des champs ; la première qui échoue répond `400 { "error": "champ : … " }`.
   - `length` (`min`, `max`) : entre `min` et `max` **caractères** (pas octets), texte rogné avant d'être compté ; la borne

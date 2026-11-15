@@ -1202,6 +1202,52 @@ pub enum Step {
         stored: Expr,
         bind: String,
     },
+    /// Issues an API key to a client that is a machine, not a person: `sbk_<id>_<secret>`, a readable prefix and an id (what the
+    /// client and the lists name), then 256 random bits. Only the SHA-256 of the secret is stored (it is random enough for a fast
+    /// hash), in the table `api_keys` of the service's database, in the transaction of the handler, with who the key is for
+    /// (`owner`: a company, an account), a name, its `scopes` and, if asked, when it expires. `bind` receives the whole key, **which
+    /// cannot be found again**: it is shown once, in the answer. `keyIdBind` receives the id, to name the key afterwards.
+    #[serde(rename_all = "camelCase")]
+    ApiKeyCreate {
+        id: String,
+        owner: Expr,
+        /// What the key is called: « invoicing robot ».
+        name: Expr,
+        /// What the key may do: names the routes that check it ask for (`orders:read`). Lowercase letters, digits, `_.:-`.
+        #[serde(default)]
+        scopes: Vec<String>,
+        /// Seconds the key is valid from now (an `int64`); left out, it does not expire.
+        #[serde(default)]
+        expires_in_secs: Option<Expr>,
+        bind: String,
+        #[serde(default)]
+        key_id_bind: Option<String>,
+    },
+    /// Authenticates a client by its API key (`key`: the text it sent, in a header: the field of the request reads it; a
+    /// `Bearer ` in front is taken off). A key that is missing, malformed, unknown, wrong, revoked or expired is a 401, the same
+    /// whichever it is (what is wrong stays in the logs); a good key without the `scope` asked is a 403. `bind` receives the
+    /// owner of the key (text), what the route then acts for; `keyIdBind` the id. The time of the last use is kept, at most once
+    /// a minute per key. Routes only.
+    #[serde(rename_all = "camelCase")]
+    ApiKeyVerify {
+        id: String,
+        key: Expr,
+        /// What the route needs the key to be allowed: one of its scopes.
+        #[serde(default)]
+        scope: Option<String>,
+        bind: String,
+        #[serde(default)]
+        key_id_bind: Option<String>,
+    },
+    /// Revokes a key: from then on it is a 401. A key is revoked once (a 404 for one that is unknown or already revoked). With
+    /// `owner`, only a key of that owner can be: a company revokes its own keys and no one else's. Routes only.
+    #[serde(rename_all = "camelCase")]
+    ApiKeyRevoke {
+        id: String,
+        key_id: Expr,
+        #[serde(default)]
+        owner: Option<Expr>,
+    },
     /// Judges a password before it is hashed: how easy it is to guess (zxcvbn: dictionaries, keyboard patterns, dates, repeats,
     /// l33t, and the `inputs` of this account: the e-mail, the name) and, with `refuseBreached`, whether it is in a known data
     /// breach (the first five characters of its SHA-1 are sent to the Pwned Passwords range API, never the password). Under
@@ -1976,6 +2022,9 @@ impl Step {
             | Step::VerifyPassword { id, .. }
             | Step::RandomToken { id, .. }
             | Step::PasswordStrength { id, .. }
+            | Step::ApiKeyCreate { id, .. }
+            | Step::ApiKeyVerify { id, .. }
+            | Step::ApiKeyRevoke { id, .. }
             | Step::Sha256 { id, .. }
             | Step::ForEach { id, .. }
             | Step::Code { id, .. } => id,
@@ -2459,6 +2508,22 @@ impl Service {
             .chain(self.routes.iter().flat_map(|r| &r.steps))
             .chain(self.consumers.iter().flat_map(|c| &c.steps))
             .chain(self.jobs.iter().flat_map(|j| &j.steps))
+    }
+
+    /// Whether a step of the service issues, checks or revokes an API key: its database then holds `api_keys`.
+    pub fn uses_api_keys(&self) -> bool {
+        let mut used = false;
+        for step in self.handler_steps() {
+            step.walk(&mut |s| {
+                used |= matches!(
+                    s,
+                    Step::ApiKeyCreate { .. }
+                        | Step::ApiKeyVerify { .. }
+                        | Step::ApiKeyRevoke { .. }
+                )
+            });
+        }
+        used
     }
 
     /// Whether a step of the service judges a password: the runtime then brings the estimator in (`password-strength`).

@@ -139,8 +139,8 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
           DRAGONFLY_URL: redis://localhost:6379
       # The meters and quotas against a real PostgreSQL: the periods, the view, the idempotency keys and the lock that keeps two
-      # requests from taking the last unit. And the proof-of-work challenges: a solution is worth one form, for every replica.
-      - run: "cargo test -p eda-runtime --lib -- --include-ignored usage:: challenge::"
+      # requests from taking the last unit. The proof-of-work challenges: a solution is worth one form, for every replica. The API keys: only the hash is stored, one 401 whatever is wrong.
+      - run: "cargo test -p eda-runtime --lib -- --include-ignored usage:: challenge:: api_key::"
         working-directory: ${{ runner.temp }}/generated
         env:
           CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target

@@ -54,6 +54,9 @@ pub fn title(kind: &str) -> &'static str {
         "checkQuota" => "Vérifier un quota",
         "verifyChallenge" => "Vérifier un défi anti-robots",
         "passwordStrength" => "Juger un mot de passe",
+        "apiKeyCreate" => "Émettre une clé d’API",
+        "apiKeyVerify" => "Vérifier une clé d’API",
+        "apiKeyRevoke" => "Révoquer une clé d’API",
         "hashPassword" => "Hacher un mot de passe",
         "verifyPassword" => "Vérifier un mot de passe",
         "randomToken" => "Jeton aléatoire",
@@ -98,6 +101,17 @@ fn summary(step: &Step, kind: &str) -> String {
     };
     match kind {
         "verifyChallenge" => "résolu par le navigateur, accepté une fois".into(),
+        "apiKeyCreate" => format!("pour {}, dans {}", get("owner"), get("bind")),
+        "apiKeyVerify" => format!(
+            "propriétaire dans {}{}",
+            get("bind"),
+            if get("scope").is_empty() {
+                String::new()
+            } else {
+                format!(", portée {}", get("scope"))
+            }
+        ),
+        "apiKeyRevoke" => get("keyId"),
         "passwordStrength" => format!(
             "score ≥ {}{}",
             get("minScore"),
@@ -170,6 +184,12 @@ fn field_name(key: &str) -> String {
         "period" => "Période (UTC)",
         "wanted" => "Quantité demandée (1 par défaut)",
         "minScore" => "Score minimum (0 à 4)",
+        "owner" => "Propriétaire (société, compte)",
+        "scopes" => "Portées (ex. orders:read)",
+        "scope" => "Portée exigée",
+        "expiresInSecs" => "Validité (s, vide : n’expire pas)",
+        "keyIdBind" => "Identifiant de la clé dans",
+        "keyId" => "Identifiant de la clé",
         "inputs" => "Textes du compte (e-mail, nom)",
         "refuseBreached" => "Refuser les mots de passe des fuites connues",
         "topic" => "Topic",
@@ -529,7 +549,7 @@ fn form(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, index: usize) {
 }
 
 /// The blocks that can be added, in the order of the web version.
-const ORDER: [&str; 41] = [
+const ORDER: [&str; 44] = [
     "publish",
     "publishLive",
     "sql",
@@ -566,6 +586,9 @@ const ORDER: [&str; 41] = [
     "encrypt",
     "decrypt",
     "passwordStrength",
+    "apiKeyCreate",
+    "apiKeyVerify",
+    "apiKeyRevoke",
     "hashPassword",
     "verifyPassword",
     "randomToken",
@@ -646,6 +669,15 @@ fn hint(kind: &str) -> &'static str {
         }
         "checkQuota" => {
             "Au-delà du plafond de la période : 429 et Retry-After. À placer avant le bloc « Compter », dans la même route"
+        }
+        "apiKeyCreate" => {
+            "Pour un client machine : sbk_<id>_<secret>, le secret n’est stocké que haché et montré une seule fois, dans la réponse"
+        }
+        "apiKeyVerify" => {
+            "Authentifie par clé : 401 identique quelle que soit la raison, 403 sans la portée demandée. Première étape d’une route machine"
+        }
+        "apiKeyRevoke" => {
+            "Révoque une clé (404 si inconnue ou déjà révoquée) ; avec un propriétaire, seulement les siennes"
         }
         "passwordStrength" => {
             "Refuse en 400 un mot de passe trop facile à deviner (zxcvbn), et, en option, ceux des fuites connues. Avant « Hacher »"

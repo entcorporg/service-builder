@@ -165,6 +165,7 @@ mod tests {
                 "contracts/src/lib.rs",
                 "docker-compose.yml",
                 "runtime/Cargo.toml",
+                "runtime/src/api_key.rs",
                 "runtime/src/challenge.rs",
                 "runtime/src/crypto.rs",
                 "runtime/src/db.rs",
@@ -1407,6 +1408,42 @@ mod tests {
     }
 
     #[test]
+    fn api_keys_are_issued_checked_and_revoked_in_the_transaction_of_the_handler() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_api_keys(&mut p);
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs").replace('\n', " ");
+        let api = api.split_whitespace().collect::<Vec<_>>().join(" ");
+        for expected in [
+            "let (api_key, api_key_id): (String, String) = { let created = eda_runtime::api_key::create(&mut tx, &(claims.tid.clone()), &(input.name.clone()), &[\"orders:read\"], None).await?; (created.key, created.key_id) };",
+            "eda_runtime::api_key::revoke(&mut tx, &(input.key_id.clone()), Some((claims.tid.clone()).as_str())).await?;",
+            "let owner: String = eda_runtime::api_key::verify(&mut tx, &(input.api_key.clone()), Some(\"orders:read\")).await?.owner;",
+        ] {
+            assert!(api.contains(expected), "{expected}\n{api}");
+        }
+        // The table (only its hash of each secret) is created with the schema, only in the service that has the steps.
+        let schema = file(&files, "services/orders/src/app/schema.rs");
+        assert!(
+            schema.contains("eda_runtime::api_key::CREATE_TABLE,")
+                && schema.contains("eda_runtime::api_key::CREATE_OWNER_INDEX,")
+        );
+        assert!(!file(&files, "services/payments/src/app/schema.rs").contains("api_key"));
+        assert!(file(&files, "runtime/src/lib.rs").contains("pub mod api_key;"));
+        // The document says what a client may be answered.
+        let openapi = file(&files, "services/orders/openapi.json");
+        for answer in [
+            "The API key is missing or not valid",
+            "The API key is not allowed to do this",
+            "No such API key",
+        ] {
+            assert!(openapi.contains(answer), "{answer}");
+        }
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/src/app/schema.rs").contains("api_key"));
+    }
+
+    #[test]
     fn objects_are_stored_in_a_bucket_of_the_environment_and_images_get_room_in_the_body() {
         let mut p = sample::orders();
         sample::add_jwt(&mut p);
@@ -2211,7 +2248,16 @@ mod tests {
         let http = file(&files, "services/orders/src/transport/http.rs");
         assert!(http.contains(".route(\"/docs/api.json\", get(openapi_document))"));
         assert!(http.contains("include_str!(\"../../openapi.json\")"));
-        assert!(http.contains("routing::{get"), "{}", &http[..600]);
+        let routing = http
+            .lines()
+            .find(|l| l.contains("routing::{"))
+            .expect("the routing import");
+        assert!(
+            routing
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|w| w == "get"),
+            "{routing}"
+        );
     }
 
     #[test]

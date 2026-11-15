@@ -945,6 +945,7 @@ pub fn showcase() -> Project {
     add_avatars(&mut p);
     add_notes(&mut p);
     add_usage(&mut p);
+    add_api_keys(&mut p);
     add_sql_reads(&mut p);
     add_mailer(&mut p);
     add_mail_design(&mut p);
@@ -1800,6 +1801,132 @@ pub fn add_avatars(p: &mut Project) {
     );
     download.path = "/avatar/url".into();
     routes.push(download);
+}
+
+/// API keys for a client that is a machine. A company, signed in with a token (the `tid` claim), issues keys scoped to what a
+/// robot may do and revokes its own; the robot calls a route with `X-API-Key` and is answered for the company the key belongs to.
+/// Needs [`add_jwt`], whose `AccessClaims` and signing key it uses.
+pub fn add_api_keys(p: &mut Project) {
+    let string = || FieldType::String;
+    let header = |name: &str, header: &str| {
+        let mut f = field(name, string());
+        f.lenient = true; // the flow answers 401 itself
+        f.source = Some(RequestSource::Header {
+            name: header.into(),
+        });
+        f
+    };
+    p.messages.push(api(
+        "ApiKeyIssue",
+        vec![header("token", "Authorization"), field("name", string())],
+    ));
+    p.messages.push(api(
+        "ApiKeyIssued",
+        vec![field("key", string()), field("key_id", string())],
+    ));
+    p.messages.push(api(
+        "ApiKeyRevocation",
+        vec![header("token", "Authorization"), field("key_id", string())],
+    ));
+    p.messages.push(api(
+        "ApiKeyRevoked",
+        vec![field("revoked", FieldType::Bool)],
+    ));
+    p.messages
+        .push(api("MachineCall", vec![header("api_key", "X-API-Key")]));
+    p.messages
+        .push(api("MachineAnswer", vec![field("owner", string())]));
+    let verify_jwt = |id: &str| Step::VerifyJwt {
+        id: id.into(),
+        token: path("input.token"),
+        bearer: true,
+        source: JwksSource::Keys {
+            key_envs: vec!["JWT_SIGNING_KEY".into()],
+        },
+        issuer: "orders".into(),
+        schema: "AccessClaims".into(),
+        bind: "claims".into(),
+    };
+    let routes = &mut p.services[0].routes;
+    routes.push(Route {
+        name: "issue_api_key".into(),
+        method: HttpMethod::Post,
+        path: "/tenant/api-keys".into(),
+        request: "ApiKeyIssue".into(),
+        response: "ApiKeyIssued".into(),
+        status: 201,
+        steps: vec![
+            verify_jwt("k1"),
+            // The key is in the answer and nowhere else: only its hash is kept.
+            Step::ApiKeyCreate {
+                id: "k2".into(),
+                owner: path("claims.tid"),
+                name: path("input.name"),
+                scopes: vec!["orders:read".into()],
+                expires_in_secs: None,
+                bind: "api_key".into(),
+                key_id_bind: Some("api_key_id".into()),
+            },
+            Step::Respond {
+                id: "k3".into(),
+                fields: vec![
+                    set("key", path("api_key")),
+                    set("key_id", path("api_key_id")),
+                ],
+                status: None,
+                cookies: vec![],
+                headers: vec![],
+            },
+        ],
+    });
+    routes.push(Route {
+        name: "revoke_api_key".into(),
+        method: HttpMethod::Delete,
+        path: "/tenant/api-keys/{key_id}".into(),
+        request: "ApiKeyRevocation".into(),
+        response: "ApiKeyRevoked".into(),
+        status: 200,
+        steps: vec![
+            verify_jwt("k4"),
+            // A company revokes its own keys and no one else's.
+            Step::ApiKeyRevoke {
+                id: "k5".into(),
+                key_id: path("input.key_id"),
+                owner: Some(path("claims.tid")),
+            },
+            Step::Respond {
+                id: "k6".into(),
+                fields: vec![set("revoked", lit(true))],
+                status: None,
+                cookies: vec![],
+                headers: vec![],
+            },
+        ],
+    });
+    routes.push(Route {
+        name: "machine_orders".into(),
+        method: HttpMethod::Get,
+        path: "/machine/orders".into(),
+        request: "MachineCall".into(),
+        response: "MachineAnswer".into(),
+        status: 200,
+        steps: vec![
+            Step::ApiKeyVerify {
+                id: "k7".into(),
+                key: path("input.api_key"),
+                scope: Some("orders:read".into()),
+                bind: "owner".into(),
+                key_id_bind: None,
+            },
+            Step::Respond {
+                id: "k8".into(),
+                fields: vec![set("owner", path("owner"))],
+                status: None,
+                cookies: vec![],
+                headers: vec![],
+            },
+        ],
+    });
 }
 
 /// A metered route: a company gets a thousand calls a month, whatever the number of replicas or of simultaneous requests. The

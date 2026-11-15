@@ -80,6 +80,12 @@ fn bind(project: &Project, scope: &mut BTreeMap<String, Ty>, step: &Step) {
         }
         return;
     }
+    // An API key's id comes apart from what `bind` holds (the key, or its owner).
+    if matches!(kind, "apiKeyCreate" | "apiKeyVerify")
+        && let Some(var) = text("keyIdBind")
+    {
+        scope.insert(var.into(), scalar("string"));
+    }
     let Some(var) = text("bind") else { return };
     let ty = match kind {
         "verifyPassword" => scalar("bool"),
@@ -88,9 +94,8 @@ fn bind(project: &Project, scope: &mut BTreeMap<String, Ty>, step: &Step) {
         // The score of the password, 0 to 4.
         "passwordStrength" => scalar("int32"),
         "hashPassword" | "randomToken" | "sha256" | "encrypt" | "decrypt" | "signJwt"
-        | "passkeyLoginFinish" | "imageSniff" | "objectPresignGet" | "objectPresignPut" => {
-            scalar("string")
-        }
+        | "apiKeyCreate" | "apiKeyVerify" | "passkeyLoginFinish" | "imageSniff"
+        | "objectPresignGet" | "objectPresignPut" => scalar("string"),
         "verifyJwt" => message(text("schema").unwrap_or_default()),
         "totpGenerate" => message("TotpSetup"),
         "recoveryCodes" => Ty {
