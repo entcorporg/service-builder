@@ -777,6 +777,13 @@ impl<'a> Checker<'a> {
             self.mta_service(s, &base);
             self.realtime_service(s, &base);
             self.challenge_service(s, &base);
+            if s.compression && (s.kind != ServiceKind::Standard || s.routes.is_empty()) {
+                self.warn(
+                    "W_COMPRESSION_UNUSED",
+                    format!("{base}/compression"),
+                    "only the HTTP API of a service with routes is compressed: this setting changes nothing here",
+                );
+            }
 
             let mut rpc_names = HashSet::new();
             for (j, r) in s.rpcs.iter().enumerate() {
@@ -5407,6 +5414,12 @@ mod tests {
         &mut p.services[0].routes[0]
     }
 
+    fn has_warning(p: &Project, code: &str) -> bool {
+        validate(p)
+            .into_iter()
+            .any(|d| d.severity == Severity::Warning && d.code == code)
+    }
+
     #[test]
     fn the_sample_routes_are_valid() {
         assert!(errors(&sample::orders()).is_empty());
@@ -6793,6 +6806,33 @@ mod tests {
             errors(&q).contains(&"E_TABLE_RESERVED".to_string()),
             "{:?}",
             errors(&q)
+        );
+    }
+
+    #[test]
+    fn compression_is_a_setting_of_a_service_that_has_routes() {
+        let mut p = sample::orders();
+        p.services[0].compression = true;
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        assert!(!has_warning(&p, "W_COMPRESSION_UNUSED"));
+        // A service with no HTTP API has nothing to compress.
+        p.services[1].routes.clear();
+        p.services[1].compression = true;
+        assert!(has_warning(&p, "W_COMPRESSION_UNUSED"));
+        assert!(
+            errors(&p).is_empty(),
+            "a warning, not an error: {:?}",
+            errors(&p)
+        );
+        // Left out, it is not written: a project without it is the same file as before.
+        let mut q = sample::orders();
+        q.services[0].compression = false;
+        assert!(!serde_json::to_string(&q).unwrap().contains("compression"));
+        q.services[0].compression = true;
+        assert!(
+            serde_json::to_string(&q)
+                .unwrap()
+                .contains("\"compression\":true")
         );
     }
 

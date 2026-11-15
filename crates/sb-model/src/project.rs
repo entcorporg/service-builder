@@ -99,6 +99,10 @@ impl Default for ChallengeConfig {
     }
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// The OpenAPI 3.1 document of each service is always written with the export; this decides whether the service
 /// also serves it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -393,6 +397,11 @@ pub struct Service {
     /// robots that fill in a form: see [`ChallengeConfig`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub challenge: Option<ChallengeConfig>,
+    /// Compress the answers of the HTTP API (gzip, brotli or zstd, whichever the client's `Accept-Encoding` prefers): JSON
+    /// shrinks to a fraction. Only answers of 256 bytes or more are, never an event stream, a gRPC message or an image (already
+    /// compressed). `Vary: Accept-Encoding` tells the caches. A service with no route has nothing to compress.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub compression: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

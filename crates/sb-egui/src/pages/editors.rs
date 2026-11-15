@@ -203,6 +203,7 @@ fn new_service(name: &str, port: u16, http_port: Option<u16>, n: f64) -> Service
         templates: vec![],
         realtime: None,
         challenge: None,
+        compression: false,
     }
 }
 

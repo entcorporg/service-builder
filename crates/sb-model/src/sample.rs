@@ -203,6 +203,7 @@ pub fn orders() -> Project {
         templates: vec![],
         realtime: None,
         challenge: None,
+        compression: false,
         rpcs: vec![
             Rpc {
                 name: "CreateOrder".into(),
@@ -432,6 +433,7 @@ pub fn orders() -> Project {
         templates: vec![],
         realtime: None,
         challenge: None,
+        compression: false,
         rpcs: vec![],
         http_port: None,
         routes: vec![],
@@ -490,6 +492,7 @@ pub fn orders() -> Project {
         templates: vec![],
         realtime: None,
         challenge: None,
+        compression: false,
         rpcs: vec![],
         http_port: None,
         routes: vec![],
@@ -954,6 +957,8 @@ pub fn showcase() -> Project {
     add_schema_changes(&mut p);
     add_receipts(&mut p);
     add_http_calls(&mut p);
+    // The JSON of the API goes out compressed to the clients that accept it.
+    p.services[0].compression = true;
     p
 }
 
@@ -2510,6 +2515,7 @@ pub fn add_mailer(p: &mut Project) {
         }],
         realtime: None,
         challenge: None,
+        compression: false,
     });
 }
 
@@ -2572,6 +2578,7 @@ pub fn add_realtime(p: &mut Project) {
         templates: vec![],
         realtime: Some(RealtimeConfig::default()),
         challenge: None,
+        compression: false,
     });
 }
 

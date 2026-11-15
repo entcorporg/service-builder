@@ -249,10 +249,41 @@ fn service(app: &mut App, ui: &mut Ui, name: &str) {
 
     rpcs(app, ui, &project, si);
     routes(app, ui, svc, &sname);
+    compression(app, ui, svc, &sname);
     challenge(app, ui, svc, &sname);
     consumers(app, ui, &project, si);
     jobs(app, ui, svc, si);
     delete_service_button(app, ui, si);
+}
+
+/// Whether the answers of the HTTP API are compressed: a setting of the service, shown once it has routes.
+fn compression(app: &mut App, ui: &mut Ui, svc: &Service, sname: &str) {
+    if svc.routes.is_empty() {
+        return;
+    }
+    let current = svc.compression;
+    let set = section(
+        ui,
+        "Compression des réponses",
+        "publish",
+        |_| {},
+        |ui| {
+            field(
+                ui,
+                "Compresser",
+                "gzip, brotli ou zstd selon l’Accept-Encoding du client : le JSON de l’API en pèse une fraction. Les réponses de moins de 256 octets, les flux d’événements, le gRPC et les images ne le sont jamais.",
+                |ui| crate::widgets::check(ui, current, "Les réponses de l’API sont compressées"),
+            )
+        },
+    );
+    if let Some(on) = set {
+        let sname = sname.to_string();
+        app.edit(|p| {
+            if let Some(s) = svc_mut(p, &sname) {
+                s.compression = on;
+            }
+        });
+    }
 }
 
 /// The proof-of-work challenge the service hands out against the robots that fill in a form: where, signed with which key, how

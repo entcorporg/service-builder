@@ -1444,6 +1444,35 @@ mod tests {
     }
 
     #[test]
+    fn a_service_that_asks_for_it_compresses_its_answers_and_only_it_builds_the_codecs() {
+        let mut p = sample::orders();
+        p.services[0].compression = true;
+        let files = generate(&p).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        assert!(
+            http.contains("use tower_http::compression::{")
+                && http.contains("CompressionLayer,")
+                && http.contains("predicate::{DefaultPredicate, Predicate, SizeAbove},"),
+            "{http}"
+        );
+        // After the CORS layer (so that its headers are on the compressed answer), and not for small answers.
+        let cors = http.find(".layer(cors(config))").unwrap();
+        let compression = http
+            .find(".layer(CompressionLayer::new().compress_when(DefaultPredicate::new().and(SizeAbove::new(256))))")
+            .unwrap_or_else(|| panic!("{http}"));
+        assert!(cors < compression);
+        assert!(
+            file(&files, "services/orders/Cargo.toml")
+                .contains("tower-http = { workspace = true, features = [\"compression-full\"] }")
+        );
+        // The other services do not pay for the codecs, and a project that asks for nothing writes nothing of it.
+        assert!(!file(&files, "services/payments/Cargo.toml").contains("compression"));
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/src/transport/http.rs").contains("ompression"));
+        assert!(!file(&plain, "services/orders/Cargo.toml").contains("compression"));
+    }
+
+    #[test]
     fn objects_are_stored_in_a_bucket_of_the_environment_and_images_get_room_in_the_body() {
         let mut p = sample::orders();
         sample::add_jwt(&mut p);

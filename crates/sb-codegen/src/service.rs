@@ -177,6 +177,15 @@ fn cargo_toml(service: &Service) -> String {
     } else {
         "axum.workspace = true\ntower-http.workspace = true\nserde_json.workspace = true\n"
     };
+    // Compression brings the codecs in (gzip, brotli, zstd): only the services that ask for it build them.
+    let http = if service.compression && !service.routes.is_empty() {
+        http.replace(
+            "tower-http.workspace = true\n",
+            "tower-http = { workspace = true, features = [\"compression-full\"] }\n",
+        )
+    } else {
+        http.to_string()
+    };
     // Passkeys bring OpenSSL in and object storage the AWS SDK: only the services that use them build them.
     let mut features = vec![];
     if uses_passkeys(service) {
@@ -1098,6 +1107,12 @@ fn http_rs(project: &Project, service: &Service) -> String {
     c.line(format!("    routing::{{{}}},", verbs.join(", ")));
     c.line("};");
     c.line("use contracts::pb;");
+    if service.compression {
+        c.line("use tower_http::compression::{");
+        c.line("    CompressionLayer,");
+        c.line("    predicate::{DefaultPredicate, Predicate, SizeAbove},");
+        c.line("};");
+    }
     c.line("use tower_http::cors::{Any, CorsLayer};");
     c.blank();
     c.line("use crate::{");
@@ -1147,6 +1162,10 @@ fn http_rs(project: &Project, service: &Service) -> String {
         ));
     }
     c.line("    .layer(cors(config))");
+    if service.compression {
+        // The default predicate leaves out event streams, gRPC and images; a small answer is not worth the header it costs.
+        c.line("    .layer(CompressionLayer::new().compress_when(DefaultPredicate::new().and(SizeAbove::new(256))))");
+    }
     c.line("    .with_state(ctx);");
     c.line("let listener = tokio::net::TcpListener::bind((\"0.0.0.0\", config.http_port)).await?;");
     c.line(format!(

@@ -347,6 +347,14 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
   - `apiKeyVerify` et `apiKeyRevoke` : routes seulement (`E_API_KEY_OUTSIDE_ROUTE`). Limites : pas d'étape « lister » (la table
     n'est pas une table du modèle, les étapes `sql` ne la voient pas : à garder si on veut afficher les clés d'une société), pas
     de limite de débit propre à une clé (utiliser `rateLimit` ou `checkQuota` avec le propriétaire en clé).
+- **Compression des réponses HTTP** : réglage `compression` du service (faux par défaut, absent du fichier du projet tant qu'il
+  l'est). Les réponses de l'API HTTP sont compressées en **gzip, brotli ou zstd**, celui que préfère l'`Accept-Encoding` du client
+  (`Vary` prévient les caches) : le JSON en pèse une fraction. Posé par `tower-http` (MIT) : `CompressionLayer` avec le
+  prédicat par défaut (jamais un flux `text/event-stream`, un message gRPC ni une image, déjà compressée) **et** une taille d'au
+  moins 256 octets (en dessous, l'en-tête coûte plus que le gain). La couche est posée **après** celle de CORS, dont les en-têtes
+  restent sur la réponse compressée. Seul le service qui la demande compile les codecs (`compression-full`, dont zstd, qui
+  compile du C). Sans effet, avec un avertissement (`W_COMPRESSION_UNUSED`), pour un service sans route ou prêt à l'emploi (mail,
+  temps réel). Le flux du service temps réel n'est jamais compressé.
 - **Règles de champ** : un champ texte (`string`, `uuid`) d'un schéma API peut porter des règles (`rules`), vérifiées par le
   handler généré **avant toute étape**, dans l'ordre des champs ; la première qui échoue répond `400 { "error": "champ : … " }`.
   - `length` (`min`, `max`) : entre `min` et `max` **caractères** (pas octets), texte rogné avant d'être compté ; la borne
