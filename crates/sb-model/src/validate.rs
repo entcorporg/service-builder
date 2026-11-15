@@ -81,6 +81,9 @@ struct Env<'a> {
     handler: Handler<'a>,
 }
 
+/// What the meter and quota steps keep in the database of the service: the table of the uses and the view that adds them up.
+pub const USAGE_TABLES: [&str; 2] = ["usage_events", "usage_daily"];
+
 /// The most attempts a `rateLimit` counted in the shared store can allow: the store keeps one entry per attempt of the window.
 pub const SHARED_RATE_LIMIT_MAX: u32 = 10_000;
 
@@ -1754,6 +1757,16 @@ impl<'a> Checker<'a> {
                     "E_TABLE_RESERVED",
                     format!("{tp}/name"),
                     "`outbox` is the table of the published events, pick another name",
+                );
+            }
+            if s.uses_usage() && USAGE_TABLES.contains(&t.name.as_str()) {
+                self.error(
+                    "E_TABLE_RESERVED",
+                    format!("{tp}/name"),
+                    format!(
+                        "`{}` is kept by the meter and quota steps of this service, pick another name",
+                        t.name
+                    ),
                 );
             }
             if !names.insert(t.name.as_str()) {
@@ -3633,6 +3646,52 @@ impl<'a> Checker<'a> {
                 self.check_expr(scope, key, Some(&text), &format!("{path}/key"));
                 false
             }
+            Step::Meter {
+                key,
+                tenant,
+                amount,
+                idempotency_key,
+                ..
+            } => {
+                self.check_meter_name(key, &format!("{path}/key"));
+                let text = TypeRef::scalar(FieldType::String);
+                let units = TypeRef::scalar(FieldType::Int64);
+                self.check_expr(scope, tenant, Some(&text), &format!("{path}/tenant"));
+                self.check_expr(scope, amount, Some(&units), &format!("{path}/amount"));
+                if let Some(once) = idempotency_key {
+                    self.check_expr(scope, once, Some(&text), &format!("{path}/idempotencyKey"));
+                }
+                false
+            }
+            Step::CheckQuota {
+                key,
+                tenant,
+                limit,
+                wanted,
+                bind,
+                ..
+            } => {
+                if !matches!(env.handler, Handler::Route { .. }) {
+                    self.error(
+                        "E_QUOTA_OUTSIDE_ROUTE",
+                        path,
+                        "a quota answers 429 and `Retry-After`: it only makes sense in an HTTP route",
+                    );
+                }
+                self.check_meter_name(key, &format!("{path}/key"));
+                let text = TypeRef::scalar(FieldType::String);
+                let units = TypeRef::scalar(FieldType::Int64);
+                self.check_expr(scope, tenant, Some(&text), &format!("{path}/tenant"));
+                self.check_expr(scope, limit, Some(&units), &format!("{path}/limit"));
+                if let Some(wanted) = wanted {
+                    self.check_expr(scope, wanted, Some(&units), &format!("{path}/wanted"));
+                }
+                if let Some(bind) = bind {
+                    self.check_var_name(bind, &format!("{path}/bind"));
+                    scope.bind(bind.clone(), units);
+                }
+                false
+            }
             Step::HashPassword { input, bind, .. } => {
                 self.check_var_name(bind, &format!("{path}/bind"));
                 let text = TypeRef::scalar(FieldType::String);
@@ -3721,6 +3780,23 @@ impl<'a> Checker<'a> {
                 }
                 false
             }
+        }
+    }
+
+    /// The name of a meter: what the uses are added up under, so it is spelled the same everywhere.
+    fn check_meter_name(&mut self, key: &str, path: &str) {
+        let ok = !key.is_empty()
+            && key.len() <= 64
+            && key.starts_with(|c: char| c.is_ascii_lowercase())
+            && key.chars().all(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '.' | '-')
+            });
+        if !ok {
+            self.error(
+                "E_METER_NAME",
+                path,
+                "a meter is named with lowercase letters, digits, `_`, `.` and `-`, starting with a letter (64 characters at most): `api_calls`, `seats`",
+            );
         }
     }
 
@@ -5999,6 +6075,145 @@ mod tests {
             "{:?}",
             errors(&p)
         );
+    }
+
+    /// The showcase, which has a metered route, and where that route is.
+    fn with_usage() -> Project {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_usage(&mut p);
+        p
+    }
+
+    fn usage_route(p: &mut Project) -> &mut Route {
+        p.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == "usage_report")
+            .unwrap()
+    }
+
+    #[test]
+    fn a_metered_route_is_valid_and_its_quota_binds_what_is_left() {
+        let mut p = with_usage();
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        // What is left is a number the route can answer; a text is not what the response field holds.
+        if let Step::Respond { fields, .. } = usage_route(&mut p).steps.last_mut().unwrap() {
+            fields[0].value = Expr::Literal {
+                value: "many".into(),
+            };
+        }
+        assert!(!errors(&p).is_empty());
+    }
+
+    #[test]
+    fn the_steps_of_a_meter_and_a_quota_are_checked() {
+        let lit = |v: serde_json::Value| Expr::Literal { value: v };
+        let meter = |key: &str, tenant: Expr, amount: Expr| Step::Meter {
+            id: "m".into(),
+            key: key.into(),
+            tenant,
+            amount,
+            idempotency_key: None,
+        };
+        let quota = |limit: Expr, wanted: Option<Expr>| Step::CheckQuota {
+            id: "q".into(),
+            key: "calls".into(),
+            tenant: lit("t".into()),
+            limit,
+            period: UsagePeriod::Month,
+            wanted,
+            bind: None,
+        };
+        let mut p = sample::orders();
+        let mut check = |step: Step, code: Option<&str>| {
+            route_of(&mut p).steps.insert(0, step);
+            let found = errors(&p);
+            route_of(&mut p).steps.remove(0);
+            match code {
+                None => assert!(found.is_empty(), "{found:?}"),
+                Some(c) => assert!(found.contains(&c.to_string()), "{c}: {found:?}"),
+            }
+        };
+        check(meter("calls", lit("t".into()), lit(1.into())), None);
+        check(quota(lit(10.into()), Some(lit(2.into()))), None);
+        // A meter is spelled the same everywhere: lowercase, digits and `_.-`, starting with a letter.
+        for bad in ["", "Calls", "1calls", "api calls", "a/b", &"x".repeat(65)] {
+            check(
+                meter(bad, lit("t".into()), lit(1.into())),
+                Some("E_METER_NAME"),
+            );
+        }
+        for good in ["calls", "api_calls", "storage.mb", "seats-pro"] {
+            check(meter(good, lit("t".into()), lit(1.into())), None);
+        }
+        // The tenant is text, the amount, the limit and the wanted units are whole numbers.
+        check(
+            meter("calls", lit(1.into()), lit(1.into())),
+            Some("E_TYPE_MISMATCH"),
+        );
+        check(
+            meter("calls", lit("t".into()), lit("one".into())),
+            Some("E_TYPE_MISMATCH"),
+        );
+        check(quota(lit("ten".into()), None), Some("E_TYPE_MISMATCH"));
+        check(
+            quota(lit(10.into()), Some(lit("two".into()))),
+            Some("E_TYPE_MISMATCH"),
+        );
+    }
+
+    #[test]
+    fn a_quota_answers_429_so_it_belongs_to_a_route_and_the_usage_tables_are_the_generator_s() {
+        let mut p = with_usage();
+        // In a job there is no one to answer: a meter is fine, a quota is not.
+        let mut quota = usage_route(&mut p).steps[1].clone();
+        let mut meter = usage_route(&mut p).steps[2].clone();
+        // The claims are the route's own: the job names the tenant itself.
+        let tenant = Expr::Literal {
+            value: "acme".into(),
+        };
+        match (&mut quota, &mut meter) {
+            (
+                Step::CheckQuota {
+                    tenant: t, bind, ..
+                },
+                Step::Meter { tenant: m, .. },
+            ) => {
+                (*t, *m, *bind) = (tenant.clone(), tenant, None);
+            }
+            _ => unreachable!(),
+        }
+        p.services[0].jobs[0].steps.push(meter);
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        p.services[0].jobs[0].steps.push(quota);
+        assert!(
+            errors(&p).contains(&"E_QUOTA_OUTSIDE_ROUTE".to_string()),
+            "{:?}",
+            errors(&p)
+        );
+        // The service keeps `usage_events` and `usage_daily`: a table of the author cannot take their names.
+        let mut p = with_usage();
+        for name in USAGE_TABLES {
+            let mut table = Table::new(name, vec![Column::new("id", ColumnType::String)]);
+            table.columns[0].primary_key = true;
+            p.services[0].tables.push(table);
+        }
+        assert_eq!(
+            errors(&p)
+                .iter()
+                .filter(|c| *c == "E_TABLE_RESERVED")
+                .count(),
+            2,
+            "{:?}",
+            errors(&p)
+        );
+        // Without a meter, the names are free.
+        let mut p = sample::orders();
+        let mut table = Table::new("usage_events", vec![Column::new("id", ColumnType::String)]);
+        table.columns[0].primary_key = true;
+        p.services[0].tables.push(table);
+        assert!(!errors(&p).contains(&"E_TABLE_RESERVED".to_string()));
     }
 
     #[test]

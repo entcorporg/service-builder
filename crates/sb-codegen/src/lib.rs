@@ -178,6 +178,7 @@ mod tests {
                 "runtime/src/rate_limit.rs",
                 "runtime/src/s3.rs",
                 "runtime/src/totp.rs",
+                "runtime/src/usage.rs",
                 "runtime/src/validation.rs",
                 "runtime/src/webauthn.rs",
                 "runtime/src/webhook.rs",
@@ -1265,6 +1266,52 @@ mod tests {
             !file(&plain, "services/orders/src/app/config.rs").contains("rate_limit::check_config")
         );
         assert!(!file(&plain, "docker-compose.yml").contains("dragonfly"));
+    }
+
+    #[test]
+    fn meters_and_quotas_keep_their_uses_in_the_database_of_the_service() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_usage(&mut p);
+        let files = generate(&p).unwrap();
+        let flat = file(&files, "services/orders/src/flows/api.rs").replace("\n", " ");
+        let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+        // The check holds a lock until the transaction ends, so it is in the run of the use that follows it.
+        let check = flat.find(
+            "let calls_left: i64 = eda_runtime::usage::check(&mut tx, \"api_calls\", &(claims.tid.clone()), 1000, 1_i64, eda_runtime::usage::Period::Month).await?;",
+        );
+        let meter = flat.find(
+            "eda_runtime::usage::meter(&mut tx, \"api_calls\", &(claims.tid.clone()), 1, None).await?;",
+        );
+        assert!(check.is_some() && meter.is_some(), "{flat}");
+        assert!(check < meter);
+        // The table, its indexes and the view are created with the schema, only in the service that meters.
+        let schema = file(&files, "services/orders/src/app/schema.rs");
+        for statement in [
+            "CREATE_EVENTS_TABLE",
+            "CREATE_EVENTS_INDEX",
+            "CREATE_EVENTS_UNIQUE",
+            "CREATE_DAILY_VIEW",
+        ] {
+            assert!(
+                schema.contains(&format!("eda_runtime::usage::{statement},")),
+                "{statement}"
+            );
+        }
+        assert!(file(&files, "runtime/src/lib.rs").contains("pub mod usage;"));
+        assert!(
+            file(&files, "runtime/src/usage.rs")
+                .contains("CREATE TABLE IF NOT EXISTS usage_events")
+        );
+        assert!(!file(&files, "services/payments/src/app/schema.rs").contains("usage"));
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/src/app/schema.rs").contains("usage"));
+        // The quota is one of the answers the document of the route lists.
+        let openapi = file(&files, "services/orders/openapi.json");
+        assert!(
+            openapi.contains("The quota is used up for the period"),
+            "{openapi}"
+        );
     }
 
     #[test]

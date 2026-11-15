@@ -51,7 +51,7 @@ vérité : le canvas, l'inspecteur et le code généré en sont des vues.
   Un producteur sans étape *Publier* donne un avertissement. Les projets enregistrés avant (`schemaVersion` 1) sont
   migrés à l'ouverture : tout service qui publiait sur un topic en devient producteur.
 - **Services** : des RPC (gRPC), des routes HTTP, des consumers (Kafka) et des tâches planifiées. Chacun contient une **liste d'étapes**.
-- **Étapes** : `log`, `let`, `publish`, `publishLive`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `rateLimit` et `verifyHmac` (routes HTTP), `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
+- **Étapes** : `log`, `let`, `publish`, `publishLive`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `rateLimit`, `checkQuota` et `verifyHmac` (routes HTTP), `meter`, `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
   Une liste d'étapes est un arbre (pas un graphe arbitraire) : cela se génère en Rust structuré et s'édite comme
   une pile de blocs, comme dans un page builder.
 
@@ -266,6 +266,28 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
   `DRAGONFLY_URL`. Le générateur ajoute DragonflyDB à la pile (`docker-compose.yml`, Pods) pour tout projet qui a une étape
   partagée, même sans service temps réel.
   Routes seulement (`E_RATE_LIMIT_OUTSIDE_ROUTE`), `E_RATE_LIMIT_MAX`, `E_RATE_LIMIT_WINDOW`.
+- **Compter une consommation et poser un quota** : les étapes `meter` et `checkQuota` comptent un usage par locataire et par
+  période, dans la base du service. Chaque usage est une ligne de `usage_events` (`meter`, `tenant`, `amount`, `idempotency_key`,
+  `occurred_at`), écrite **dans la transaction du handler** : l'usage et ce qu'il paie sont validés ensemble ou pas du tout. Une
+  vue `usage_daily` additionne par compteur, locataire et jour (UTC) pour un tableau de bord ou une facture ; les lignes sont
+  gardées, ce sont elles qu'une facture se vérifie contre. Les deux tables sont créées avec le schéma, seulement dans le service
+  qui a l'une des deux étapes, et leurs noms sont réservés (`E_TABLE_RESERVED`).
+  - `meter { key, tenant, amount, idempotencyKey? }` : `key` est le compteur (`api_calls`, `seats`, `storage.mb` : minuscules,
+    chiffres, `_.-`, 64 caractères au plus, `E_METER_NAME`), `tenant` un texte, `amount` un entier (`int64`). Un montant négatif
+    rend des unités (un siège libéré). Avec `idempotencyKey`, un second usage de même clé (pour ce compteur et ce locataire) est
+    ignoré : une requête rejouée ou un événement relivré compte une fois. Partout où il y a une transaction.
+  - `checkQuota { key, tenant, limit, period, wanted?, bind? }` : refuse en `429` avec `Retry-After` (les secondes jusqu'à la fin
+    de la période ; rien pour `forever`) quand l'usage de la période plus `wanted` (1 par défaut) dépasserait `limit` (un
+    entier : un littéral, ou une valeur lue par le flux, ce qui lie le plafond à l'offre). `period` : `hour`, `day`, `month`
+    (défaut), `year` (périodes calendaires en UTC) ou `forever` (tout depuis le premier usage : un stock, des sièges, du
+    stockage). `bind` reçoit ce qu'il reste après la requête (`int64`). Routes seulement (`E_QUOTA_OUTSIDE_ROUTE`).
+  - Le quota est lu **dans les lignes**, pas dans un compteur à côté : les deux ne peuvent pas diverger. Le contrôle prend un
+    verrou consultatif (`pg_advisory_xact_lock`) sur le couple compteur-locataire, tenu jusqu'à la fin de la transaction : deux
+    requêtes d'un même locataire ne peuvent pas prendre la dernière unité, la seconde attend la première puis voit son usage.
+    D'où la règle : **`checkQuota` puis `meter` dans la même route**.
+  - Limites : OpenMeter (la référence) agrège dans ClickHouse ; ici PostgreSQL, ce qui tient la facturation d'un produit, pas
+    des milliards d'événements. Pas d'archivage ni de purge des lignes, pas de remise à zéro anticipée d'un compteur (poser un
+    `meter` négatif), pas de droit « par fonctionnalité » (`entitlements`) autre que le plafond.
 - **Règles de champ** : un champ texte (`string`, `uuid`) d'un schéma API peut porter des règles (`rules`), vérifiées par le
   handler généré **avant toute étape**, dans l'ordre des champs ; la première qui échoue répond `400 { "error": "champ : … " }`.
   - `length` (`min`, `max`) : entre `min` et `max` **caractères** (pas octets), texte rogné avant d'être compté ; la borne

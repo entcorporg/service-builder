@@ -97,6 +97,30 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                 }
             }
             Step::RateLimit { key, .. } => expr(key, &format!("{path}/key"), out),
+            Step::Meter {
+                tenant,
+                amount,
+                idempotency_key,
+                ..
+            } => {
+                expr(tenant, &format!("{path}/tenant"), out);
+                expr(amount, &format!("{path}/amount"), out);
+                if let Some(once) = idempotency_key {
+                    expr(once, &format!("{path}/idempotencyKey"), out);
+                }
+            }
+            Step::CheckQuota {
+                tenant,
+                limit,
+                wanted,
+                ..
+            } => {
+                expr(tenant, &format!("{path}/tenant"), out);
+                expr(limit, &format!("{path}/limit"), out);
+                if let Some(wanted) = wanted {
+                    expr(wanted, &format!("{path}/wanted"), out);
+                }
+            }
             Step::VerifyHmac { .. } => {}
             Step::SignJwt { claims, .. } => assignments(claims, &format!("{path}/claims"), out),
             Step::VerifyJwt { token, .. } => expr(token, &format!("{path}/token"), out),

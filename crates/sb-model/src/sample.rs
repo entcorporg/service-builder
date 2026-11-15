@@ -891,6 +891,7 @@ pub fn showcase() -> Project {
     add_passkeys(&mut p);
     add_avatars(&mut p);
     add_notes(&mut p);
+    add_usage(&mut p);
     add_sql_reads(&mut p);
     add_mailer(&mut p);
     add_mail_design(&mut p);
@@ -1746,6 +1747,66 @@ pub fn add_avatars(p: &mut Project) {
     );
     download.path = "/avatar/url".into();
     routes.push(download);
+}
+
+/// A metered route: a company gets a thousand calls a month, whatever the number of replicas or of simultaneous requests. The
+/// check and the use are in the same run, so two calls of the company cannot both take the last one, and what is left after the
+/// call is answered. Needs [`add_jwt`], whose `AccessClaims` and signing key it uses.
+pub fn add_usage(p: &mut Project) {
+    let mut token = field("token", FieldType::String);
+    token.lenient = true; // the flow answers 401 itself
+    token.source = Some(RequestSource::Header {
+        name: "Authorization".into(),
+    });
+    p.messages.push(api("UsageRequest", vec![token]));
+    p.messages.push(api(
+        "UsageView",
+        vec![field("calls_left", FieldType::Int64)],
+    ));
+    p.services[0].routes.push(Route {
+        name: "usage_report".into(),
+        method: HttpMethod::Get,
+        path: "/tenant/usage".into(),
+        request: "UsageRequest".into(),
+        response: "UsageView".into(),
+        status: 200,
+        steps: vec![
+            Step::VerifyJwt {
+                id: "u1".into(),
+                token: path("input.token"),
+                bearer: true,
+                source: JwksSource::Keys {
+                    key_envs: vec!["JWT_SIGNING_KEY".into()],
+                },
+                issuer: "orders".into(),
+                schema: "AccessClaims".into(),
+                bind: "claims".into(),
+            },
+            Step::CheckQuota {
+                id: "u2".into(),
+                key: "api_calls".into(),
+                tenant: path("claims.tid"),
+                limit: lit(1000),
+                period: UsagePeriod::Month,
+                wanted: None,
+                bind: Some("calls_left".into()),
+            },
+            Step::Meter {
+                id: "u3".into(),
+                key: "api_calls".into(),
+                tenant: path("claims.tid"),
+                amount: lit(1),
+                idempotency_key: None,
+            },
+            Step::Respond {
+                id: "u4".into(),
+                fields: vec![set("calls_left", path("calls_left"))],
+                status: None,
+                cookies: vec![],
+                headers: vec![],
+            },
+        ],
+    });
 }
 
 /// Adds to the first service notes that belong to a tenant and are never really deleted: the table is filtered by its

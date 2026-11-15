@@ -674,6 +674,17 @@ fn schema_rs(service: &Service) -> String {
         c.line("eda_runtime::webauthn::CREATE_CREDENTIALS_TABLE,");
         c.line("eda_runtime::webauthn::CREATE_CREDENTIALS_INDEX,");
     }
+    if service.uses_usage() {
+        // The uses metered and checked against quotas, and the view that adds them up per day.
+        for statement in [
+            "CREATE_EVENTS_TABLE",
+            "CREATE_EVENTS_INDEX",
+            "CREATE_EVENTS_UNIQUE",
+            "CREATE_DAILY_VIEW",
+        ] {
+            c.line(format!("eda_runtime::usage::{statement},"));
+        }
+    }
     if replay {
         c.line("eda_runtime::totp::CREATE_STEPS_TABLE,");
     }
@@ -2365,6 +2376,57 @@ fn steps(
                     ));
                 }
             }
+            Step::Meter {
+                key,
+                tenant,
+                amount,
+                idempotency_key,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let tenant = lower(project, scope, tenant, &text)?;
+                let amount = lower(project, scope, amount, &TypeRef::scalar(FieldType::Int64))?;
+                let once = match idempotency_key {
+                    Some(once) => {
+                        format!("Some(({}).as_str())", lower(project, scope, once, &text)?)
+                    }
+                    None => "None".to_string(),
+                };
+                c.line(format!(
+                    "eda_runtime::usage::meter(&mut tx, {key:?}, &({tenant}), {amount}, {once}).await?;"
+                ));
+            }
+            Step::CheckQuota {
+                key,
+                tenant,
+                limit,
+                period,
+                wanted,
+                bind,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let units = TypeRef::scalar(FieldType::Int64);
+                let tenant = lower(project, scope, tenant, &text)?;
+                let limit = lower(project, scope, limit, &units)?;
+                let wanted = match wanted {
+                    Some(wanted) => lower(project, scope, wanted, &units)?,
+                    None => "1_i64".to_string(),
+                };
+                let period = format!("eda_runtime::usage::Period::{}", period_variant(*period));
+                let call = format!(
+                    "eda_runtime::usage::check(&mut tx, {key:?}, &({tenant}), {limit}, {wanted}, {period}).await?"
+                );
+                match bind {
+                    Some(bind) => {
+                        c.line(format!("let {bind}: i64 = {call};"));
+                        scope.bind(bind.clone(), units);
+                    }
+                    None => {
+                        c.line(format!("{call};"));
+                    }
+                }
+            }
             Step::Sql { .. } => sql_step(c, project, service, scope, step)?,
             Step::HttpCall { .. } => crate::http_call::http_call_step(c, project, scope, step)?,
             Step::HashPassword { input, bind, .. } => {
@@ -2816,6 +2878,17 @@ fn placeholder(n: usize, col: &Column) -> String {
         format!("${n}::{}", col.ty.sql().to_lowercase())
     } else {
         format!("${n}")
+    }
+}
+
+/// The variant of `eda_runtime::usage::Period` for a period of the model.
+fn period_variant(period: sb_model::UsagePeriod) -> &'static str {
+    match period {
+        sb_model::UsagePeriod::Hour => "Hour",
+        sb_model::UsagePeriod::Day => "Day",
+        sb_model::UsagePeriod::Month => "Month",
+        sb_model::UsagePeriod::Year => "Year",
+        sb_model::UsagePeriod::Forever => "Forever",
     }
 }
 
@@ -3368,6 +3441,8 @@ fn describe(step: &Step) -> String {
             "rate limit {max} per {window_secs}s{}",
             if *shared { " (shared)" } else { "" }
         ),
+        Step::Meter { key, .. } => format!("meter {key}"),
+        Step::CheckQuota { key, .. } => format!("check the quota of {key}"),
         Step::HashPassword { bind, .. } => format!("hash password into {bind}"),
         Step::VerifyPassword { bind, .. } => format!("verify password into {bind}"),
         Step::RandomToken { bind, .. } => format!("random token into {bind}"),

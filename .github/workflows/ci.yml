@@ -97,6 +97,15 @@ jobs:
         ports:
           - 6379:6379
         options: --ulimit memlock=-1
+      # For the uses metered against quotas (`meter` and `checkQuota`).
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -129,6 +138,13 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
           DRAGONFLY_URL: redis://localhost:6379
+      # The meters and quotas against a real PostgreSQL: the periods, the view, the idempotency keys and the lock that keeps two
+      # requests from taking the last unit.
+      - run: "cargo test -p eda-runtime --lib usage:: -- --include-ignored"
+        working-directory: ${{ runner.temp }}/generated
+        env:
+          CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-target
+          EDA_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
       # The OpenAPI document of each service, against the OpenAPI 3.1 specification.
       - name: Validate the OpenAPI documents
         run: |

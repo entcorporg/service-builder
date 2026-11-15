@@ -19,6 +19,7 @@ pub mod rate_limit;
 #[cfg(feature = "s3")]
 pub mod s3;
 pub mod totp;
+pub mod usage;
 pub mod validation;
 #[cfg(feature = "webauthn")]
 pub mod webauthn;

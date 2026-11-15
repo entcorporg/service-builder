@@ -1016,6 +1016,43 @@ pub enum Step {
         #[serde(default)]
         shared: bool,
     },
+    /// Records a use of a meter for a tenant: `amount` units of `key` (API calls, seats, megabytes) in the table
+    /// `usage_events` of the service's database, in the transaction of the handler, so that the use and what it pays for commit
+    /// together. A negative amount gives units back (a seat released). With `idempotency_key`, a second use with the same text
+    /// is ignored, so that a retried request or a redelivered event counts once.
+    #[serde(rename_all = "camelCase")]
+    Meter {
+        id: String,
+        /// The meter: `api_calls`, `seats`, `storage_mb`.
+        key: String,
+        /// Who is metered, as text: a company, an account.
+        tenant: Expr,
+        /// How many units (an `int64`).
+        amount: Expr,
+        #[serde(default)]
+        idempotency_key: Option<Expr>,
+    },
+    /// Refuses the request, with a 429 and a `Retry-After` (the seconds until the period ends), when the tenant's use of the
+    /// meter over the period, plus `wanted`, would pass `limit`. The limit comes from the plan: a literal, or a value the flow
+    /// read. Two requests of the same tenant cannot both take the last unit: the check holds a lock on the meter and the tenant
+    /// until the transaction ends, so put the `meter` that follows it in the same run. Routes only.
+    #[serde(rename_all = "camelCase")]
+    CheckQuota {
+        id: String,
+        key: String,
+        tenant: Expr,
+        /// The ceiling over the period (an `int64`).
+        limit: Expr,
+        /// The period the use is added up over: calendar periods in UTC, or everything since the start.
+        #[serde(default)]
+        period: UsagePeriod,
+        /// How many units this request is about to use (an `int64`, 1 when it is left out).
+        #[serde(default)]
+        wanted: Option<Expr>,
+        /// Receives what is left after this request (an `int64`): for a header, or a message.
+        #[serde(default)]
+        bind: Option<String>,
+    },
     /// A query on a table of the service's database, in the transaction of the handler. A
     /// `Select` binds `bind`, typed after the ticked columns: that is what the next steps read.
     #[serde(rename_all = "camelCase")]
@@ -1824,6 +1861,8 @@ impl Step {
             | Step::Sql { id, .. }
             | Step::Fail { id, .. }
             | Step::RateLimit { id, .. }
+            | Step::Meter { id, .. }
+            | Step::CheckQuota { id, .. }
             | Step::VerifyHmac { id, .. }
             | Step::HttpCall { id, .. }
             | Step::Encrypt { id, .. }
@@ -1869,6 +1908,32 @@ impl Step {
             for s in steps {
                 s.walk(f);
             }
+        }
+    }
+}
+
+/// What a quota adds the use up over.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum UsagePeriod {
+    Hour,
+    Day,
+    #[default]
+    Month,
+    Year,
+    /// Everything since the first use: a stock (seats, storage) more than a flow.
+    Forever,
+}
+
+impl UsagePeriod {
+    /// The unit `date_trunc` cuts the calendar at; none for `forever`.
+    pub fn unit(self) -> Option<&'static str> {
+        match self {
+            UsagePeriod::Hour => Some("hour"),
+            UsagePeriod::Day => Some("day"),
+            UsagePeriod::Month => Some("month"),
+            UsagePeriod::Year => Some("year"),
+            UsagePeriod::Forever => None,
         }
     }
 }
@@ -2298,6 +2363,15 @@ impl Service {
             .chain(self.routes.iter().flat_map(|r| &r.steps))
             .chain(self.consumers.iter().flat_map(|c| &c.steps))
             .chain(self.jobs.iter().flat_map(|j| &j.steps))
+    }
+
+    /// Whether a step of the service meters a use or checks a quota: its database then holds `usage_events`.
+    pub fn uses_usage(&self) -> bool {
+        let mut used = false;
+        for step in self.handler_steps() {
+            step.walk(&mut |s| used |= matches!(s, Step::Meter { .. } | Step::CheckQuota { .. }));
+        }
+        used
     }
 
     /// Whether a `rateLimit` of the service counts in the key-value server (`shared`): it then needs `DRAGONFLY_URL`.

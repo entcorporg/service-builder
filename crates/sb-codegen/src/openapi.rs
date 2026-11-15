@@ -194,6 +194,9 @@ fn step_statuses(route: &Route) -> Vec<(u16, String, bool)> {
                     ..
                 } => Some((*status, message.clone(), retry_after.is_some())),
                 Step::RateLimit { .. } => Some((429, "Too many attempts".into(), true)),
+                Step::CheckQuota { .. } => {
+                    Some((429, "The quota is used up for the period".into(), true))
+                }
                 Step::VerifyHmac { .. } => {
                     Some((401, "The signature is missing or wrong".into(), false))
                 }

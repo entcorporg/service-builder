@@ -83,6 +83,8 @@ fn bind(project: &Project, scope: &mut BTreeMap<String, Ty>, step: &Step) {
     let Some(var) = text("bind") else { return };
     let ty = match kind {
         "verifyPassword" => scalar("bool"),
+        // What is left of the quota after this request.
+        "checkQuota" => scalar("int64"),
         "hashPassword" | "randomToken" | "sha256" | "encrypt" | "decrypt" | "signJwt"
         | "passkeyLoginFinish" | "imageSniff" | "objectPresignGet" | "objectPresignPut" => {
             scalar("string")
@@ -214,6 +216,23 @@ mod tests {
                 .any(|v| v.path == "order_id" && v.ty == "string"),
             "{after:?}"
         );
+    }
+
+    #[test]
+    fn what_is_left_of_a_quota_is_offered_to_the_steps_after_it() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_usage(&mut p);
+        let route = p.services[0]
+            .routes
+            .iter()
+            .find(|r| r.name == "usage_report")
+            .unwrap();
+        let before = variables(&p, Some(&route.request), &route.steps[..1]);
+        assert!(!before.iter().any(|v| v.path == "calls_left"));
+        let after = variables(&p, Some(&route.request), &route.steps[..2]);
+        let left = after.iter().find(|v| v.path == "calls_left").unwrap();
+        assert_eq!(left.ty, "int64");
     }
 
     #[test]
