@@ -2967,6 +2967,7 @@ impl<'a> Checker<'a> {
                 optional,
                 repeated,
                 value,
+                mutable,
                 ..
             } => {
                 let ty = TypeRef {
@@ -3016,7 +3017,29 @@ impl<'a> Checker<'a> {
                 }
                 self.check_var_name(name, &format!("{path}/name"));
                 self.check_expr(scope, value, Some(&ty), &format!("{path}/value"));
-                scope.bind(name.clone(), ty);
+                if *mutable {
+                    scope.bind_mut(name.clone(), ty);
+                } else {
+                    scope.bind(name.clone(), ty);
+                }
+                false
+            }
+            Step::Assign { name, value, .. } => {
+                match scope.get(name).cloned() {
+                    None => self.error(
+                        "E_UNKNOWN_VAR",
+                        format!("{path}/name"),
+                        format!("unknown variable `{name}`"),
+                    ),
+                    Some(_) if !scope.is_mutable(name) => self.error(
+                        "E_ASSIGN_IMMUTABLE",
+                        format!("{path}/name"),
+                        format!("`{name}` cannot be assigned: tick `mutable` on its `let` step"),
+                    ),
+                    Some(ty) => {
+                        self.check_expr(scope, value, Some(&ty), &format!("{path}/value"));
+                    }
+                }
                 false
             }
             Step::Sql { .. } => {
@@ -5388,6 +5411,7 @@ mod tests {
             value_type: ty,
             optional,
             repeated: false,
+            mutable: false,
             value,
         }
     }
@@ -5660,7 +5684,7 @@ mod tests {
             .iter_mut()
             .find(|r| r.name == "add_lines")
             .unwrap();
-        let Step::ForEach { steps, .. } = &mut route.steps[2] else {
+        let Step::ForEach { steps, .. } = &mut route.steps[3] else {
             panic!("sample layout changed")
         };
         // `respond` in a loop would answer once per element.
@@ -5677,7 +5701,7 @@ mod tests {
             .iter_mut()
             .find(|r| r.name == "add_lines")
             .unwrap();
-        let Step::ForEach { steps, list, .. } = &mut route.steps[2] else {
+        let Step::ForEach { steps, list, .. } = &mut route.steps[3] else {
             unreachable!()
         };
         steps.pop();
@@ -5689,7 +5713,7 @@ mod tests {
             .iter_mut()
             .find(|r| r.name == "add_lines")
             .unwrap();
-        let Step::ForEach { list, item, .. } = &mut route.steps[2] else {
+        let Step::ForEach { list, item, .. } = &mut route.steps[3] else {
             unreachable!()
         };
         *list = path("input.lines");
@@ -5700,7 +5724,7 @@ mod tests {
             .iter_mut()
             .find(|r| r.name == "add_lines")
             .unwrap();
-        let Step::ForEach { item, .. } = &mut route.steps[2] else {
+        let Step::ForEach { item, .. } = &mut route.steps[3] else {
             unreachable!()
         };
         *item = "line".into();
@@ -6140,6 +6164,7 @@ mod tests {
             value_type: ty,
             optional,
             repeated,
+            mutable: false,
             value,
         };
         let lit = |v: serde_json::Value| Expr::Literal { value: v };
@@ -6250,6 +6275,7 @@ mod tests {
             value_type,
             optional: false,
             repeated: false,
+            mutable: false,
             value,
         };
         let view = |p: &Project| p.message("OrderView").is_some();
@@ -6292,6 +6318,7 @@ mod tests {
                 },
                 optional: false,
                 repeated: false,
+                mutable: false,
                 value: Expr::Raw {
                     code: "pb::OrderView::default()".into(),
                 },
@@ -10017,6 +10044,7 @@ mod tests {
             value_type: FieldType::String,
             optional: false,
             repeated: false,
+            mutable: false,
             value: Expr::Literal { value: "x".into() },
         });
         assert!(errors(&p).contains(&"E_RESERVED_NAME".into()));
@@ -10051,6 +10079,7 @@ mod tests {
                 value_type: FieldType::String,
                 optional: false,
                 repeated: false,
+                mutable: false,
                 value: Expr::Literal { value: "x".into() },
             },
         );

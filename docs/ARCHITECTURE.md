@@ -105,6 +105,7 @@ la validation et la génération.
   `E_PRESENCE_TYPE`), `empty` (un texte ou une liste, `E_EMPTY_TYPE`), `in` (une valeur parmi une liste de
   valeurs du même type simple) et `test` (une valeur booléenne : une variable, ou `contains(...)`). Un groupe vide
   vaut vrai (`and`) ou faux (`or`) et donne `W_EMPTY_LOGIC`.
+- **Réassignation** : un `let` avec `"mutable": true` peut recevoir une autre valeur par `{"type":"assign","name":"x","value":<expr>}`, y compris dans une condition ou une boucle (du même type ; sinon `E_ASSIGN_IMMUTABLE` ou `E_UNKNOWN_VAR`).
 - **Boucle** : `{"type":"forEach","item":"ligne","list":<expr>,"steps":[...]}` répète les étapes pour chaque élément
   d'une liste (un champ répété, une variable liste, les lignes d'un `sql` avec `many`). `item` est une variable du
   corps seulement (un texte, un nombre ou un schéma lu par `ligne.champ`) ; elle ne peut pas masquer une variable du

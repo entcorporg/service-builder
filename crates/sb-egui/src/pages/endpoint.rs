@@ -910,6 +910,7 @@ fn build_by_logic(p: &mut Project, service: &str, route: &str, taken: &[String])
         value_type: FieldType::Message { name: response },
         optional: false,
         repeated: false,
+        mutable: false,
         value: Expr::Raw { code },
     };
     if let Some(r) = route_mut(p, service, route) {

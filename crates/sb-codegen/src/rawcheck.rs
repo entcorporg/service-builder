@@ -65,7 +65,9 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
         let path = format!("{base}/{i}");
         match step {
             Step::Log { .. } => {}
-            Step::Let { value, .. } => expr(value, &format!("{path}/value"), out),
+            Step::Let { value, .. } | Step::Assign { value, .. } => {
+                expr(value, &format!("{path}/value"), out)
+            }
             Step::Publish { payload, .. } => assignments(payload, &format!("{path}/payload"), out),
             Step::PublishLive {
                 account_id,

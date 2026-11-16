@@ -398,6 +398,7 @@ mod tests {
                 },
                 optional: false,
                 repeated: false,
+                mutable: false,
                 value: Expr::Raw {
                     code: "{ pb::OrderView { order_id: input.order_id.clone(), ..Default::default() } }"
                         .into(),
@@ -642,6 +643,43 @@ mod tests {
     }
 
     #[test]
+    fn a_mutable_variable_can_be_assigned_inside_a_branch() {
+        use sb_model::{Condition, Expr, FieldType, Step};
+        let lit = |v: serde_json::Value| Expr::Literal { value: v };
+        let let_step = |mutable: bool| Step::Let {
+            id: "v_total".into(),
+            name: "total".into(),
+            value_type: FieldType::Int64,
+            optional: false,
+            repeated: false,
+            mutable,
+            value: lit(0.into()),
+        };
+        let assign = Step::Assign {
+            id: "a_total".into(),
+            name: "total".into(),
+            value: lit(5.into()),
+        };
+        let branch = Step::Branch {
+            id: "b".into(),
+            condition: Condition::Test { value: lit(true.into()) },
+            then: vec![assign],
+            otherwise: vec![],
+        };
+        let mut p = sample::orders();
+        p.services[0].routes[1].steps.splice(0..0, [let_step(true), branch.clone()]);
+        let files = generate(&p).expect("a mutable variable is assignable");
+        let code: String = files.iter().map(|f| f.content.as_str()).collect();
+        assert!(code.contains("let mut total: i64 = 0;"), "{code}");
+        assert!(code.contains("total = 5;"));
+
+        let mut p = sample::orders();
+        p.services[0].routes[1].steps.splice(0..0, [let_step(false), branch]);
+        let report = sb_model::validate(&p);
+        assert!(report.iter().any(|d| d.code == "E_ASSIGN_IMMUTABLE"), "{report:?}");
+    }
+
+    #[test]
     fn variables_can_be_uuids_optional_or_lists() {
         use sb_model::{Expr, FieldType, Step};
         let mut p = sample::orders();
@@ -655,6 +693,7 @@ mod tests {
             value_type: ty,
             optional,
             repeated,
+            mutable: false,
             value: Expr::Literal { value },
         };
         p.services[0].routes[1].steps.splice(

@@ -88,6 +88,8 @@ impl fmt::Display for TypeRef {
 #[derive(Debug, Clone, Default)]
 pub struct Scope {
     vars: BTreeMap<String, TypeRef>,
+    /// Variables a later step may assign again.
+    mutable: std::collections::BTreeSet<String>,
 }
 
 impl Scope {
@@ -98,7 +100,20 @@ impl Scope {
     }
 
     pub fn bind(&mut self, name: impl Into<String>, ty: TypeRef) {
-        self.vars.insert(name.into(), ty);
+        let name = name.into();
+        self.mutable.remove(&name);
+        self.vars.insert(name, ty);
+    }
+
+    /// Binds a variable that `assign` steps may change.
+    pub fn bind_mut(&mut self, name: impl Into<String>, ty: TypeRef) {
+        let name = name.into();
+        self.vars.insert(name.clone(), ty);
+        self.mutable.insert(name);
+    }
+
+    pub fn is_mutable(&self, name: &str) -> bool {
+        self.mutable.contains(name)
     }
 
     pub fn get(&self, name: &str) -> Option<&TypeRef> {

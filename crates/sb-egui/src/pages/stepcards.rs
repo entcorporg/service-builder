@@ -23,6 +23,7 @@ pub fn title(kind: &str) -> &'static str {
     match kind {
         "log" => "Journal",
         "let" => "Variable",
+        "assign" => "Réassigner",
         "publish" => "Publier un événement",
         "publishLive" => "Pousser vers les navigateurs",
         "liveGrants" => "Droits modifiés (temps réel)",
@@ -78,7 +79,7 @@ pub fn title(kind: &str) -> &'static str {
 fn tone(kind: &str) -> (Color32, u8, Color32) {
     let (bg, a, fg) = match kind {
         "log" => (0x8f97bd, 46, 0xb6bdea),
-        "let" => (0xb482ff, 46, 0xc7a0ff),
+        "let" | "assign" => (0xb482ff, 46, 0xc7a0ff),
         "publish" | "publishLive" | "liveGrants" => (0xffb04a, 46, 0xffb04a),
         "callRpc" | "sql" | "httpCall" => (0x7886ff, 51, 0x7886ff),
         "branch" => (0xff66a0, 43, 0xff8fb8),
@@ -168,6 +169,7 @@ fn summary(step: &Step, kind: &str) -> String {
             get("path")
         ),
         "let" => format!("{} : {}", get("name"), get("valueType")),
+        "assign" => get("name"),
         "log" => get("message"),
         _ => {
             let full = stepform::summary(step);
@@ -581,7 +583,7 @@ fn form(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, index: usize) {
 }
 
 /// The blocks that can be added, in the order of the web version.
-const ORDER: [&str; 49] = [
+const ORDER: [&str; 50] = [
     "publish",
     "publishLive",
     "liveGrants",
@@ -591,6 +593,7 @@ const ORDER: [&str; 49] = [
     "branch",
     "forEach",
     "let",
+    "assign",
     "log",
     "respond",
     "fail",
@@ -638,6 +641,7 @@ fn hint(kind: &str) -> &'static str {
     match kind {
         "log" => "Écrire une ligne de log",
         "let" => "Calculer et nommer une valeur",
+        "assign" => "Donner une nouvelle valeur à une variable cochée « modifiable » (dans une condition, une boucle)",
         "publish" => "Mis en file (outbox) avec la transaction, puis envoyé sur le topic",
         "publishLive" => {
             "Événement temps réel (SSE), envoyé après le commit, à un compte ou à une permission"

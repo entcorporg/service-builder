@@ -134,6 +134,7 @@ fn loop_item(known: &[sb_app::scope::Var], item: &str, list: &sb_model::Expr) ->
         value_type: ty,
         optional: false,
         repeated: false,
+        mutable: false,
         value: sb_model::Expr::Raw {
             code: String::new(),
         },

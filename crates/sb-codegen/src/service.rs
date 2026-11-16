@@ -2227,6 +2227,7 @@ fn steps(
                 optional,
                 repeated,
                 value,
+                mutable,
                 ..
             } => {
                 let ty = TypeRef {
@@ -2236,10 +2237,22 @@ fn steps(
                 };
                 let value = lower(project, scope, value, &ty)?;
                 c.line(format!(
-                    "let {name}: {} = {value};",
+                    "let {}{name}: {} = {value};",
+                    if *mutable { "mut " } else { "" },
                     rust_let_type(value_type, ty.optional, ty.repeated)
                 ));
-                scope.bind(name.clone(), ty);
+                if *mutable {
+                    scope.bind_mut(name.clone(), ty);
+                } else {
+                    scope.bind(name.clone(), ty);
+                }
+            }
+            Step::Assign { name, value, .. } => {
+                let ty = scope.get(name).cloned().ok_or_else(|| {
+                    CodegenError::Internal(format!("assign to unknown variable `{name}`"))
+                })?;
+                let value = lower(project, scope, value, &ty)?;
+                c.line(format!("{name} = {value};"));
             }
             Step::Publish { topic, payload, .. } => {
                 let t = project
@@ -3924,6 +3937,7 @@ fn describe(step: &Step) -> String {
     match step {
         Step::Log { .. } => "log".into(),
         Step::Let { name, .. } => format!("let {name}"),
+        Step::Assign { name, .. } => format!("assign {name}"),
         Step::Publish { topic, .. } => format!("publish to {topic}"),
         Step::PublishLive { event, .. } => format!("push `{event}` to the browsers"),
         Step::LiveGrants { .. } => "tell the browsers their rights changed".into(),

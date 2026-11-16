@@ -1004,6 +1004,17 @@ pub enum Step {
         /// `Vec<T>`: a list (a JSON array as a literal).
         #[serde(default)]
         repeated: bool,
+        /// A later `assign` step (in this list, a branch or a loop) may give it another value.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        mutable: bool,
+        value: Expr,
+    },
+    /// Give a new value to a variable declared with `mutable` on its `let` step, wherever the step sits
+    /// below it (a branch, a loop).
+    #[serde(rename_all = "camelCase")]
+    Assign {
+        id: String,
+        name: String,
         value: Expr,
     },
     /// Publish an event on a topic.
@@ -2156,6 +2167,7 @@ impl Step {
         match self {
             Step::Log { id, .. }
             | Step::Let { id, .. }
+            | Step::Assign { id, .. }
             | Step::Publish { id, .. }
             | Step::PublishLive { id, .. }
             | Step::LiveGrants { id, .. }

@@ -216,6 +216,7 @@ pub fn orders() -> Project {
                         value_type: FieldType::String,
                         optional: false,
                         repeated: false,
+                        mutable: false,
                         value: new_uuid(),
                     },
                     Step::Log {
@@ -309,6 +310,7 @@ pub fn orders() -> Project {
                         value_type: FieldType::String,
                         optional: false,
                         repeated: false,
+                        mutable: false,
                         value: new_uuid(),
                     },
                     Step::Sql {
@@ -454,6 +456,7 @@ pub fn orders() -> Project {
                     value_type: FieldType::Bool,
                     optional: false,
                     repeated: false,
+                    mutable: false,
                     value: raw("input.amount < 100_000"),
                 },
                 Step::Branch {
@@ -1044,6 +1047,7 @@ pub fn add_login(p: &mut Project) {
                 value_type: FieldType::String,
                 optional: true,
                 repeated: false,
+                mutable: false,
                 value: raw(
                     "sqlx::query_scalar::<_, String>(\"SELECT password_hash FROM accounts WHERE email = $1\").bind(input.email.clone()).fetch_optional(&mut *tx).await?",
                 ),
@@ -2417,6 +2421,7 @@ pub fn add_notes(p: &mut Project) {
                 value_type: FieldType::String,
                 optional: false,
                 repeated: false,
+                mutable: false,
                 value: path("claims.tid"),
             },
         ]
@@ -2480,6 +2485,7 @@ pub fn add_notes(p: &mut Project) {
             value_type: FieldType::String,
             optional: false,
             repeated: false,
+            mutable: false,
             value: new_uuid(),
         },
         // The body is rich text: what is stored (and answered) has lost its scripts and its event attributes.
@@ -2708,6 +2714,7 @@ pub fn add_sql_reads(p: &mut Project) {
             value_type: FieldType::String,
             optional: false,
             repeated: false,
+            mutable: false,
             value: path("claims.tid"),
         },
         Step::Sql {
@@ -2811,6 +2818,7 @@ pub fn add_mailer(p: &mut Project) {
             value_type: FieldType::String,
             optional: false,
             repeated: false,
+            mutable: false,
             value: new_uuid(),
         },
     );
@@ -3065,10 +3073,24 @@ pub fn add_basket_lines(p: &mut Project) {
             value_type: string(),
             optional: false,
             repeated: false,
+            mutable: true,
             value: call(
                 Func::Upper,
                 vec![call(Func::Default, vec![path("input.coupon"), lit("none")])],
             ),
+        },
+        // `coupon` is `mutable`: an `assign` step, here in a condition, gives it another value.
+        Step::Branch {
+            id: "l3a".into(),
+            condition: Condition::Empty {
+                value: path("coupon"),
+            },
+            then: vec![Step::Assign {
+                id: "l3b".into(),
+                name: "coupon".into(),
+                value: lit("NONE"),
+            }],
+            otherwise: vec![],
         },
         Step::ForEach {
             id: "l4".into(),
