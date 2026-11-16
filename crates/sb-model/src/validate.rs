@@ -5563,7 +5563,62 @@ impl<'a> Checker<'a> {
 
     // ---- topology --------------------------------------------------------------------
 
+    /// A service that only reads a table it shares by name with another service, which is the one that writes it:
+    /// each service has its own database, so the copy read here is never fed.
+    fn foreign_tables(&mut self) {
+        let p = self.project;
+        // (service, table) pairs written by an insert, update or delete step.
+        let mut written: BTreeSet<(&str, &str)> = BTreeSet::new();
+        let mut raw: BTreeSet<&str> = BTreeSet::new();
+        for s in &p.services {
+            for step in s.handler_steps() {
+                step.walk(&mut |st| match st {
+                    Step::Sql { op, table, .. } if *op != SqlOp::Select => {
+                        written.insert((s.name.as_str(), table.as_str()));
+                    }
+                    Step::Code { .. } => {
+                        raw.insert(s.name.as_str());
+                    }
+                    _ => {}
+                });
+            }
+        }
+        for (i, s) in p.services.iter().enumerate() {
+            if raw.contains(s.name.as_str()) {
+                continue;
+            }
+            let mut seen = BTreeSet::new();
+            for step in s.handler_steps() {
+                step.walk(&mut |st| {
+                    let Step::Sql { op: SqlOp::Select, table, .. } = st else {
+                        return;
+                    };
+                    let t = table.as_str();
+                    if !seen.insert(t) || written.contains(&(s.name.as_str(), t)) || s.table(t).is_none() {
+                        return;
+                    }
+                    let Some(owner) = p
+                        .services
+                        .iter()
+                        .find(|o| o.name != s.name && o.table(t).is_some() && written.contains(&(o.name.as_str(), t)))
+                    else {
+                        return;
+                    };
+                    self.warn(
+                        "W_TABLE_FOREIGN",
+                        format!("/services/{i}/tables"),
+                        format!(
+                            "`{}` reads its table `{t}` but never writes it, while `{}` writes a table of the same name in its own database: feed it from events, or ask `{}` over RPC",
+                            s.name, owner.name, owner.name
+                        ),
+                    );
+                });
+            }
+        }
+    }
+
     fn graph_warnings(&mut self) {
+        self.foreign_tables();
         let p = self.project;
         // (service, topic) pairs with a Publish step.
         let mut published: BTreeSet<(&str, &str)> = BTreeSet::new();
@@ -10326,6 +10381,23 @@ mod tests {
             *conflict = vec!["order_id".into()];
         }
         assert!(errors(&p).contains(&"E_SQL_CONFLICT_OP".into()));
+    }
+
+    #[test]
+    fn a_table_read_but_fed_by_another_service_is_flagged() {
+        let codes =
+            |p: &Project| -> Vec<String> { validate(p).into_iter().map(|d| d.code).collect() };
+        let mut p = sample::orders();
+        assert!(!codes(&p).contains(&"W_TABLE_FOREIGN".into()));
+        let mut copy = p.services[0].clone();
+        copy.name = "Mirror".into();
+        for step in copy.routes.iter_mut().flat_map(|r| r.steps.iter_mut()) {
+            if let Step::Sql { op, .. } = step {
+                *op = SqlOp::Select;
+            }
+        }
+        p.services.push(copy);
+        assert!(codes(&p).contains(&"W_TABLE_FOREIGN".into()));
     }
 
     #[test]
