@@ -2955,6 +2955,19 @@ pub fn add_live_events(p: &mut Project) {
             data: vec![set("id", path("order_id"))],
         },
     );
+    // The rights of an account changed: its open streams read them again (without `permissions`, they would close).
+    create.steps.insert(
+        at + 1,
+        Step::LiveGrants {
+            id: "o3c".into(),
+            service: "Realtime".into(),
+            account_id: path("order_id"),
+            tenant_id: None,
+            permissions: Some(Expr::Literal {
+                value: serde_json::json!(["orders.view"]),
+            }),
+        },
+    );
 }
 
 /// Adds to the first service the logic of a flow without a line of code: a route that takes a list of order lines,

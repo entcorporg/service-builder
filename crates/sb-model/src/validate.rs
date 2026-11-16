@@ -3004,6 +3004,16 @@ impl<'a> Checker<'a> {
                 );
                 false
             }
+            Step::LiveGrants {
+                service,
+                account_id,
+                tenant_id,
+                permissions,
+                ..
+            } => {
+                self.live_grants(scope, path, service, account_id, tenant_id, permissions);
+                false
+            }
             Step::CallRpc {
                 service,
                 method,
@@ -4728,6 +4738,44 @@ impl<'a> Checker<'a> {
             };
             let ty = TypeRef::of_field(field);
             self.check_expr(scope, &a.value, Some(&ty), &format!("{path}/value"));
+        }
+    }
+
+    /// The step `liveGrants`: the service must be a real-time one; the account and the company are ids, the permissions a
+    /// list of text (the service itself refuses a permission that is not `module.view|manage`).
+    fn live_grants(
+        &mut self,
+        scope: &Scope,
+        path: &str,
+        service: &str,
+        account_id: &Expr,
+        tenant_id: &Option<Expr>,
+        permissions: &Option<Expr>,
+    ) {
+        match self.project.service(service) {
+            Some(s) if s.kind == ServiceKind::Realtime => {}
+            Some(_) => self.error(
+                "E_LIVE_SERVICE",
+                format!("{path}/service"),
+                format!("`{service}` is not a real-time service"),
+            ),
+            None => self.error(
+                "E_LIVE_SERVICE",
+                format!("{path}/service"),
+                format!("unknown service `{service}`: pick a real-time service"),
+            ),
+        }
+        let id = TypeRef::scalar(FieldType::Uuid);
+        self.check_expr(scope, account_id, Some(&id), &format!("{path}/accountId"));
+        if let Some(e) = tenant_id {
+            self.check_expr(scope, e, Some(&id), &format!("{path}/tenantId"));
+        }
+        if let Some(e) = permissions {
+            let list = TypeRef {
+                repeated: true,
+                ..TypeRef::scalar(FieldType::String)
+            };
+            self.check_expr(scope, e, Some(&list), &format!("{path}/permissions"));
         }
     }
 
@@ -10031,6 +10079,42 @@ mod tests {
         let mut p = sample::orders();
         sample::add_live_events(&mut p);
         assert_eq!(errors(&p), Vec::<String>::new(), "{:?}", validate(&p));
+    }
+
+    #[test]
+    fn a_grants_step_needs_a_real_time_service_and_the_right_types() {
+        use serde_json::json;
+        let mut p = sample::orders();
+        sample::add_live_events(&mut p);
+        let step = |service: &str, permissions: serde_json::Value| -> Step {
+            serde_json::from_value(json!({
+                "type": "liveGrants", "id": "g1", "service": service,
+                "accountId": {"kind": "path", "path": "order_id"},
+                "permissions": permissions,
+            }))
+            .unwrap()
+        };
+        let put = |p: &mut Project, s: Step| {
+            let rpc = p
+                .services
+                .iter_mut()
+                .find(|s| s.name == "Orders")
+                .unwrap()
+                .rpcs
+                .iter_mut()
+                .find(|r| r.name == "CreateOrder")
+                .unwrap();
+            rpc.steps.insert(0, s);
+        };
+        let mut ok = p.clone();
+        put(&mut ok, step("Realtime", json!({"kind": "path", "path": "input.customer_id"})));
+        assert!(!codes(&ok).contains(&"E_LIVE_SERVICE".into()), "{:?}", validate(&ok));
+        let mut bad = p.clone();
+        put(&mut bad, step("Orders", json!(null)));
+        assert!(codes(&bad).contains(&"E_LIVE_SERVICE".into()));
+        let mut gone = p;
+        put(&mut gone, step("Nowhere", json!(null)));
+        assert!(codes(&gone).contains(&"E_LIVE_SERVICE".into()));
     }
 
     /// Changes some fields of a step, by their JSON names (`null` removes one).

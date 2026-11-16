@@ -87,6 +87,19 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                 }
                 assignments(data, &format!("{path}/data"), out);
             }
+            Step::LiveGrants {
+                account_id,
+                tenant_id,
+                permissions,
+                ..
+            } => {
+                expr(account_id, &format!("{path}/accountId"), out);
+                for (name, e) in [("tenantId", tenant_id), ("permissions", permissions)] {
+                    if let Some(e) = e {
+                        expr(e, &format!("{path}/{name}"), out);
+                    }
+                }
+            }
             Step::CallRpc { request, .. } => assignments(request, &format!("{path}/request"), out),
             Step::Respond {
                 fields, cookies, ..

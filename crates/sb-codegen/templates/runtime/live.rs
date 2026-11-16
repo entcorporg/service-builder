@@ -33,6 +33,8 @@ pub struct Event<'a> {
     pub account_ids: Vec<String>,
     /// The tab that made the change: it already has the answer to its write, so it does not get the event.
     pub origin: Option<String>,
+    /// Only for `grants.updated`: the permissions the account now has in the company (`None`: its streams close).
+    pub grants: Option<Vec<String>>,
     /// A few identifiers, never content.
     pub data: Vec<(&'a str, String)>,
 }
@@ -53,6 +55,9 @@ impl Event<'_> {
         }
         if !self.account_ids.is_empty() {
             m.insert("accountIds".into(), json!(self.account_ids));
+        }
+        if let Some(v) = &self.grants {
+            m.insert("permissions".into(), json!(v));
         }
         // The service reads `origin` as a UUID and refuses the whole envelope otherwise: an absent header (empty text) or
         // a client id that is not a UUID leaves it out, and everyone gets the event.
@@ -166,6 +171,23 @@ mod tests {
             let event = Event { kind: "a.b", account_id: Some("a".into()), origin: Some(origin.into()), ..Default::default() };
             assert_eq!(event.message(), json!({"type": "a.b", "accountId": "a", "data": {}}));
         }
+    }
+
+    #[test]
+    fn a_grants_update_carries_the_permissions_and_no_origin() {
+        let event = Event {
+            kind: "grants.updated",
+            account_id: Some("a".into()),
+            tenant_id: Some("t".into()),
+            grants: Some(vec!["contacts.view".into()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            event.message(),
+            json!({"type": "grants.updated", "accountId": "a", "tenantId": "t", "permissions": ["contacts.view"], "data": {}})
+        );
+        let close = Event { kind: "grants.updated", account_id: Some("a".into()), ..Default::default() };
+        assert!(close.message().get("permissions").is_none());
     }
 
     #[test]

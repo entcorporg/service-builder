@@ -1207,7 +1207,7 @@ mod tests {
             "{flat}"
         );
         assert!(
-            flat.contains("live.push(\"live-events\", eda_runtime::live::Event { kind: \"orders.created\", account_id: None, tenant_id: None, permission: Some(\"orders.view\"), account_ids: Vec::new(), origin: None, data: vec![(\"id\", (order_id.clone()).to_string())], });"),
+            flat.contains("live.push(\"live-events\", eda_runtime::live::Event { kind: \"orders.created\", account_id: None, tenant_id: None, permission: Some(\"orders.view\"), account_ids: Vec::new(), origin: None, grants: None, data: vec![(\"id\", (order_id.clone()).to_string())], });"),
             "{flat}"
         );
         let commit = flat.find("tx.commit().await?; live.flush().await;");
@@ -1698,6 +1698,49 @@ mod tests {
         assert!(file(&files, "runtime/src/lib.rs").contains("pub mod flags;"));
         let plain = generate(&sample::orders()).unwrap();
         assert!(!file(&plain, "services/orders/src/app/schema.rs").contains("flags"));
+    }
+
+    #[test]
+    fn a_grants_step_sends_the_control_message_after_the_commit() {
+        let mut p = sample::orders();
+        sample::add_live_events(&mut p);
+        let rpc = p
+            .services
+            .iter_mut()
+            .find(|s| s.name == "Orders")
+            .unwrap()
+            .rpcs
+            .iter_mut()
+            .find(|r| r.name == "CreateOrder")
+            .unwrap();
+        let at = rpc
+            .steps
+            .iter()
+            .position(|s| matches!(s, sb_model::Step::Respond { .. }))
+            .unwrap();
+        rpc.steps.insert(
+            at,
+            serde_json::from_value(serde_json::json!({
+                "type": "liveGrants", "id": "g1", "service": "Realtime",
+                "accountId": {"kind": "path", "path": "order_id"},
+                "tenantId": {"kind": "path", "path": "order_id"},
+            }))
+            .unwrap(),
+        );
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&p)),
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        let files = generate(&p).unwrap();
+        let flat = file(&files, "services/orders/src/flows/rpc.rs")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            flat.contains("kind: \"grants.updated\", account_id: Some((order_id.clone()).to_string()), tenant_id: Some((order_id.clone()).to_string()), grants: None, ..Default::default() });"),
+            "{flat}"
+        );
     }
 
     #[test]

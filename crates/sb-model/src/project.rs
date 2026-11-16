@@ -1033,6 +1033,23 @@ pub enum Step {
         #[serde(default)]
         data: Vec<Assignment>,
     },
+    /// Tells a real-time service that the rights of an account changed (its `grants.updated` control message). With
+    /// `permissions` (a list of `module.view|manage`), the open streams of that account in that company adopt them and
+    /// the browser reads its state again; without, those streams close (the account left the company). Sent once the
+    /// flow has committed, best effort, like `publishLive`.
+    #[serde(rename_all = "camelCase")]
+    LiveGrants {
+        id: String,
+        /// The real-time service whose channel the message goes to.
+        service: String,
+        account_id: Expr,
+        /// The company; without it, the streams that have none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tenant_id: Option<Expr>,
+        /// A list of `module.view|manage` (`Vec<String>`); absent: the streams close.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permissions: Option<Expr>,
+    },
     /// Call an RPC of another service.
     #[serde(rename_all = "camelCase")]
     CallRpc {
@@ -2113,6 +2130,7 @@ impl Step {
             | Step::Let { id, .. }
             | Step::Publish { id, .. }
             | Step::PublishLive { id, .. }
+            | Step::LiveGrants { id, .. }
             | Step::CallRpc { id, .. }
             | Step::Branch { id, .. }
             | Step::Respond { id, .. }

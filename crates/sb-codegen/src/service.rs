@@ -1536,7 +1536,7 @@ fn commit(c: &mut Code, service: &Service) {
 fn uses_live(service: &Service) -> bool {
     let mut used = false;
     for step in service.handler_steps() {
-        step.walk(&mut |s| used |= matches!(s, Step::PublishLive { .. }));
+        step.walk(&mut |s| used |= matches!(s, Step::PublishLive { .. } | Step::LiveGrants { .. }));
     }
     used
 }
@@ -2319,7 +2319,51 @@ fn steps(
                 c.line(format!("    permission: {permission},"));
                 c.line(format!("    account_ids: {ids},"));
                 c.line(format!("    origin: {},", some(origin)?));
+                c.line("    grants: None,");
                 c.line(format!("    data: vec![{}],", entries.join(", ")));
+                c.line("});");
+            }
+            Step::LiveGrants {
+                service: realtime,
+                account_id,
+                tenant_id,
+                permissions,
+                ..
+            } => {
+                let target = project
+                    .service(realtime)
+                    .and_then(|s| s.realtime.as_ref())
+                    .ok_or_else(|| {
+                        CodegenError::Internal(format!("`{realtime}` is not a real-time service"))
+                    })?;
+                let id = TypeRef::scalar(FieldType::Uuid);
+                let account = format!("({}).to_string()", lower(project, scope, account_id, &id)?);
+                let tenant = match tenant_id {
+                    Some(e) => format!("Some(({}).to_string())", lower(project, scope, e, &id)?),
+                    None => "None".to_string(),
+                };
+                let permissions = match permissions {
+                    Some(e) => {
+                        let list = TypeRef {
+                            repeated: true,
+                            ..TypeRef::scalar(FieldType::String)
+                        };
+                        format!(
+                            "Some(({}).iter().map(|p| p.to_string()).collect())",
+                            lower(project, scope, e, &list)?
+                        )
+                    }
+                    None => "None".to_string(),
+                };
+                c.line(format!(
+                    "live.push({:?}, eda_runtime::live::Event {{",
+                    target.channel
+                ));
+                c.line("    kind: \"grants.updated\",");
+                c.line(format!("    account_id: Some({account}),"));
+                c.line(format!("    tenant_id: {tenant},"));
+                c.line(format!("    grants: {permissions},"));
+                c.line("    ..Default::default()");
                 c.line("});");
             }
             Step::CallRpc {
@@ -3832,6 +3876,7 @@ fn describe(step: &Step) -> String {
         Step::Let { name, .. } => format!("let {name}"),
         Step::Publish { topic, .. } => format!("publish to {topic}"),
         Step::PublishLive { event, .. } => format!("push `{event}` to the browsers"),
+        Step::LiveGrants { .. } => "tell the browsers their rights changed".into(),
         Step::CallRpc {
             service, method, ..
         } => format!("call {service}.{method}"),
