@@ -3548,12 +3548,17 @@ impl<'a> Checker<'a> {
                     if for_realtime
                         && matches!(name, "sub" | "tid" | "sid")
                         && let Some(t) = &claim_type
-                        && (t.repeated || !matches!(t.ty, FieldType::Uuid | FieldType::String))
+                        && (t.repeated || t.ty != FieldType::Uuid)
                     {
+                        let hint = if !t.repeated && t.ty == FieldType::String {
+                            ": give its source (column, field) the type uuid, or the stream refuses the token if the text is not one"
+                        } else {
+                            ""
+                        };
                         self.warn(
                             "W_RT_CLAIM_UUID",
                             format!("{cp}/value"),
-                            format!("the real-time service reads `{name}` as a UUID: this claim is a {t}"),
+                            format!("the real-time service reads `{name}` as a UUID: this claim is a {t}{hint}"),
                         );
                     }
                 }
@@ -10124,11 +10129,29 @@ mod tests {
             "{:?}",
             warnings(&p)
         );
-        // With `sid` and text claims: nothing to say.
+        // Text claims: the service parses them as UUIDs and nothing says these are, so say it.
         let p = build(
             "orders",
             &[("sub", "input.order_id"), ("sid", "input.order_id")],
         );
+        let uuid_warnings = warnings(&p)
+            .iter()
+            .filter(|c| *c == "W_RT_CLAIM_UUID")
+            .count();
+        assert_eq!(uuid_warnings, 2, "{:?}", warnings(&p));
+        // With `sub` and `sid` typed uuid: nothing to say.
+        let mut p = build(
+            "orders",
+            &[("sub", "input.order_id"), ("sid", "input.order_id")],
+        );
+        if let Step::SignJwt { claims, .. } = &mut p.services[0].routes[1].steps[0] {
+            for c in claims.iter_mut() {
+                c.value = Expr::Call {
+                    func: Func::NewUuid,
+                    args: vec![],
+                };
+            }
+        }
         assert!(
             !warnings(&p).iter().any(|c| c.starts_with("W_RT_")),
             "{:?}",
