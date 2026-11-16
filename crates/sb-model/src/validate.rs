@@ -2117,27 +2117,7 @@ impl<'a> Checker<'a> {
         let column = |name: &str| t.column(name);
 
         for (i, c) in conditions.iter().enumerate() {
-            let cp = format!("{path}/where/{i}");
-            match env.service.sql_column(table, joins, &c.column) {
-                None => self.error(
-                    "E_UNKNOWN_COLUMN",
-                    format!("{cp}/column"),
-                    Self::unknown_sql_column(table, joins, &c.column),
-                ),
-                Some((ct, col, left)) => {
-                    self.sql_test(scope, c, col, left, &cp);
-                    if ct.name != *table && ct.tenant_column.as_deref() == Some(col.name.as_str()) {
-                        self.error(
-                            "E_TENANT_MANUAL",
-                            format!("{cp}/column"),
-                            format!(
-                                "`{}` is filtered on by the generator for `{}`: leave it out",
-                                col.name, ct.name
-                            ),
-                        );
-                    }
-                }
-            }
+            self.sql_where(env, scope, table, joins, c, &format!("{path}/where/{i}"));
         }
         self.tenant_in_sql(t, scope, path, step);
         if !joins.is_empty() {
@@ -2307,7 +2287,10 @@ impl<'a> Checker<'a> {
         {
             self.tenant_scope(t, scope, path);
             let written = values.iter().any(|a| &a.field == name);
-            let compared = conditions.iter().any(|c| &c.column == name);
+            let compared = conditions
+                .iter()
+                .flat_map(|c| c.all())
+                .any(|c| &c.column == name);
             if written || compared {
                 self.error(
                     "E_TENANT_MANUAL",
@@ -2360,6 +2343,41 @@ impl<'a> Checker<'a> {
             || total_bind.is_some()
             || more_bind.is_some()
             || last_bind.is_some()
+    }
+
+    /// One condition of a `where` and its alternatives (`or`), each checked like a condition of its own.
+    fn sql_where(
+        &mut self,
+        env: &Env,
+        scope: &Scope,
+        table: &str,
+        joins: &[SqlJoin],
+        c: &SqlCondition,
+        cp: &str,
+    ) {
+        match env.service.sql_column(table, joins, &c.column) {
+            None => self.error(
+                "E_UNKNOWN_COLUMN",
+                format!("{cp}/column"),
+                Self::unknown_sql_column(table, joins, &c.column),
+            ),
+            Some((ct, col, left)) => {
+                self.sql_test(scope, c, col, left, cp);
+                if ct.name != *table && ct.tenant_column.as_deref() == Some(col.name.as_str()) {
+                    self.error(
+                        "E_TENANT_MANUAL",
+                        format!("{cp}/column"),
+                        format!(
+                            "`{}` is filtered on by the generator for `{}`: leave it out",
+                            col.name, ct.name
+                        ),
+                    );
+                }
+            }
+        }
+        for (i, alt) in c.or.iter().enumerate() {
+            self.sql_where(env, scope, table, joins, alt, &format!("{cp}/or/{i}"));
+        }
     }
 
     /// A condition of a `where`: its value is typed after the column (or a list of them, or a text), by what is tested.
@@ -10476,6 +10494,7 @@ mod tests {
             let mut p = with_reads();
             if let Step::Sql { conditions, .. } = reads_step(&mut p) {
                 conditions.push(SqlCondition {
+                    or: Vec::new(),
                     column: column.into(),
                     op: CmpOp::Eq,
                     value,

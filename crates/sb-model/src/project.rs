@@ -1907,6 +1907,10 @@ pub struct SqlCondition {
     /// value, or null. The last two ignore `value`.
     #[serde(default, skip_serializing_if = "SqlTest::is_compare")]
     pub test: SqlTest,
+    /// Alternatives: the condition holds when it does, or when any of these does (`(a OR b OR c)`). Each alternative may
+    /// have its own. The conditions of the `where` stay AND-ed together.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub or: Vec<SqlCondition>,
 }
 
 fn default_cmp() -> CmpOp {
@@ -2066,7 +2070,17 @@ impl SqlCondition {
             op,
             value,
             test: SqlTest::Compare,
+            or: Vec::new(),
         }
+    }
+
+    /// This condition and every alternative under it, depth first.
+    pub fn all(&self) -> Vec<&SqlCondition> {
+        let mut out = vec![self];
+        for alt in &self.or {
+            out.extend(alt.all());
+        }
+        out
     }
 
     pub fn sql_op(&self) -> &'static str {

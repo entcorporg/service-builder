@@ -673,6 +673,7 @@ Le bloc **SQL** est un bloc de logique à part entière. Il lit une table du ser
 - **Tests de condition** (`test` sur chaque condition) : `compare` (défaut, avec `op`), `in` (appartient à une liste du flux,
   `= ANY`), `contains` / `startsWith` (colonne texte, insensible à la casse ; les `%` et `_` de la valeur sont du texte, pas des
   jokers), `isNull` / `isNotNull` (sans valeur). `E_SQL_TEST_VALUE`, `W_SQL_NEVER_NULL`.
+  Une condition peut porter `or` : une liste d'alternatives (elles-mêmes conditions, imbriquables) ; elle devient `(a OR b OR c)` au milieu des `AND` du `where`. Chaque alternative est validée comme une condition à part.
 - **Tri sur plusieurs colonnes** : `orderBy` + `descending`, puis `thenBy` (colonne, sens).
 - **Pagination** (une liste, avec `limit`, la plus grande page) : `limitFrom` (taille demandée par le flux, ramenée entre 1 et
   `limit` ; absente, c'est `limit`), `offset` (lignes sautées, plafonné à 1 000 000) **ou** `cursor` (pagination par clé : une valeur

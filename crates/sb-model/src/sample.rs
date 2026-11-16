@@ -380,6 +380,7 @@ pub fn orders() -> Project {
                         many: false,
                         into: None,
                         conditions: vec![SqlCondition {
+                            or: Vec::new(),
                             column: "order_id".into(),
                             op: CmpOp::Eq,
                             value: path("input.order_id"),
@@ -598,24 +599,28 @@ pub fn add_single_use_token(p: &mut Project) {
                 into: None,
                 conditions: vec![
                     SqlCondition {
+                        or: Vec::new(),
                         column: "token_hash".into(),
                         op: CmpOp::Eq,
                         value: path("token_hash"),
                         test: Default::default(),
                     },
                     SqlCondition {
+                        or: Vec::new(),
                         column: "kind".into(),
                         op: CmpOp::Eq,
                         value: lit("email"),
                         test: Default::default(),
                     },
                     SqlCondition {
+                        or: Vec::new(),
                         column: "used".into(),
                         op: CmpOp::Eq,
                         value: lit(false),
                         test: Default::default(),
                     },
                     SqlCondition {
+                        or: Vec::new(),
                         column: "expires_at".into(),
                         op: CmpOp::Gt,
                         value: Expr::Now,
@@ -671,6 +676,7 @@ pub fn add_cleaner_job(p: &mut Project) {
                 many: false,
                 into: None,
                 conditions: vec![SqlCondition {
+                    or: Vec::new(),
                     column: "expires_at".into(),
                     op: CmpOp::Le,
                     value: Expr::Now,
@@ -1294,6 +1300,7 @@ pub fn add_totp(p: &mut Project) {
         into: None,
         conditions: if op == SqlOp::Select {
             vec![SqlCondition {
+                or: Vec::new(),
                 column: "account".into(),
                 op: CmpOp::Eq,
                 value: path("input.account"),
@@ -2447,6 +2454,7 @@ pub fn add_notes(p: &mut Project) {
     };
     let by_id = || {
         vec![SqlCondition {
+            or: Vec::new(),
             column: "note_id".into(),
             op: CmpOp::Eq,
             value: path("input.note_id"),
@@ -2711,6 +2719,7 @@ pub fn add_sql_reads(p: &mut Project) {
             many: true,
             into: Some("PostItem".into()),
             conditions: vec![SqlCondition {
+                or: Vec::new(),
                 column: "title".into(),
                 op: CmpOp::Eq,
                 value: call(Func::Lower, vec![path("input.search")]),
@@ -3159,6 +3168,7 @@ pub fn add_basket_lines(p: &mut Project) {
             many: true,
             into: Some("OrderLine".into()),
             conditions: vec![SqlCondition {
+                or: Vec::new(),
                 column: "order_id".into(),
                 op: CmpOp::Eq,
                 value: path("input.order_id"),

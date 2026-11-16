@@ -3306,6 +3306,82 @@ fn column_type_ref(col: &Column) -> TypeRef {
     t
 }
 
+type SqlColumnOf<'a> =
+    dyn Fn(&str) -> Result<(&'a sb_model::Table, &'a Column, bool), CodegenError> + 'a;
+
+/// One condition of a `WHERE`, with its alternatives: `(a OR b)` when it has some. The values it reads join `binds`.
+fn where_condition<'a>(
+    project: &Project,
+    scope: &Scope,
+    cond: &sb_model::SqlCondition,
+    resolve: &SqlColumnOf<'a>,
+    qual: &dyn Fn(&str, &Column) -> String,
+    binds: &mut Vec<String>,
+) -> Result<String, CodegenError> {
+    let (ct, column, _) = resolve(&cond.column)?;
+    let lhs = qual(&ct.name, column);
+
+    let piece = match cond.test {
+        sb_model::SqlTest::Compare => {
+            let right = if matches!(cond.value, Expr::Now) {
+                "now()".to_string()
+            } else {
+                binds.push(lower(
+                    project,
+                    scope,
+                    &cond.value,
+                    &column_type_ref(column),
+                )?);
+                placeholder(binds.len(), column)
+            };
+            Some(format!("{lhs} {} {right}", cond.sql_op()))
+        }
+        sb_model::SqlTest::In => {
+            let list = TypeRef {
+                repeated: true,
+                ..TypeRef::scalar(column.ty.field_type())
+            };
+            binds.push(lower(project, scope, &cond.value, &list)?);
+            let cast = if column.ty.is_text_cast() {
+                format!("::{}[]", column.ty.sql().to_lowercase())
+            } else {
+                String::new()
+            };
+            Some(format!("{lhs} = ANY(${}{cast})", binds.len()))
+        }
+        sb_model::SqlTest::Contains | sb_model::SqlTest::StartsWith => {
+            let text = lower(
+                project,
+                scope,
+                &cond.value,
+                &TypeRef::scalar(sb_model::FieldType::String),
+            )?;
+            // `%` and `_` of the value are text, not wildcards: the escape character is the backslash.
+            let escaped = format!(
+                r#"({text}).replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")"#
+            );
+            binds.push(if cond.test == sb_model::SqlTest::Contains {
+                format!(r#"format!("%{{}}%", {escaped})"#)
+            } else {
+                format!(r#"format!("{{}}%", {escaped})"#)
+            });
+            Some(format!("{lhs} ILIKE ${} ESCAPE '\\'", binds.len()))
+        }
+        sb_model::SqlTest::IsNull => Some(format!("{lhs} IS NULL")),
+        sb_model::SqlTest::IsNotNull => Some(format!("{lhs} IS NOT NULL")),
+    };
+
+    let mut parts = vec![piece.expect("every test gives a piece")];
+    for alt in &cond.or {
+        parts.push(where_condition(project, scope, alt, resolve, qual, binds)?);
+    }
+    Ok(if parts.len() == 1 {
+        parts.remove(0)
+    } else {
+        format!("({})", parts.join(" OR "))
+    })
+}
+
 /// The placeholder of the n-th parameter, cast back to the database type of a text-cast column.
 fn placeholder(n: usize, col: &Column) -> String {
     if col.ty.is_text_cast() {
@@ -3531,57 +3607,9 @@ fn sql_step(
     }
     let mut where_sql = Vec::new();
     for cond in conditions {
-        let (ct, column, _) = resolve(&cond.column)?;
-        let lhs = qual(&ct.name, column);
-        match cond.test {
-            sb_model::SqlTest::Compare => {
-                let right = if matches!(cond.value, Expr::Now) {
-                    "now()".to_string()
-                } else {
-                    binds.push(lower(
-                        project,
-                        scope,
-                        &cond.value,
-                        &column_type_ref(column),
-                    )?);
-                    placeholder(binds.len(), column)
-                };
-                where_sql.push(format!("{lhs} {} {right}", cond.sql_op()));
-            }
-            sb_model::SqlTest::In => {
-                let list = TypeRef {
-                    repeated: true,
-                    ..TypeRef::scalar(column.ty.field_type())
-                };
-                binds.push(lower(project, scope, &cond.value, &list)?);
-                let cast = if column.ty.is_text_cast() {
-                    format!("::{}[]", column.ty.sql().to_lowercase())
-                } else {
-                    String::new()
-                };
-                where_sql.push(format!("{lhs} = ANY(${}{cast})", binds.len()));
-            }
-            sb_model::SqlTest::Contains | sb_model::SqlTest::StartsWith => {
-                let text = lower(
-                    project,
-                    scope,
-                    &cond.value,
-                    &TypeRef::scalar(sb_model::FieldType::String),
-                )?;
-                // `%` and `_` of the value are text, not wildcards: the escape character is the backslash.
-                let escaped = format!(
-                    r#"({text}).replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")"#
-                );
-                binds.push(if cond.test == sb_model::SqlTest::Contains {
-                    format!(r#"format!("%{{}}%", {escaped})"#)
-                } else {
-                    format!(r#"format!("{{}}%", {escaped})"#)
-                });
-                where_sql.push(format!("{lhs} ILIKE ${} ESCAPE '\\'", binds.len()));
-            }
-            sb_model::SqlTest::IsNull => where_sql.push(format!("{lhs} IS NULL")),
-            sb_model::SqlTest::IsNotNull => where_sql.push(format!("{lhs} IS NOT NULL")),
-        }
+        where_sql.push(where_condition(
+            project, scope, cond, &resolve, &qual, &mut binds,
+        )?);
     }
     if live_only {
         where_sql.push(format!(

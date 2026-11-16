@@ -2740,6 +2740,7 @@ mod tests {
                 path: "input.page_size".into(),
             });
             conditions.push(SqlCondition {
+                or: Vec::new(),
                 column: "authors.name".into(),
                 op: sb_model::CmpOp::Eq,
                 value: Expr::Literal {
@@ -2748,6 +2749,7 @@ mod tests {
                 test: SqlTest::IsNotNull,
             });
             conditions.push(SqlCondition {
+                or: Vec::new(),
                 column: "post_id".into(),
                 op: sb_model::CmpOp::Eq,
                 value: Expr::Path {
@@ -2755,12 +2757,34 @@ mod tests {
                 },
                 test: SqlTest::StartsWith,
             });
+            // `(authors.name IS NULL OR post_id ILIKE ..)`: an alternative sits in parentheses inside the AND.
+            conditions.push(SqlCondition {
+                or: vec![SqlCondition::new(
+                    "post_id",
+                    sb_model::CmpOp::Eq,
+                    Expr::Path {
+                        path: "input.search".into(),
+                    },
+                )],
+                column: "authors.name".into(),
+                op: sb_model::CmpOp::Eq,
+                value: Expr::Literal {
+                    value: serde_json::Value::Null,
+                },
+                test: SqlTest::IsNull,
+            });
         }
         let flat = flat_of(&p);
         assert!(
+            flat.contains(
+                "(\\\"authors\\\".\\\"name\\\" IS NULL OR \\\"posts\\\".\\\"post_id\\\" = $"
+            ),
+            "{flat}"
+        );
+        assert!(
             flat.contains("\\\"authors\\\".\\\"name\\\" IS NOT NULL")
                 && flat.contains("\\\"posts\\\".\\\"post_id\\\" ILIKE $")
-                && flat.contains("LIMIT $5 OFFSET $6")
+                && flat.contains("LIMIT $6 OFFSET $7")
                 && flat.contains("clamp(0, 1_000_000_i64)"),
             "{flat}"
         );
