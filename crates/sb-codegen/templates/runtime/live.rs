@@ -54,7 +54,9 @@ impl Event<'_> {
         if !self.account_ids.is_empty() {
             m.insert("accountIds".into(), json!(self.account_ids));
         }
-        if let Some(v) = &self.origin {
+        // The service reads `origin` as a UUID and refuses the whole envelope otherwise: an absent header (empty text) or
+        // a client id that is not a UUID leaves it out, and everyone gets the event.
+        if let Some(v) = self.origin.as_deref().filter(|v| v.parse::<uuid::Uuid>().is_ok()) {
             m.insert("origin".into(), json!(v));
         }
         let data: Map<String, Value> = self.data.iter().map(|(k, v)| ((*k).to_string(), json!(v))).collect();
@@ -148,14 +150,22 @@ mod tests {
             kind: "contact.updated",
             tenant_id: Some("t".into()),
             permission: Some("contacts.view"),
-            origin: Some("o".into()),
+            origin: Some("3f2b8c1e-5a4d-4e6f-9a7b-1c2d3e4f5a6b".into()),
             data: vec![("id", "42".into())],
             ..Default::default()
         };
         assert_eq!(
             event.message(),
-            json!({"type": "contact.updated", "tenantId": "t", "permission": "contacts.view", "origin": "o", "data": {"id": "42"}})
+            json!({"type": "contact.updated", "tenantId": "t", "permission": "contacts.view", "origin": "3f2b8c1e-5a4d-4e6f-9a7b-1c2d3e4f5a6b", "data": {"id": "42"}})
         );
+    }
+
+    #[test]
+    fn an_origin_that_is_not_a_uuid_is_left_out() {
+        for origin in ["", "not-a-uuid"] {
+            let event = Event { kind: "a.b", account_id: Some("a".into()), origin: Some(origin.into()), ..Default::default() };
+            assert_eq!(event.message(), json!({"type": "a.b", "accountId": "a", "data": {}}));
+        }
     }
 
     #[test]
