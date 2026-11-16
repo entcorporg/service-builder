@@ -2702,6 +2702,33 @@ mod tests {
     }
 
     #[test]
+    fn a_uuid_path_parameter_is_refused_with_a_400_when_malformed() {
+        let mut p = sample::orders();
+        p.services[0].routes[1].path = "/orders/{order_id}".into();
+        let get = p
+            .messages
+            .iter_mut()
+            .find(|m| m.name == "GetOrderRequest")
+            .unwrap();
+        assert!(get.fields[0].name == "order_id");
+        get.fields[0].ty = sb_model::FieldType::Uuid;
+        let files = generate(&p).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        assert!(http.contains("input.order_id = uuid_param(&path, \"order_id\")?;"));
+        assert!(http.contains("fn uuid_param("));
+        // A plain string keeps the plain reader and no uuid helper.
+        let get = p
+            .messages
+            .iter_mut()
+            .find(|m| m.name == "GetOrderRequest")
+            .unwrap();
+        get.fields[0].ty = sb_model::FieldType::String;
+        let files = generate(&p).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        assert!(!http.contains("uuid_param"));
+    }
+
+    #[test]
     fn writes_files_to_disk() {
         let dir = std::env::temp_dir().join(format!("sb-codegen-test-{}", std::process::id()));
         let files = generate(&sample::orders()).unwrap();

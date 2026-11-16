@@ -1347,7 +1347,16 @@ fn http_rs(project: &Project, service: &Service) -> String {
             }
         }
         for param in &params {
-            c.line(format!("input.{param} = param(&path, {param:?})?;"));
+            let is_uuid = project
+                .message(&r.request)
+                .and_then(|m| m.field(param))
+                .is_some_and(|f| f.ty == FieldType::Uuid);
+            if is_uuid {
+                // A malformed uuid is the client's mistake (400), not a database error (500).
+                c.line(format!("input.{param} = uuid_param(&path, {param:?})?;"));
+            } else {
+                c.line(format!("input.{param} = param(&path, {param:?})?;"));
+            }
         }
         for (field, source) in &sourced {
             // Always overwritten, so that nothing a client puts in the body or the query stands for a header.
@@ -1425,6 +1434,26 @@ fn http_rs(project: &Project, service: &Service) -> String {
         c.line("    .and_then(|value| value.parse().ok())");
         c.line("    .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, format!(\"invalid path parameter `{name}`\")))");
         c.close();
+        let any_uuid = service.routes.iter().any(|r| {
+            route_params(&r.path).unwrap_or_default().iter().any(|p| {
+                project
+                    .message(&r.request)
+                    .and_then(|m| m.field(p))
+                    .is_some_and(|f| f.ty == FieldType::Uuid)
+            })
+        });
+        if any_uuid {
+            c.blank();
+            c.line("/// Reads a path parameter that must be a UUID (8-4-4-4-12 hex digits).");
+            c.open("fn uuid_param(path: &HashMap<String, String>, name: &str) -> Result<String, ApiError>");
+            c.line("let value = path.get(name).map(String::as_str).unwrap_or_default();");
+            c.line("let groups: Vec<&str> = value.split('-').collect();");
+            c.line("let shape = [8, 4, 4, 4, 12];");
+            c.line("let ok = groups.len() == 5");
+            c.line("    && groups.iter().zip(shape).all(|(g, n)| g.len() == n && g.bytes().all(|b| b.is_ascii_hexdigit()));");
+            c.line("if ok { Ok(value.to_ascii_lowercase()) } else { Err(ApiError::new(StatusCode::BAD_REQUEST, format!(\"invalid path parameter `{name}`: not a uuid\"))) }");
+            c.close();
+        }
     }
 
     let needs_invalid = service.routes.iter().any(|r| {

@@ -1185,6 +1185,7 @@ impl<'a> Checker<'a> {
                             || !matches!(
                                 f.ty,
                                 FieldType::String
+                                    | FieldType::Uuid
                                     | FieldType::Bool
                                     | FieldType::Int32
                                     | FieldType::Int64
@@ -1194,7 +1195,7 @@ impl<'a> Checker<'a> {
                             "E_ROUTE_PARAM",
                             format!("{rp}/path"),
                             format!(
-                                "field `{param}` of `{}` fills `{{{param}}}`: it must be a required string, bool, int32 or int64",
+                                "field `{param}` of `{}` fills `{{{param}}}`: it must be a required string, uuid, bool, int32 or int64",
                                 r.request
                             ),
                         );
