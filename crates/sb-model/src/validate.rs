@@ -3317,6 +3317,27 @@ impl<'a> Checker<'a> {
                         "a token lives 1 second to 30 days (2592000)",
                     );
                 }
+                let for_realtime = self.project.services.iter().any(|s| {
+                    s.kind == ServiceKind::Realtime
+                        && s.realtime.as_ref().is_some_and(|r| r.issuer == *issuer)
+                });
+                if !for_realtime
+                    && claims.iter().any(|c| c.field == "sid")
+                    && let Some(r) = self.project.services.iter().find_map(|s| {
+                        s.realtime
+                            .as_ref()
+                            .filter(|_| s.kind == ServiceKind::Realtime)
+                    })
+                {
+                    self.warn(
+                        "W_RT_ISSUER",
+                        format!("{path}/issuer"),
+                        format!(
+                            "this token carries a session id (`sid`) but its issuer is `{issuer}`: the real-time service only accepts `{}` and answers 401",
+                            r.issuer
+                        ),
+                    );
+                }
                 let mut seen = HashSet::new();
                 for (i, claim) in claims.iter().enumerate() {
                     let cp = format!("{path}/claims/{i}");
@@ -3347,8 +3368,9 @@ impl<'a> Checker<'a> {
                         );
                     }
                     // A claim is JSON: text, number, boolean, or a list or an optional of those.
-                    if let Some(t) =
-                        self.check_expr(scope, &claim.value, None, &format!("{cp}/value"))
+                    let claim_type =
+                        self.check_expr(scope, &claim.value, None, &format!("{cp}/value"));
+                    if let Some(t) = &claim_type
                         && (t.is_message()
                             || matches!(t.ty, FieldType::Bytes | FieldType::Timestamp))
                     {
@@ -3358,6 +3380,20 @@ impl<'a> Checker<'a> {
                             format!("claim `{name}` is a {t}: a claim is a text, a number, a boolean, or a list of those"),
                         );
                     }
+                    if for_realtime
+                        && matches!(name, "sub" | "tid" | "sid")
+                        && let Some(t) = &claim_type
+                        && (t.repeated || !matches!(t.ty, FieldType::Uuid | FieldType::String))
+                    {
+                        self.warn(
+                            "W_RT_CLAIM_UUID",
+                            format!("{cp}/value"),
+                            format!("the real-time service reads `{name}` as a UUID: this claim is a {t}"),
+                        );
+                    }
+                }
+                if for_realtime {
+                    self.realtime_claims(path, claims.iter().map(|c| c.field.as_str()));
                 }
                 if !seen.contains("sub") {
                     self.error(
@@ -4521,6 +4557,18 @@ impl<'a> Checker<'a> {
                 "E_KEY_ENV",
                 path,
                 format!("`{name}` is not an environment variable name (e.g. `JWT_SIGNING_KEY`)"),
+            );
+        }
+    }
+
+    /// A token the real-time service accepts names its session (`sid`); a missing `sid` is a 401 at runtime, so say it here.
+    fn realtime_claims<'n>(&mut self, path: &str, names: impl Iterator<Item = &'n str>) {
+        let names: Vec<&str> = names.collect();
+        if !names.contains(&"sid") {
+            self.warn(
+                "W_RT_NO_SID",
+                format!("{path}/claims"),
+                "this token is for the real-time service (same issuer): add a `sid` claim, the session id it looks up, or the stream answers 401",
             );
         }
     }
@@ -9768,6 +9816,76 @@ mod tests {
             errors(&p).contains(&"E_TYPE_MISMATCH".to_string()),
             "{:?}",
             errors(&p)
+        );
+    }
+
+    #[test]
+    fn a_token_for_the_realtime_service_is_checked_against_its_contract() {
+        fn sign(issuer: &str, claims: &[(&str, &str)]) -> Step {
+            Step::SignJwt {
+                id: "j".into(),
+                key_env: "JWT_SIGNING_KEY".into(),
+                issuer: issuer.into(),
+                ttl_secs: 300,
+                claims: claims
+                    .iter()
+                    .map(|(f, v)| Assignment {
+                        field: (*f).into(),
+                        value: Expr::Path { path: (*v).into() },
+                    })
+                    .collect(),
+                bind: "token".into(),
+            }
+        }
+        let warnings = |p: &Project| -> Vec<String> {
+            validate(p)
+                .into_iter()
+                .filter(|d| d.severity == Severity::Warning)
+                .map(|d| d.code)
+                .collect()
+        };
+        let build = |issuer: &str, claims: &[(&str, &str)]| {
+            let mut p = with_jwt();
+            sample::add_realtime(&mut p);
+            realtime(&mut p).realtime.as_mut().unwrap().issuer = "orders".into();
+            p.services[0].routes[1]
+                .steps
+                .insert(0, sign(issuer, claims));
+            p
+        };
+        // Same issuer, no `sid`: the stream would answer 401.
+        let p = build("orders", &[("sub", "input.order_id")]);
+        assert!(
+            warnings(&p).contains(&"W_RT_NO_SID".to_string()),
+            "{:?}",
+            warnings(&p)
+        );
+        // With `sid` and text claims: nothing to say.
+        let p = build(
+            "orders",
+            &[("sub", "input.order_id"), ("sid", "input.order_id")],
+        );
+        assert!(
+            !warnings(&p).iter().any(|c| c.starts_with("W_RT_")),
+            "{:?}",
+            warnings(&p)
+        );
+        // A token for another issuer that names a session: the issuer would not match.
+        let p = build(
+            "other",
+            &[("sub", "input.order_id"), ("sid", "input.order_id")],
+        );
+        assert!(
+            warnings(&p).contains(&"W_RT_ISSUER".to_string()),
+            "{:?}",
+            warnings(&p)
+        );
+        // Another issuer without `sid`: it is not meant for the stream.
+        let p = build("other", &[("sub", "input.order_id")]);
+        assert!(
+            !warnings(&p).iter().any(|c| c.starts_with("W_RT_")),
+            "{:?}",
+            warnings(&p)
         );
     }
 
