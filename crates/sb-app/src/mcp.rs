@@ -68,7 +68,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "patch_project",
-        description: "Edits the project with RFC 6902 operations (add, replace, remove; JSON pointers like /services/0/routes/-) plus insert_before and insert_after, and with items addressed by name or id (/services/name=Orders/consumers/name=on_paid/steps/id=h2) rather than by index, validates the result once and saves it. Put every edit of a step in one call: nothing is written if an operation fails or the result is not a project. Returns the totals and only the diagnostics this edit introduced or fixed (`validate` lists them all).",
+        description: "Edits the project with RFC 6902 operations (add, replace, remove; JSON pointers like /services/0/routes/-) plus insert_before and insert_after, and with items addressed by name or id (/services/name=Orders/consumers/name=on_paid/steps/id=h2) rather than by index, validates the result once and saves it. Operations (or one operation's `value`) can be read from a JSON file the server can see (`operations_path`, `value_path`), so a script can prepare a large change. Put every edit of a step in one call: nothing is written if an operation fails or the result is not a project. Returns the totals and only the diagnostics this edit introduced or fixed (`validate` lists them all).",
         properties: || {
             json!({ "operations": {
                 "type": "array",
@@ -78,19 +78,26 @@ const TOOLS: &[ToolDef] = &[
                     "properties": {
                         "op": { "type": "string", "enum": ["add", "replace", "remove", "insert_before", "insert_after"], "description": "insert_before and insert_after put `value` next to the array item `path` designates." },
                         "path": { "type": "string", "description": "JSON pointer. In an array a segment may be an index or key=value, which selects the item whose key equals value: /services/name=Orders/rpcs/name=CreateOrder/steps/id=h2. Prefer names and ids: indexes shift when something is inserted." },
-                        "value": { "description": "New value for add and replace." }
+                        "value": { "description": "New value for add and replace." },
+                        "value_path": { "type": "string", "description": "Instead of `value`: path of a JSON file holding the value." }
                     },
                     "required": ["op", "path"]
                 }
-            }})
+            },
+            "operations_path": { "type": "string", "description": "Instead of `operations`: path of a JSON file holding the array of operations." }})
         },
-        required: &["operations"],
+        required: &[],
     },
     ToolDef {
         name: "set_project",
-        description: "Replaces the whole project with the given JSON, validates it and saves it. Prefer patch_project for small edits. Reports like patch_project.",
-        properties: || json!({ "project": { "type": "object", "description": "A complete project." } }),
-        required: &["project"],
+        description: "Replaces the whole project with the given JSON, validates it and saves it. Prefer patch_project for small edits. Reports like patch_project. The project can be read from a JSON file with `path`.",
+        properties: || {
+            json!({
+                "project": { "type": "object", "description": "A complete project." },
+                "path": { "type": "string", "description": "Instead of `project`: path of a JSON file holding the project." }
+            })
+        },
+        required: &[],
     },
     ToolDef {
         name: "validate",
@@ -247,6 +254,11 @@ pub fn handle(project: &Path, message: &Value) -> Option<Value> {
     Some(reply)
 }
 
+fn read_json_file(path: &str) -> Result<Value, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    serde_json::from_str(&text).map_err(|e| format!("{path} is not valid JSON: {e}"))
+}
+
 fn call_tool(project: &Path, name: &str, args: &Value) -> Result<String, String> {
     match name {
         "describe_project" => Ok(pretty(&outline(&load_project(project)?))),
@@ -254,24 +266,38 @@ fn call_tool(project: &Path, name: &str, args: &Value) -> Result<String, String>
         "get_schema" => schema_tool(args.get("definition").and_then(Value::as_str)),
         "get_example_project" => Ok(pretty(&sb_model::sample::showcase())),
         "patch_project" => {
-            let operations = args
-                .get("operations")
+            let from_file = match args.get("operations_path").and_then(Value::as_str) {
+                Some(path) => Some(read_json_file(path)?),
+                None => None,
+            };
+            let operations = from_file
+                .as_ref()
+                .or_else(|| args.get("operations"))
                 .and_then(Value::as_array)
-                .ok_or("`operations` must be an array")?;
+                .ok_or("`operations` (or `operations_path`) must give an array")?;
             // Nothing is saved before every operation went through, so a failure leaves the file as it was.
             let mut document =
                 serde_json::to_value(load_project(project)?).map_err(|e| e.to_string())?;
             for (i, operation) in operations.iter().enumerate() {
-                apply_operation(&mut document, operation)
+                let mut operation = operation.clone();
+                if let Some(path) = operation.get("value_path").and_then(Value::as_str) {
+                    let value = read_json_file(path).map_err(|e| format!("operation {i}: {e}"))?;
+                    operation["value"] = value;
+                }
+                apply_operation(&mut document, &operation)
                     .map_err(|e| format!("operation {i}: {e}"))?;
             }
             store(project, document)
         }
         "set_project" => store(
             project,
-            args.get("project")
-                .cloned()
-                .ok_or("`project` is required")?,
+            match args.get("path").and_then(Value::as_str) {
+                Some(path) => read_json_file(path)?,
+                None => args
+                    .get("project")
+                    .cloned()
+                    .ok_or("`project` (or `path`) is required")?,
+            },
         ),
         "validate" => Ok(report(&sb_codegen::diagnose(&load_project(project)?))),
         "list_generated_files" => {
@@ -1400,6 +1426,39 @@ mod tests {
             doc,
             json!({ "routes": [{ "path": "/orders/{id}", "status": 202 }] })
         );
+    }
+
+    #[test]
+    fn project_and_operations_can_come_from_files() {
+        let f = Fixture::new("fromfile");
+        let dir = f.file.parent().unwrap().to_path_buf();
+        let whole = dir.join("whole.json");
+        std::fs::write(
+            &whole,
+            serde_json::to_string(&Project::new("DuFichier")).unwrap(),
+        )
+        .unwrap();
+        let (text, err) = f.call("set_project", json!({ "path": whole.to_str().unwrap() }));
+        assert!(!err, "{text}");
+        assert_eq!(load_project(&f.file).unwrap().name, "DuFichier");
+
+        let ops = dir.join("ops.json");
+        std::fs::write(
+            &ops,
+            r#"[{"op":"replace","path":"/name","value_path":"NAME"}]"#
+                .replace("NAME", dir.join("name.json").to_str().unwrap()),
+        )
+        .unwrap();
+        std::fs::write(dir.join("name.json"), r#""Renomme""#).unwrap();
+        let (text, err) = f.call(
+            "patch_project",
+            json!({ "operations_path": ops.to_str().unwrap() }),
+        );
+        assert!(!err, "{text}");
+        assert_eq!(load_project(&f.file).unwrap().name, "Renomme");
+
+        let (_, err) = f.call("set_project", json!({ "path": "/nonexistent/x.json" }));
+        assert!(err);
     }
 
     #[test]
