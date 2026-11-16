@@ -238,6 +238,16 @@ mod tests {
     }
 
     #[test]
+    fn an_include_is_generated_as_the_steps_of_its_fragment() {
+        let files = generate(&sb_model::sample::showcase()).unwrap();
+        let all: String = files.iter().map(|f| f.content.as_str()).collect();
+        assert_eq!(all.matches("a task of the service starts").count(), 1);
+        assert!(
+            all.contains("// include start_note") || all.contains("a task of the service starts")
+        );
+    }
+
+    #[test]
     fn a_loop_runs_its_steps_in_the_transaction_of_the_handler() {
         let files = generate(&sb_model::sample::showcase()).unwrap();
         let api = files
@@ -2871,7 +2881,8 @@ mod tests {
             .iter_mut()
             .find(|r| r.name == "list_posts")
             .unwrap();
-        let mut count = route.steps[3].clone();
+        let sql_at = route.steps.iter().position(|s| matches!(s, Step::Sql { .. })).unwrap();
+        let mut count = route.steps[sql_at].clone();
         if let Step::Sql {
             id,
             op,
@@ -2909,7 +2920,7 @@ mod tests {
         } else {
             panic!("a SQL step was expected");
         }
-        route.steps.insert(3, count);
+        route.steps.insert(sql_at + 1, count);
         let diags = sb_model::validate(&p);
         assert!(!sb_model::has_errors(&diags), "{diags:?}");
         let files = generate(&p).unwrap();
@@ -2934,7 +2945,7 @@ mod tests {
             .iter_mut()
             .find(|r| r.name == "list_posts")
             .unwrap()
-            .steps[3]
+            .steps[sql_at + 1]
         {
             *columns = vec!["post_id".into()];
         }

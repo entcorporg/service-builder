@@ -42,7 +42,8 @@ pub fn has_errors(diagnostics: &[Diagnostic]) -> bool {
 
 pub fn validate(project: &Project) -> Vec<Diagnostic> {
     // The rows read by SQL steps are typed like messages (appended: indexes do not move).
-    let typed = project.with_sql_rows();
+    let expanded = project.with_fragments();
+    let typed = expanded.with_sql_rows();
     let mut c = Checker {
         project: &typed,
         out: Vec::new(),
@@ -56,7 +57,18 @@ pub fn validate(project: &Project) -> Vec<Diagnostic> {
     c.graph_warnings();
     c.pods();
     c.openapi();
-    c.out
+    // The steps of an include are checked where it plays them: what is wrong in one is shown on the `include`.
+    let mut out: Vec<Diagnostic> = c
+        .out
+        .into_iter()
+        .map(|mut d| {
+            d.path = crate::fragments::original_path(&expanded, &d.path);
+            d
+        })
+        .collect();
+    out.dedup();
+    out.extend(crate::fragments::diagnostics(project));
+    out
 }
 
 struct Checker<'a> {
@@ -4474,6 +4486,8 @@ impl<'a> Checker<'a> {
                 self.http_call(scope, path, step);
                 false
             }
+            // Played before the check: what the fragment holds is checked where it is included.
+            Step::Include { .. } => false,
             Step::Code { code, .. } => {
                 if code.trim().is_empty() {
                     self.warn("W_EMPTY_CODE", format!("{path}/code"), "empty Rust block");

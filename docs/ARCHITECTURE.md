@@ -51,7 +51,7 @@ vérité : le canvas, l'inspecteur et le code généré en sont des vues.
   Un producteur sans étape *Publier* donne un avertissement. Les projets enregistrés avant (`schemaVersion` 1) sont
   migrés à l'ouverture : tout service qui publiait sur un topic en devient producteur.
 - **Services** : des RPC (gRPC), des routes HTTP, des consumers (Kafka) et des tâches planifiées. Chacun contient une **liste d'étapes**.
-- **Étapes** : `log`, `let`, `publish`, `publishLive`, `liveGrants`, `sessionTrace`, `sessionRevoke`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `requirePermission` (403 si la liste de permissions du jeton ne contient pas la permission), `rateLimit`, `checkQuota`, `verifyChallenge`, `passwordStrength`, `apiKeyVerify`, `apiKeyRevoke` et `verifyHmac` (routes HTTP), `meter`, `nextNumber`, `audit`, `auditRead`, `flag`, `apiKeyCreate`, `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
+- **Étapes** : `log`, `let`, `publish`, `publishLive`, `liveGrants`, `sessionTrace`, `sessionRevoke`, `callRpc`, `include` (rejoue un fragment du service), `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `requirePermission` (403 si la liste de permissions du jeton ne contient pas la permission), `rateLimit`, `checkQuota`, `verifyChallenge`, `passwordStrength`, `apiKeyVerify`, `apiKeyRevoke` et `verifyHmac` (routes HTTP), `meter`, `nextNumber`, `audit`, `auditRead`, `flag`, `apiKeyCreate`, `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
   Une liste d'étapes est un arbre (pas un graphe arbitraire) : cela se génère en Rust structuré et s'édite comme
   une pile de blocs, comme dans un page builder.
 
@@ -144,6 +144,7 @@ flowchart LR
   N -. "gRPC CancelOrder" .-> O
 ```
 
+- **Fragments** : un service peut porter `"fragments":[{"name":"garde","steps":[...]}]` ; `{"type":"include","id":"g1","fragment":"garde"}` joue ces étapes sur place (ce qu'elles lient reste visible après). Le validateur et le générateur travaillent sur une copie dépliée (les étapes d'un fragment prennent l'id `<include>__<étape>`) ; une erreur dans un fragment s'affiche sur l'`include`. Un fragment peut en inclure un autre, jamais lui-même. Limite : un fragment jamais inclus n'est pas vérifié.
 - **Contrats** : un seul `.proto` (package = nom du projet). `protox` le compile en Rust pur, donc **pas de `protoc`**
   à installer. Les noms de topics deviennent des constantes (`topics::ORDERS_CREATED`).
 - **Runtime** (`crates/sb-codegen/templates/runtime`) : écrit tel quel dans chaque export. Il contient tout ce qui

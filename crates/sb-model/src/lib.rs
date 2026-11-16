@@ -3,6 +3,7 @@
 //! A [`Project`] is what the visual editor edits and what `sb-codegen` turns into a
 //! Cargo workspace of event-driven Rust services (gRPC for RPC, Kafka for events).
 
+pub mod fragments;
 pub mod maildesign;
 pub mod names;
 pub mod pods;

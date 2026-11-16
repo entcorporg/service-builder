@@ -29,6 +29,13 @@ pub fn check(project: &Project) -> Vec<Diagnostic> {
                 &mut out,
             );
         }
+        for (fi, f) in s.fragments.iter().enumerate() {
+            steps(
+                &format!("/services/{si}/fragments/{fi}/steps"),
+                &f.steps,
+                &mut out,
+            );
+        }
     }
     out
 }
@@ -64,7 +71,7 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
     for (i, step) in list.iter().enumerate() {
         let path = format!("{base}/{i}");
         match step {
-            Step::Log { .. } => {}
+            Step::Log { .. } | Step::Include { .. } => {}
             Step::Let { value, .. } | Step::Assign { value, .. } => {
                 expr(value, &format!("{path}/value"), out)
             }

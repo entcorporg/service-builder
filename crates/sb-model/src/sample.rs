@@ -204,6 +204,7 @@ pub fn orders() -> Project {
         realtime: None,
         challenge: None,
         compression: false,
+        fragments: Vec::new(),
         rpcs: vec![
             Rpc {
                 name: "CreateOrder".into(),
@@ -441,6 +442,7 @@ pub fn orders() -> Project {
         realtime: None,
         challenge: None,
         compression: false,
+        fragments: Vec::new(),
         rpcs: vec![],
         http_port: None,
         routes: vec![],
@@ -501,6 +503,7 @@ pub fn orders() -> Project {
         realtime: None,
         challenge: None,
         compression: false,
+        fragments: Vec::new(),
         rpcs: vec![],
         http_port: None,
         routes: vec![],
@@ -709,6 +712,29 @@ pub fn add_cleaner_job(p: &mut Project) {
             },
         ],
     });
+}
+
+/// Gives the first service a fragment, `start_note`, and plays it at the start of the job of [`add_cleaner_job`]: the
+/// steps written once that the handlers of the service share.
+pub fn add_fragments(p: &mut Project) {
+    let svc = &mut p.services[0];
+    svc.fragments.push(Fragment {
+        name: "start_note".into(),
+        steps: vec![Step::Log {
+            id: "n1".into(),
+            level: LogLevel::Debug,
+            message: "a task of the service starts".into(),
+        }],
+    });
+    if let Some(job) = svc.jobs.iter_mut().find(|j| j.name == "cleaner") {
+        job.steps.insert(
+            0,
+            Step::Include {
+                id: "c0".into(),
+                fragment: "start_note".into(),
+            },
+        );
+    }
 }
 
 /// Adds to the first service a webhook signed like Stripe's: no session, authenticated by the HMAC of the
@@ -983,6 +1009,7 @@ pub fn showcase() -> Project {
     add_http_calls(&mut p);
     // The JSON of the API goes out compressed to the clients that accept it.
     p.services[0].compression = true;
+    add_fragments(&mut p);
     p
 }
 
@@ -2896,6 +2923,7 @@ pub fn add_mailer(p: &mut Project) {
         realtime: None,
         challenge: None,
         compression: false,
+        fragments: Vec::new(),
     });
 }
 
@@ -2959,6 +2987,7 @@ pub fn add_realtime(p: &mut Project) {
         realtime: Some(RealtimeConfig::default()),
         challenge: None,
         compression: false,
+        fragments: Vec::new(),
     });
 }
 

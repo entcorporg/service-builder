@@ -413,6 +413,19 @@ pub struct Service {
     /// compressed). `Vary: Accept-Encoding` tells the caches. A service with no route has nothing to compress.
     #[serde(default, skip_serializing_if = "is_false")]
     pub compression: bool,
+    /// Named sequences of steps, written once and played by an `include` step in any handler of the service.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fragments: Vec<Fragment>,
+}
+
+/// A named sequence of steps shared by the handlers of a service (verify the token, require a tenant, build the event
+/// envelope...). An `include` step stands for exactly these steps, in place: what they bind is visible after it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Fragment {
+    /// Lower case letters, digits and `_`, starting with a letter; unique in the service.
+    pub name: String,
+    #[serde(default)]
+    pub steps: Vec<Step>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1843,6 +1856,10 @@ pub enum Step {
         #[serde(default)]
         steps: Vec<Step>,
     },
+    /// Plays the steps of a fragment of the service, in place. The variables they bind stay visible after it. A fragment
+    /// can include another one (not itself, directly or not).
+    #[serde(rename_all = "camelCase")]
+    Include { id: String, fragment: String },
     /// Escape hatch: raw Rust statements inserted verbatim.
     #[serde(rename_all = "camelCase")]
     Code { id: String, code: String },
@@ -2277,6 +2294,7 @@ impl Step {
             | Step::ApiKeyRevoke { id, .. }
             | Step::Sha256 { id, .. }
             | Step::ForEach { id, .. }
+            | Step::Include { id, .. }
             | Step::Code { id, .. } => id,
         }
     }
@@ -2666,8 +2684,10 @@ impl Project {
     /// generator can type `row.column` like any other path. Appended after the project's own
     /// messages: their indexes, which diagnostics refer to, do not change.
     pub fn with_sql_rows(&self) -> Project {
-        let mut out = self.clone();
-        for svc in &self.services {
+        // The `include` steps are played first, so that everything below sees the steps they stand for.
+        let expanded = self.with_fragments();
+        let mut out = expanded.clone();
+        for svc in &expanded.services {
             for step in svc.handler_steps() {
                 step.walk(&mut |s| {
                     // A select, or a step that returns the rows it wrote (`RETURNING`).

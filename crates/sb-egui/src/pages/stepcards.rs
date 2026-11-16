@@ -32,6 +32,7 @@ pub fn title(kind: &str) -> &'static str {
         "callRpc" => "Appeler un RPC",
         "branch" => "Condition",
         "forEach" => "Pour chaque",
+        "include" => "Fragment",
         "respond" => "Répondre",
         "signJwt" => "Signer un jeton",
         "verifyJwt" => "Vérifier un jeton",
@@ -87,6 +88,7 @@ fn tone(kind: &str) -> (Color32, u8, Color32) {
         "callRpc" | "sql" | "httpCall" => (0x7886ff, 51, 0x7886ff),
         "branch" => (0xff66a0, 43, 0xff8fb8),
         "forEach" => (0xa78bfa, 43, 0xbfa8ff),
+        "include" => (0x8f97bd, 46, 0xb6bdea),
         "respond" => (0x3ecf8e, 43, 0x3ecf8e),
         "fail" | "requirePermission" => (0xff6678, 38, 0xff6678),
         "rateLimit" | "meter" | "checkQuota" | "verifyChallenge" => (0xff8c5a, 41, 0xff9c6e),
@@ -175,6 +177,7 @@ fn summary(step: &Step, kind: &str) -> String {
         "let" => format!("{} : {}", get("name"), get("valueType")),
         "assign" => get("name"),
         "log" => get("message"),
+        "include" => get("fragment"),
         _ => {
             let full = stepform::summary(step);
             full.split_once("  ")
@@ -271,6 +274,7 @@ fn field_name(key: &str) -> String {
         "moreBind" => "Page suivante ? : variable (oui/non)",
         "lastBind" => "Dernière ligne : variable",
         "conflict" => "Clé en conflit (mise à jour si elle existe)",
+        "fragment" => "Fragment à jouer",
         "code" => "Code Rust",
         _ => "",
     };
@@ -601,7 +605,7 @@ fn form(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, index: usize) {
 }
 
 /// The blocks that can be added, in the order of the web version.
-const ORDER: [&str; 53] = [
+const ORDER: [&str; 54] = [
     "publish",
     "publishLive",
     "liveGrants",
@@ -654,6 +658,7 @@ const ORDER: [&str; 53] = [
     "verifyPassword",
     "randomToken",
     "sha256",
+    "include",
     "code",
 ];
 
@@ -774,6 +779,7 @@ fn hint(kind: &str) -> &'static str {
         }
         "fail" => "Arrêter la route avec un statut d’erreur HTTP (400, 401, 404, 429…)",
         "sql" => "Lire, insérer, modifier ou supprimer dans une table du service",
+        "include" => "Rejouer ici les étapes d’un fragment du service",
         "code" => "Insérer du Rust écrit à la main",
         _ => "",
     }
@@ -782,7 +788,8 @@ fn hint(kind: &str) -> &'static str {
 /// The blocks that make sense at this place: a response only where there is one, the errors of HTTP on a route…
 fn allowed(app: &App, list: &[Step], loc: &Loc) -> Vec<&'static str> {
     let has_response = matches!(loc.flow, Flow::Route(_) | Flow::Rpc(_));
-    let http = matches!(loc.flow, Flow::Route(_));
+    // A fragment is played by routes: it can refuse like one (the guards of a route are its main use).
+    let http = matches!(loc.flow, Flow::Route(_) | Flow::Fragment(_));
     let has_signature = list.iter().any(|x| matches!(x, Step::VerifyHmac { .. }));
     let has_realtime = app
         .project()
@@ -852,6 +859,7 @@ fn loc_key(loc: &Loc) -> String {
         Flow::Route(i) => format!("route{i}"),
         Flow::Consumer(i) => format!("consumer{i}"),
         Flow::Job(i) => format!("job{i}"),
+        Flow::Fragment(i) => format!("fragment{i}"),
     };
     let nest: Vec<String> = loc
         .nest

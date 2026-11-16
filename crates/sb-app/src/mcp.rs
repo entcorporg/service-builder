@@ -517,6 +517,7 @@ fn outline(project: &Project) -> Value {
             }).collect()),
             "mails": names(s.templates.iter().map(|t| format!("{}: {}", t.event_type, t.subject)).collect()),
             "jobs": names(s.jobs.iter().map(|j| format!("{} every {} s [{}]", j.name, j.every_secs, step_ids(&j.steps))).collect()),
+            "fragments": names(s.fragments.iter().map(|f| format!("{} [{}]", f.name, step_ids(&f.steps))).collect()),
         })).collect::<Vec<_>>(),
     })
 }
@@ -1001,7 +1002,7 @@ mod tests {
             .map(|j| j.as_str().unwrap())
             .collect();
         assert!(
-            jobs.contains(&"cleaner every 420 s [c1 log, c2 sql]"),
+            jobs.contains(&"cleaner every 420 s [c0 include, c1 log, c2 sql]"),
             "{jobs:?}"
         );
         assert!(

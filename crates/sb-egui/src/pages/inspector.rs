@@ -253,6 +253,7 @@ fn service(app: &mut App, ui: &mut Ui, name: &str) {
     challenge(app, ui, svc, &sname);
     consumers(app, ui, &project, si);
     jobs(app, ui, svc, si);
+    fragments(app, ui, svc, si);
     delete_service_button(app, ui, si);
 }
 
@@ -939,6 +940,149 @@ fn jobs(app: &mut App, ui: &mut Ui, svc: &Service, si: usize) {
                 });
             }
         });
+    }
+}
+
+/// The fragments of the service: steps written once, played by an `include` step wherever they are needed.
+fn fragments(app: &mut App, ui: &mut Ui, svc: &Service, si: usize) {
+    separator(ui);
+    let sname = svc.name.clone();
+    let mut add = false;
+    section(
+        ui,
+        "Fragments d’étapes",
+        "include",
+        |ui| add = add_button(ui, "Ajouter un fragment", true),
+        |ui| {
+            if svc.fragments.is_empty() {
+                empty(
+                    ui,
+                    "Aucun fragment : une suite d’étapes répétée dans plusieurs routes (jeton, droits, enveloppe d’événement) peut s’écrire une fois ici.",
+                );
+            }
+            for (fi, f) in svc.fragments.iter().enumerate() {
+                card(
+                    app,
+                    ui,
+                    &format!("{}/fragment/{}", svc.name, f.name),
+                    Some(OK),
+                    &f.name,
+                    &format!("{} étape(s)", f.steps.len()),
+                    |app, ui| {
+                        if icon_btn(
+                            ui,
+                            "trash",
+                            &format!("Supprimer le fragment {}", f.name),
+                            true,
+                        )
+                        .clicked()
+                        {
+                            app.edit(|p| {
+                                if let Some(s) = svc_mut(p, &sname)
+                                    && fi < s.fragments.len()
+                                {
+                                    s.fragments.remove(fi);
+                                }
+                            });
+                        }
+                    },
+                    |app, ui| {
+                        if let Some(v) = field(
+                            ui,
+                            "Nom",
+                            "Minuscules, chiffres et _ ; les étapes `Fragment` qui le jouent suivent le nouveau nom.",
+                            |ui| {
+                                commit_entry(
+                                    ui,
+                                    ("fragment-name", &sname, fi),
+                                    &f.name,
+                                    true,
+                                    "",
+                                    false,
+                                )
+                            },
+                        ) {
+                            let old = f.name.clone();
+                            let valid = v.starts_with(|c: char| c.is_ascii_lowercase())
+                                && v.bytes().all(|b| {
+                                    b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'
+                                });
+                            if !valid {
+                                app.say("Nom de fragment invalide (minuscules, chiffres, _).");
+                            } else if svc.fragments.iter().any(|g| g.name == v) {
+                                app.say(&format!("Le fragment {v} existe déjà."));
+                            } else {
+                                app.edit(|p| rename_fragment(p, &sname, fi, &old, &v));
+                            }
+                        }
+                        steps_title(ui);
+                        super::stepcards::steps_box(
+                            app,
+                            ui,
+                            &f.steps,
+                            &Loc {
+                                service: si,
+                                flow: Flow::Fragment(fi),
+                                nest: vec![],
+                            },
+                        );
+                    },
+                );
+            }
+        },
+    );
+    if add {
+        app.edit(|p| {
+            if let Some(s) = svc_mut(p, &sname) {
+                let taken: Vec<String> = s.fragments.iter().map(|f| f.name.clone()).collect();
+                let refs: Vec<&str> = taken.iter().map(String::as_str).collect();
+                s.fragments.push(sb_model::Fragment {
+                    name: unique("fragment", &refs),
+                    steps: vec![],
+                });
+            }
+        });
+    }
+}
+
+/// Renames a fragment and the `include` steps of the service that play it.
+fn rename_fragment(p: &mut sb_model::Project, service: &str, index: usize, old: &str, new: &str) {
+    let Some(s) = svc_mut(p, service) else { return };
+    let Some(f) = s.fragments.get_mut(index) else {
+        return;
+    };
+    f.name = new.to_string();
+    fn visit(steps: &mut [sb_model::Step], old: &str, new: &str) {
+        for step in steps {
+            match step {
+                sb_model::Step::Include { fragment, .. } if fragment == old => {
+                    *fragment = new.to_string()
+                }
+                sb_model::Step::Branch {
+                    then, otherwise, ..
+                } => {
+                    visit(then, old, new);
+                    visit(otherwise, old, new);
+                }
+                sb_model::Step::ForEach { steps, .. } => visit(steps, old, new),
+                _ => {}
+            }
+        }
+    }
+    for r in &mut s.rpcs {
+        visit(&mut r.steps, old, new);
+    }
+    for r in &mut s.routes {
+        visit(&mut r.steps, old, new);
+    }
+    for c in &mut s.consumers {
+        visit(&mut c.steps, old, new);
+    }
+    for j in &mut s.jobs {
+        visit(&mut j.steps, old, new);
+    }
+    for f in &mut s.fragments {
+        visit(&mut f.steps, old, new);
     }
 }
 

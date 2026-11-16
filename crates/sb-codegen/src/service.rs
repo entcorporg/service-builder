@@ -3356,6 +3356,8 @@ fn steps(
                 ));
                 c.line("}");
             }
+            // Played by `with_fragments` before the generation: nothing is left to write.
+            Step::Include { .. } => {}
             Step::Code { code, .. } => {
                 c.line(code.trim_end());
             }
@@ -4159,6 +4161,7 @@ fn describe(step: &Step) -> String {
             }
             _ => format!("{} an external API", method.as_str()),
         },
+        Step::Include { fragment, .. } => format!("include {fragment}"),
         Step::Code { .. } => "custom code".into(),
     }
 }

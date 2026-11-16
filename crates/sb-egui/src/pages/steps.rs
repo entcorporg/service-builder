@@ -14,6 +14,8 @@ pub enum Flow {
     Route(usize),
     Consumer(usize),
     Job(usize),
+    /// A fragment of the service: the steps its `include` steps play.
+    Fragment(usize),
 }
 
 /// A list of steps: the body of a flow, or one side of a branch inside it.
@@ -47,6 +49,7 @@ pub fn list_mut<'a>(p: &'a mut Project, loc: &Loc) -> Option<&'a mut Vec<Step>> 
         Flow::Route(i) => &mut svc.routes.get_mut(i)?.steps,
         Flow::Consumer(i) => &mut svc.consumers.get_mut(i)?.steps,
         Flow::Job(i) => &mut svc.jobs.get_mut(i)?.steps,
+        Flow::Fragment(i) => &mut svc.fragments.get_mut(i)?.steps,
     };
     for &(otherwise, branch) in &loc.nest {
         match steps.get_mut(branch)? {
@@ -80,6 +83,8 @@ pub fn vars_at(app: &App, loc: &Loc, index: usize) -> Vec<sb_app::scope::Var> {
             .get(i)
             .map(|c| (p.topic(&c.topic).map(|t| t.message.clone()), &c.steps[..])),
         Flow::Job(i) => svc.jobs.get(i).map(|j| (None, &j.steps[..])),
+        // What it can read depends on the handler that includes it: nothing is offered.
+        Flow::Fragment(i) => svc.fragments.get(i).map(|f| (None, &f.steps[..])),
     }
     .unwrap_or((None, &[]));
     // Variables are scoped to their block: what ran before, in the blocks that hold this one, then in this one.
