@@ -338,6 +338,7 @@ pub fn orders() -> Project {
                         total_bind: None,
                         more_bind: None,
                         last_bind: None,
+                        conflict: vec![],
                     },
                     Step::Publish {
                         id: "h2".into(),
@@ -401,6 +402,7 @@ pub fn orders() -> Project {
                         total_bind: None,
                         more_bind: None,
                         last_bind: None,
+                        conflict: vec![],
                     },
                     Step::Respond {
                         id: "h4".into(),
@@ -646,6 +648,7 @@ pub fn add_single_use_token(p: &mut Project) {
                 total_bind: None,
                 more_bind: None,
                 last_bind: None,
+                conflict: vec![],
             },
             Step::Respond {
                 id: "t3".into(),
@@ -698,6 +701,7 @@ pub fn add_cleaner_job(p: &mut Project) {
                 total_bind: None,
                 more_bind: None,
                 last_bind: None,
+                conflict: vec![],
             },
         ],
     });
@@ -1326,6 +1330,7 @@ pub fn add_totp(p: &mut Project) {
         total_bind: None,
         more_bind: None,
         last_bind: None,
+        conflict: vec![],
     };
     let ack = |id: &str| Step::Respond {
         id: id.into(),
@@ -2459,6 +2464,7 @@ pub fn add_notes(p: &mut Project) {
         total_bind: None,
         more_bind: None,
         last_bind: None,
+        conflict: vec![],
     };
     let by_id = || {
         vec![SqlCondition {
@@ -2760,6 +2766,7 @@ pub fn add_sql_reads(p: &mut Project) {
             total_bind: Some("total".into()),
             more_bind: Some("more".into()),
             last_bind: Some("last".into()),
+            conflict: vec![],
         },
         Step::Respond {
             id: "q6".into(),
@@ -3168,6 +3175,7 @@ pub fn add_basket_lines(p: &mut Project) {
                     total_bind: None,
                     more_bind: None,
                     last_bind: None,
+                    conflict: vec![],
                 },
             ],
         },
@@ -3234,6 +3242,7 @@ pub fn add_basket_lines(p: &mut Project) {
             total_bind: None,
             more_bind: None,
             last_bind: None,
+            conflict: vec![],
         },
         Step::ForEach {
             id: "l10".into(),

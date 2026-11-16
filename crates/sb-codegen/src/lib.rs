@@ -516,6 +516,22 @@ mod tests {
     }
 
     #[test]
+    fn an_upsert_conflicts_on_its_key_and_updates_the_other_columns() {
+        use sb_model::{SqlOp, Step};
+        let mut p = sample::orders();
+        if let Step::Sql { op, conflict, .. } = &mut p.services[0].routes[0].steps[3] {
+            *op = SqlOp::Upsert;
+            *conflict = vec!["order_id".into()];
+        }
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        assert!(
+            api.contains("ON CONFLICT (\\\"order_id\\\") DO UPDATE SET \\\"amount\\\" = EXCLUDED.\\\"amount\\\""),
+            "{api}"
+        );
+    }
+
+    #[test]
     fn jsonb_columns_are_read_as_text_and_written_through_a_cast() {
         use sb_model::{Column, ColumnType, SqlOp, Step};
         let mut p = sample::orders();

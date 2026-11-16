@@ -81,7 +81,9 @@ pub fn structured(
         ("httpCall", "auth" | "response" | "onError" | "bodyFormat") => true,
         ("sql", "values") => table.is_some(),
         ("sql", "table") => true,
-        ("sql", "columns" | "orderBy" | "joins" | "thenBy" | "cursor") => table.is_some(),
+        ("sql", "columns" | "conflict" | "orderBy" | "joins" | "thenBy" | "cursor") => {
+            table.is_some()
+        }
         _ => matches!(spec.kind, Kind::Assignments),
     };
     if !known {
@@ -93,7 +95,7 @@ pub fn structured(
         ("respond", "cookies") => cookies(app, ui, id, text, vars),
         ("respond", "headers") => response_headers(app, ui, id, text, vars),
         ("sql", "table") => table_pick(app, ui, id, service, text),
-        ("sql", "columns") => columns_ticks(ui, &query?, text),
+        ("sql", "columns" | "conflict") => columns_ticks(ui, &query?, text),
         ("sql", "orderBy") => order_pick(ui, id, &query?, text),
         ("sql", "joins") => joins(app, ui, id, service, &query?, text),
         ("sql", "thenBy") => then_by(ui, id, &query?, text),

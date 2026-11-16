@@ -675,6 +675,7 @@ Le bloc **SQL** est un bloc de logique à part entière. Il lit une table du ser
   `= ANY`), `contains` / `startsWith` (colonne texte, insensible à la casse ; les `%` et `_` de la valeur sont du texte, pas des
   jokers), `isNull` / `isNotNull` (sans valeur). `E_SQL_TEST_VALUE`, `W_SQL_NEVER_NULL`.
   Une condition peut porter `or` : une liste d'alternatives (elles-mêmes conditions, imbriquables) ; elle devient `(a OR b OR c)` au milieu des `AND` du `where`. Chaque alternative est validée comme une condition à part.
+- **Upsert** : `op: upsert` + `conflict` (colonnes de la clé unique) = `INSERT … ON CONFLICT (clé) DO UPDATE SET` : les autres colonnes écrites prennent la nouvelle valeur (`EXCLUDED`). Sur une table à tenant, une ligne d'un autre tenant portant la clé n'est jamais écrasée (`WHERE table.tenant = EXCLUDED.tenant`). Refusé sur une table à suppression douce (`E_SQL_UPSERT_SOFT_DELETE`). La clé doit correspondre à un index unique de la table.
 - **Tri sur plusieurs colonnes** : `orderBy` + `descending`, puis `thenBy` (colonne, sens).
 - **Pagination** (une liste, avec `limit`, la plus grande page) : `limitFrom` (taille demandée par le flux, ramenée entre 1 et
   `limit` ; absente, c'est `limit`), `offset` (lignes sautées, plafonné à 1 000 000) **ou** `cursor` (pagination par clé : une valeur

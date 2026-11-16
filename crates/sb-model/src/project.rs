@@ -1365,6 +1365,10 @@ pub enum Step {
         /// read the values of the next cursor.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         last_bind: Option<String>,
+        /// Upsert: the columns of the unique key (`ON CONFLICT (...)`). A row that already holds this key is updated
+        /// with the other `values` instead of failing; with nothing else to set, it is left as it is.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        conflict: Vec<String>,
     },
     /// Hashes a password with argon2id, off the async runtime (it is slow on purpose). The PHC string
     /// (`$argon2id$...`) is what gets stored.
@@ -1927,6 +1931,7 @@ impl Cookie {
 pub enum SqlOp {
     Select,
     Insert,
+    Upsert,
     Update,
     Delete,
     // The number of rows that match (an int64 in `bind`), joins and conditions as in a select. No row is read.

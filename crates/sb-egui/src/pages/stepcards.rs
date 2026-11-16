@@ -267,6 +267,7 @@ fn field_name(key: &str) -> String {
         "totalBind" => "Total : variable (nombre de lignes)",
         "moreBind" => "Page suivante ? : variable (oui/non)",
         "lastBind" => "Dernière ligne : variable",
+        "conflict" => "Clé en conflit (mise à jour si elle existe)",
         "code" => "Code Rust",
         _ => "",
     };
@@ -445,6 +446,18 @@ fn form(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, index: usize) {
                     | "totalBind"
                     | "moreBind"
                     | "lastBind"
+            )
+        {
+            continue;
+        }
+        // The key to conflict on is for an upsert only.
+        if spec.key == "conflict"
+            && !matches!(
+                step,
+                Step::Sql {
+                    op: sb_model::SqlOp::Upsert,
+                    ..
+                }
             )
         {
             continue;

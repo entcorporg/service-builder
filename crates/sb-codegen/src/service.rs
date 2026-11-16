@@ -3585,6 +3585,7 @@ fn sql_step(
         total_bind,
         more_bind,
         last_bind,
+        conflict,
     } = step
     else {
         return Ok(());
@@ -3600,7 +3601,7 @@ fn sql_step(
         let own = Expr::Path {
             path: tenant.clone(),
         };
-        if op == SqlOp::Insert {
+        if matches!(op, SqlOp::Insert | SqlOp::Upsert) {
             values.push(sb_model::Assignment {
                 field: tenant.clone(),
                 value: own,
@@ -3613,7 +3614,7 @@ fn sql_step(
             ));
         }
     }
-    if t.soft_delete && op != SqlOp::Insert {
+    if t.soft_delete && !matches!(op, SqlOp::Insert | SqlOp::Upsert) {
         live_only = true;
         if op == SqlOp::Delete {
             // Nothing is removed: the row is marked, and `RETURNING` still gives it back.
@@ -3838,6 +3839,34 @@ fn sql_step(
                 quoted(table),
                 names.join(", "),
                 params.join(", ")
+            )
+        }
+        SqlOp::Upsert => {
+            let names: Vec<_> = set_sql.iter().map(|(n, _)| n.as_str()).collect();
+            let params: Vec<_> = set_sql.iter().map(|(_, p)| p.as_str()).collect();
+            let key: Vec<String> = conflict.iter().map(|k| quoted(k)).collect();
+            let tenant = t.tenant_column.as_deref().map(quoted);
+            // Every written column but the key and the tenant takes the new value. With none left the row is touched
+            // with its own key, so that `RETURNING` still gives it back.
+            let mut sets: Vec<String> = set_sql
+                .iter()
+                .filter(|(n, _)| !key.contains(n) && tenant.as_ref() != Some(n))
+                .map(|(n, _)| format!("{n} = EXCLUDED.{n}"))
+                .collect();
+            if sets.is_empty() {
+                sets.push(format!("{k} = EXCLUDED.{k}", k = key[0]));
+            }
+            // A row of another tenant that holds the key is not this tenant's to overwrite.
+            let guard = tenant
+                .map(|n| format!(" WHERE {}.{n} = EXCLUDED.{n}", quoted(table)))
+                .unwrap_or_default();
+            format!(
+                "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}{guard}",
+                quoted(table),
+                names.join(", "),
+                params.join(", "),
+                key.join(", "),
+                sets.join(", ")
             )
         }
         SqlOp::Update => {
@@ -4091,6 +4120,7 @@ fn describe(step: &Step) -> String {
             match op {
                 SqlOp::Select => "select from",
                 SqlOp::Insert => "insert into",
+                SqlOp::Upsert => "upsert into",
                 SqlOp::Update => "update",
                 SqlOp::Delete => "delete from",
                 SqlOp::Count => "count rows of",

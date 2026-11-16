@@ -2101,6 +2101,7 @@ impl<'a> Checker<'a> {
             joins,
             into,
             limit,
+            conflict,
             ..
         } = step
         else {
@@ -2155,7 +2156,7 @@ impl<'a> Checker<'a> {
                 self.sql_page(env, scope, path, step);
                 self.sql_result(env, path, step, t, scope);
             }
-            SqlOp::Insert | SqlOp::Update => {
+            SqlOp::Insert | SqlOp::Upsert | SqlOp::Update => {
                 let mut seen = HashSet::new();
                 for (i, a) in values.iter().enumerate() {
                     let vp = format!("{path}/values/{i}");
@@ -2185,7 +2186,10 @@ impl<'a> Checker<'a> {
                 if !columns.is_empty() {
                     self.sql_result(env, path, step, t, scope);
                 }
-                if *op == SqlOp::Insert {
+                if *op == SqlOp::Upsert {
+                    self.sql_upsert(path, t, conflict, values, conditions.is_empty());
+                }
+                if matches!(op, SqlOp::Insert | SqlOp::Upsert) {
                     for col in t.columns.iter().filter(|c| {
                         c.is_required_on_insert()
                             && t.tenant_column.as_deref() != Some(c.name.as_str())
@@ -2230,6 +2234,13 @@ impl<'a> Checker<'a> {
                     ),
                 }
             }
+        }
+        if *op != SqlOp::Upsert && !conflict.is_empty() {
+            self.error(
+                "E_SQL_CONFLICT_OP",
+                format!("{path}/conflict"),
+                "the conflict key only exists in an upsert",
+            );
         }
         if !matches!(op, SqlOp::Select | SqlOp::Count)
             && (!joins.is_empty() || Self::sql_read_only_fields(step))
@@ -2337,7 +2348,7 @@ impl<'a> Checker<'a> {
             }
         }
         if t.soft_delete
-            && matches!(op, SqlOp::Insert | SqlOp::Update)
+            && matches!(op, SqlOp::Insert | SqlOp::Upsert | SqlOp::Update)
             && values.iter().any(|a| a.field == DELETED_AT)
         {
             self.error(
@@ -2345,6 +2356,73 @@ impl<'a> Checker<'a> {
                 format!("{path}/values"),
                 format!("`{DELETED_AT}` is set by a delete: leave it out"),
             );
+        }
+    }
+
+    /// An upsert: a key to conflict on, made of columns of the table that the step writes, on a table whose rows are not
+    /// soft-deleted (the conflicting row could be a deleted one, which an update would not bring back).
+    fn sql_upsert(
+        &mut self,
+        path: &str,
+        t: &Table,
+        conflict: &[String],
+        values: &[Assignment],
+        no_where: bool,
+    ) {
+        let cp = format!("{path}/conflict");
+        if !no_where {
+            self.error(
+                "E_SQL_UPSERT_WHERE",
+                format!("{path}/where"),
+                "an upsert has no `where`: its key is `conflict`",
+            );
+        }
+        if t.soft_delete {
+            self.error(
+                "E_SQL_UPSERT_SOFT_DELETE",
+                path,
+                format!(
+                    "`{}` keeps its deleted rows: an upsert could update a deleted one. Use a select, then an insert or an update",
+                    t.name
+                ),
+            );
+        }
+        if conflict.is_empty() {
+            self.error(
+                "E_SQL_NO_CONFLICT",
+                &cp,
+                "an upsert needs the columns of the unique key to conflict on",
+            );
+        }
+        let mut seen = HashSet::new();
+        for (i, name) in conflict.iter().enumerate() {
+            let ip = format!("{cp}/{i}");
+            if !seen.insert(name.as_str()) {
+                self.error(
+                    "E_SQL_DUPLICATE_COLUMN",
+                    &ip,
+                    format!("`{name}` is listed twice"),
+                );
+            }
+            if t.column(name).is_none() {
+                self.error(
+                    "E_UNKNOWN_COLUMN",
+                    &ip,
+                    format!("table `{}` has no column `{name}`", t.name),
+                );
+            } else if t.tenant_column.as_deref() == Some(name.as_str()) {
+                self.error(
+                    "E_TENANT_MANUAL",
+                    &ip,
+                    format!("`{name}` is the tenant: the generator already keeps the key inside it, leave it out"),
+                );
+            } else if !values.iter().any(|a| &a.field == name) {
+                self.error(
+                    "E_SQL_CONFLICT_UNSET",
+                    &ip,
+                    format!("`{name}` is part of the key: give it a value"),
+                );
+            }
         }
     }
 
@@ -10104,6 +10182,35 @@ mod tests {
             errors(&p).contains(&"E_UNKNOWN_PATH".into()),
             "`order.status` is no longer read"
         );
+    }
+
+    #[test]
+    fn an_upsert_needs_a_key_written_by_the_step() {
+        let upsert = |conflict: &[&str]| {
+            let mut p = sample::orders();
+            if let Step::Sql {
+                op, conflict: c, ..
+            } = sql_step(&mut p, 0, 3)
+            {
+                *op = SqlOp::Upsert;
+                *c = conflict.iter().map(|s| s.to_string()).collect();
+            }
+            errors(&p)
+        };
+        assert!(
+            upsert(&["order_id"]).is_empty(),
+            "{:?}",
+            upsert(&["order_id"])
+        );
+        assert!(upsert(&[]).contains(&"E_SQL_NO_CONFLICT".into()));
+        assert!(upsert(&["nope"]).contains(&"E_UNKNOWN_COLUMN".into()));
+        assert!(upsert(&["status"]).contains(&"E_SQL_CONFLICT_UNSET".into()));
+        // A key outside an upsert is refused.
+        let mut p = sample::orders();
+        if let Step::Sql { conflict, .. } = sql_step(&mut p, 0, 3) {
+            *conflict = vec!["order_id".into()];
+        }
+        assert!(errors(&p).contains(&"E_SQL_CONFLICT_OP".into()));
     }
 
     #[test]

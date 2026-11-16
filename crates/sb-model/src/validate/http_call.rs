@@ -450,7 +450,7 @@ impl Checker<'_> {
                 wrote |= matches!(
                     x,
                     Step::Sql {
-                        op: SqlOp::Insert | SqlOp::Update | SqlOp::Delete,
+                        op: SqlOp::Insert | SqlOp::Upsert | SqlOp::Update | SqlOp::Delete,
                         ..
                     }
                 );
