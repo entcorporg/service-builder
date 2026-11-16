@@ -2561,6 +2561,25 @@ mod tests {
     }
 
     #[test]
+    fn a_json_name_renames_the_key_of_a_field() {
+        let mut p = sample::showcase();
+        let f = p
+            .messages
+            .iter_mut()
+            .find(|m| m.name == "ReceiptBody")
+            .unwrap()
+            .fields
+            .iter_mut()
+            .find(|f| f.name == "issued_at")
+            .unwrap();
+        f.json_name = Some("issuedAt".into());
+        let files = generate(&p).unwrap();
+        let build = file(&files, "contracts/build.rs");
+        assert!(build.contains("ReceiptBody.issued_at\", \"#[serde(rename = \\\"issuedAt\\\")]"));
+        assert!(!build.contains("rename = \\\"stamp"));
+    }
+
+    #[test]
     fn bytes_and_timestamps_travel_as_base64_and_rfc3339() {
         let files = generate(&sample::showcase()).unwrap();
         let build = file(&files, "contracts/build.rs");

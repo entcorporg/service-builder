@@ -1693,7 +1693,7 @@ fn required_fields<'a>(
             .filter(|f| {
                 !f.optional && !f.lenient && f.source.is_none() && !params.contains(&f.name)
             })
-            .map(|f| (f.name.as_str(), f))
+            .map(|f| (f.json_key(), f))
             .collect()
     })
 }
@@ -1729,7 +1729,7 @@ fn needs_presence_check(project: &Project, route: &sb_model::Route, params: &[St
 /// The check of one field of a JSON object: refused when a required one is not sent, then the fields of the nested
 /// schema, with their path in the message (`company.name`, `lines[2].sku`).
 fn require_field(c: &mut Code, project: &Project, f: &sb_model::Field) {
-    let name = &f.name;
+    let name = f.json_key();
     if !f.optional && !f.lenient {
         c.line(format!(
             "if !eda_runtime::http::sent(v, {name:?}) {{ return Err(\"{name} : is required\".into()); }}"
@@ -1785,7 +1785,10 @@ fn required_rs(c: &mut Code, project: &Project, service: &Service) {
                 .filter(|f| f.source.is_none() && !params.contains(&f.name))
                 .filter(|f| !f.optional && !f.lenient)
             {
-                full.insert(f.name.clone(), presence_sample(project, f, &mut vec![]));
+                full.insert(
+                    f.json_key().to_string(),
+                    presence_sample(project, f, &mut vec![]),
+                );
             }
             tested.push((
                 required_fn(&r.name),
@@ -1885,7 +1888,10 @@ fn presence_sample(
                 .flat_map(|m| &m.fields)
                 .filter(|f| !f.optional && !f.lenient)
             {
-                object.insert(inner.name.clone(), presence_sample(project, inner, seen));
+                object.insert(
+                    inner.json_key().to_string(),
+                    presence_sample(project, inner, seen),
+                );
             }
             seen.pop();
             Value::Object(object)

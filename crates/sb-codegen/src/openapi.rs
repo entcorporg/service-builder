@@ -140,9 +140,9 @@ impl Schemas {
         let mut properties = Map::new();
         let mut required = vec![];
         for f in fields {
-            properties.insert(f.name.clone(), self.field(f));
+            properties.insert(f.json_key().to_string(), self.field(f));
             if !f.optional && !f.lenient {
-                required.push(Value::String(f.name.clone()));
+                required.push(Value::String(f.json_key().to_string()));
             }
         }
         let mut object = json!({ "type": "object", "properties": properties });
@@ -331,7 +331,7 @@ fn operation(
                     body_fields.push(f);
                     continue;
                 }
-                None => ("query", f.name.clone()),
+                None => ("query", f.json_key().to_string()),
             }
         };
         let mut schema = schemas.field(f);

@@ -191,6 +191,7 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
   dans les réponses, listes comprises. Un texte qui n'en est pas est refusé (422 pour un corps, 400 pour une query string).
   Le contrat (`contracts/src/json.rs`, avec ses tests) porte ces conversions ; il n'existe que si un schéma JSON a un tel
   champ. Dans un `GET`, la query string les porte aussi (`?since=2026-11-14T00:00:00Z`).
+- **Nom JSON** : `jsonName` sur un champ d'un schéma API = clé de ce champ dans le JSON (camelCase d'un front, mot réservé `type`) ; le champ garde son nom partout ailleurs (étapes, SQL, protobuf). Généré en `#[serde(rename)]` (build.rs des contrats), repris par les contrôles de présence et par OpenAPI ; `E_JSON_NAME` / `E_DUPLICATE_JSON_NAME` à la validation. Pas encore d'édition dans sb-egui (JSON/MCP seulement, préservé à l'édition).
 - **Champs obligatoires** : un champ d'un schéma API qui n'est ni `optional` ni `lenient` (« déf. » dans l'éditeur) doit être
   envoyé : absent, la requête est refusée **avant toute étape** par `400 { "error": "champ : is required" }` qui le nomme
   (`company.name`, `lines[2].sku` pour un schéma imbriqué, vérifié élément par élément). Ce qui compte comme « absent » :

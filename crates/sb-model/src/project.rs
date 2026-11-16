@@ -218,9 +218,19 @@ pub struct Field {
     /// Empty text is present; `null` counts as absent.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lenient: bool,
+    /// API schemas: the key of this field in the JSON of a request or a response, when it is not the field name
+    /// (a front-end contract in camelCase, a key that is a Rust keyword such as `type`). The field keeps its name
+    /// everywhere else (steps, SQL, protobuf).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json_name: Option<String>,
 }
 
 impl Field {
+    /// The key of the field in JSON.
+    pub fn json_key(&self) -> &str {
+        self.json_name.as_deref().unwrap_or(&self.name)
+    }
+
     pub fn new(name: impl Into<String>, ty: FieldType) -> Self {
         Self {
             name: name.into(),
@@ -231,6 +241,7 @@ impl Field {
             rules: vec![],
             source: None,
             lenient: false,
+            json_name: None,
         }
     }
 }

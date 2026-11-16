@@ -445,6 +445,7 @@ impl<'a> Checker<'a> {
                 );
             }
             let mut fields = HashSet::new();
+            let mut json_keys = HashSet::new();
             let mut tags = HashSet::new();
             for (j, f) in m.fields.iter().enumerate() {
                 let fp = format!("{base}/fields/{j}");
@@ -456,6 +457,29 @@ impl<'a> Checker<'a> {
                             "field name `{}` must be snake_case and not a Rust keyword (e.g. `{}`)",
                             f.name,
                             snake(&f.name)
+                        ),
+                    );
+                }
+                if let Some(j) = &f.json_name
+                    && (j.is_empty() || j.chars().any(|c| c.is_whitespace() || c.is_control()))
+                {
+                    self.error(
+                        "E_JSON_NAME",
+                        format!("{fp}/jsonName"),
+                        format!(
+                            "jsonName `{j}` of field `{}` must be a non-empty key without spaces",
+                            f.name
+                        ),
+                    );
+                }
+                if !json_keys.insert(f.json_key()) {
+                    self.error(
+                        "E_DUPLICATE_JSON_NAME",
+                        format!("{fp}/name"),
+                        format!(
+                            "two fields of `{}` have the JSON key `{}`",
+                            m.name,
+                            f.json_key()
                         ),
                     );
                 }
@@ -5660,6 +5684,26 @@ mod tests {
         assert!(e.contains(&"E_PROJECT_NAME".into()));
         assert!(e.contains(&"E_MESSAGE_NAME".into()));
         assert!(e.contains(&"E_FIELD_NAME".into()));
+    }
+
+    #[test]
+    fn json_names_are_keys_and_do_not_collide() {
+        let mut p = Project::new("shop");
+        p.messages.push(Message {
+            kind: Default::default(),
+            name: "Item".into(),
+            fields: vec![
+                Field::new("a_b", FieldType::String),
+                Field::new("ab", FieldType::String),
+            ],
+        });
+        p.messages[0].fields[0].json_name = Some("ab".into());
+        assert!(errors(&p).contains(&"E_DUPLICATE_JSON_NAME".into()));
+        p.messages[0].fields[0].json_name = Some("two words".into());
+        assert!(errors(&p).contains(&"E_JSON_NAME".into()));
+        p.messages[0].fields[0].json_name = Some("aB".into());
+        let e = errors(&p);
+        assert!(!e.contains(&"E_JSON_NAME".into()) && !e.contains(&"E_DUPLICATE_JSON_NAME".into()));
     }
 
     #[test]

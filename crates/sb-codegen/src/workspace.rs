@@ -266,6 +266,12 @@ fn contracts_build(project: &Project, proto_name: &str) -> String {
         // `bytes` and `timestamp` have no JSON form of their own: base64 and RFC 3339 (see `contracts::json`).
         for m in &api {
             for f in &m.fields {
+                if let Some(json) = &f.json_name {
+                    c.line(format!(
+                        "builder = builder.field_attribute(\".{package}.{}.{}\", \"#[serde(rename = \\\"{json}\\\")]\");",
+                        m.name, f.name
+                    ));
+                }
                 if let Some(adapter) = json_adapter(f) {
                     c.line(format!(
                         "builder = builder.field_attribute(\".{package}.{}.{}\", \"#[serde(with = \\\"crate::json::{adapter}\\\")]\");",
