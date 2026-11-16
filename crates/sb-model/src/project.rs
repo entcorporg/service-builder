@@ -1339,6 +1339,10 @@ pub enum Step {
         /// `columns`, `where`, `orderBy`, `thenBy`), and the rule of each table (tenant, soft delete) applies to it too.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         joins: Vec<SqlJoin>,
+        /// Select: the name of the field a column gives in the row, instead of the column name (or `table_column` for a
+        /// joined one): `known_accounts.email` → `email`. The key is one of `columns`.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        column_as: std::collections::BTreeMap<String, String>,
         /// Select: more sort keys, after `orderBy`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         then_by: Vec<SqlSort>,
@@ -2085,6 +2089,7 @@ impl Service {
         base: &str,
         joins: &[SqlJoin],
         columns: &[String],
+        column_as: &std::collections::BTreeMap<String, String>,
     ) -> Vec<SqlOutColumn<'a>> {
         columns
             .iter()
@@ -2095,9 +2100,10 @@ impl Service {
                     .find(|j| j.table == table.name)
                     .map(|j| j.alias.as_deref().unwrap_or(&j.table));
                 Some(SqlOutColumn {
-                    field: match prefix.filter(|_| table.name != base) {
-                        None => column.name.clone(),
-                        Some(prefix) => format!("{prefix}_{}", column.name),
+                    field: match (column_as.get(n), prefix.filter(|_| table.name != base)) {
+                        (Some(a), _) => a.clone(),
+                        (None, None) => column.name.clone(),
+                        (None, Some(prefix)) => format!("{prefix}_{}", column.name),
                     },
                     table,
                     column,
@@ -2646,6 +2652,7 @@ impl Project {
                         table,
                         columns,
                         joins,
+                        column_as,
                         into: None,
                         ..
                     } = s
@@ -2659,7 +2666,7 @@ impl Project {
                         name: sql_row_name(table, id),
                         kind: MessageKind::Row,
                         fields: svc
-                            .sql_out_columns(table, joins, columns)
+                            .sql_out_columns(table, joins, columns, column_as)
                             .iter()
                             .map(|o| {
                                 let mut f = Field::new(&o.field, o.column.ty.field_type());

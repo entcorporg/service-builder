@@ -231,6 +231,10 @@ fn requalify(o: &mut serde_json::Map<String, Value>, from: &str, to: &str) {
     if let Some(c) = o.get_mut("columns").and_then(Value::as_array_mut) {
         c.iter_mut().for_each(fix);
     }
+    rekey_aliases(o, |name| {
+        name.strip_prefix(&prefix)
+            .map(|rest| format!("{to}.{rest}"))
+    });
     if let Some(c) = o.get_mut("orderBy") {
         fix(c);
     }
@@ -242,6 +246,16 @@ fn requalify(o: &mut serde_json::Map<String, Value>, from: &str, to: &str) {
             .flatten()
         {
             fix_key(k, "column");
+        }
+    }
+}
+
+/// The keys of `columnAs` name columns: they follow the rename. The names they give are the author's, they stay.
+fn rekey_aliases(o: &mut serde_json::Map<String, Value>, new_key: impl Fn(&str) -> Option<String>) {
+    if let Some(map) = o.get_mut("columnAs").and_then(Value::as_object_mut) {
+        let old = std::mem::take(map);
+        for (k, v) in old {
+            map.insert(new_key(&k).unwrap_or(k), v);
         }
     }
 }
@@ -354,7 +368,11 @@ fn requalify_column(
             fix(c);
         }
     };
-    if let Some(j) = join.filter(|_| !own) {
+    let aliased = o
+        .get("columnAs")
+        .and_then(Value::as_object)
+        .is_some_and(|m| m.contains_key(&format!("{table}.{from}")));
+    if let Some(j) = join.filter(|_| !own && !aliased) {
         let prefix = j.get("alias").and_then(Value::as_str).unwrap_or(table);
         let (old, new) = (format!("{prefix}_{from}"), format!("{prefix}_{to}"));
         let text = |k: &str| o.get(k).and_then(Value::as_str).map(str::to_string);
@@ -387,6 +405,11 @@ fn requalify_column(
     if let Some(c) = o.get_mut("columns").and_then(Value::as_array_mut) {
         c.iter_mut().for_each(fix);
     }
+    rekey_aliases(o, |name| match name.split_once('.') {
+        Some((t, c)) if t == table && c == from => Some(format!("{table}.{to}")),
+        None if own && name == from => Some(to.to_string()),
+        _ => None,
+    });
     if let Some(c) = o.get_mut("orderBy") {
         fix(c);
     }
@@ -518,6 +541,12 @@ fn drop_from_joins(o: &mut serde_json::Map<String, Value>, table: &str, column: 
     };
     if let Some(c) = o.get_mut("columns").and_then(Value::as_array_mut) {
         c.retain(|v| !qualified_gone(v));
+    }
+    if let Some(m) = o.get_mut("columnAs").and_then(Value::as_object_mut) {
+        m.retain(|k, _| !qualified_gone(&Value::String(k.clone())));
+        if m.is_empty() {
+            o.remove("columnAs");
+        }
     }
     if o.get("orderBy").is_some_and(qualified_gone) {
         o.insert("orderBy".into(), Value::Null);
@@ -741,6 +770,28 @@ mod tests {
 
     fn has(list: &serde_json::Value, name: &str) -> bool {
         list.as_array().unwrap().iter().any(|v| v == name)
+    }
+
+    #[test]
+    fn an_aliased_column_keeps_its_field_when_the_column_is_renamed() {
+        let mut p = sample::showcase();
+        for r in &mut p.services[0].routes {
+            for s in &mut r.steps {
+                if let Step::Sql { column_as, .. } = s
+                    && r.name == "list_posts"
+                {
+                    column_as.insert("authors.name".into(), "authors_name".into());
+                }
+            }
+        }
+        column(&mut p, "Orders", "authors", "name", "full_name");
+        let step = posts_step(&p);
+        assert_eq!(step["columnAs"]["authors.full_name"], "authors_name");
+        assert!(step["columnAs"].get("authors.name").is_none());
+        let item = p.messages.iter().find(|m| m.name == "PostItem").unwrap();
+        assert!(item.fields.iter().any(|f| f.name == "authors_name"));
+        drop_column(&mut p, "Orders", "authors", "full_name");
+        assert!(posts_step(&p).get("columnAs").is_none());
     }
 
     #[test]

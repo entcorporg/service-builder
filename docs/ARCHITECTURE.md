@@ -666,6 +666,10 @@ Le bloc **SQL** est un bloc de logique à part entière. Il lit une table du ser
   `table_colonne` (le préfixe peut être fixé par `alias` sur la jointure ; un renommage de la table le pose pour que les schémas
   « vers un schéma » gardent leurs noms de champs). Les colonnes d'une table jointée à gauche sont **optionnelles**. Le SQL d'un
   bloc sans jointure est inchangé, mot pour mot.
+- **Nom de champ par colonne** : `columnAs` (`{"authors.email": "email"}`) donne à une colonne cochée le nom de son champ dans la
+  ligne, à la place de `colonne` ou `table_colonne` ; la clé est une des `columns` (`E_SQL_ALIAS_COLUMN`), le nom un identifiant
+  snake_case (`E_SQL_ALIAS_NAME`), deux colonnes ne donnent pas le même champ (`E_SQL_COLUMN_CLASH`). Un renommage de la colonne
+  suit la clé et laisse le nom du champ (les schémas « vers un schéma » ne bougent pas).
 - **Les règles de chaque table tiennent** : le filtre `tenantColumn` et `deleted_at` de chaque table jointe sont posés par le
   générateur dans le `ON` de la jointure (et non dans le `WHERE`, pour qu'une jointure à gauche reste une jointure à gauche : une
   ligne d'un autre tenant, ou supprimée, n'est « pas de correspondance », elle ne fait pas disparaître la ligne de gauche). Le

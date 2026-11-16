@@ -3578,6 +3578,7 @@ fn sql_step(
         limit,
         missing,
         joins,
+        column_as,
         then_by,
         limit_from,
         offset,
@@ -3773,7 +3774,7 @@ fn sql_step(
     };
 
     // The columns a select reads, or that an insert, update or delete gives back (`RETURNING`).
-    let outs = service.sql_out_columns(table, joins, columns);
+    let outs = service.sql_out_columns(table, joins, columns, column_as);
     let exprs: Vec<String> = outs
         .iter()
         .map(|o| {
@@ -3785,7 +3786,7 @@ fn sql_step(
                     "to_char({name} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS {alias}"
                 ),
                 ColumnType::Uuid | ColumnType::Jsonb => format!("{name}::text AS {alias}"),
-                _ if joined => format!("{name} AS {alias}"),
+                _ if joined || o.field != o.column.name => format!("{name} AS {alias}"),
                 _ => name,
             }
         })

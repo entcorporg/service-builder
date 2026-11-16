@@ -81,7 +81,7 @@ pub fn structured(
         ("httpCall", "auth" | "response" | "onError" | "bodyFormat") => true,
         ("sql", "values") => table.is_some(),
         ("sql", "table") => true,
-        ("sql", "columns" | "conflict" | "orderBy" | "joins" | "thenBy" | "cursor") => {
+        ("sql", "columns" | "conflict" | "columnAs" | "orderBy" | "joins" | "thenBy" | "cursor") => {
             table.is_some()
         }
         _ => matches!(spec.kind, Kind::Assignments),
@@ -96,6 +96,7 @@ pub fn structured(
         ("respond", "headers") => response_headers(app, ui, id, text, vars),
         ("sql", "table") => table_pick(app, ui, id, service, text),
         ("sql", "columns" | "conflict") => columns_ticks(ui, &query?, text),
+        ("sql", "columnAs") => column_as(ui, id, &v, text),
         ("sql", "orderBy") => order_pick(ui, id, &query?, text),
         ("sql", "joins") => joins(app, ui, id, service, &query?, text),
         ("sql", "thenBy") => then_by(ui, id, &query?, text),
@@ -943,6 +944,34 @@ fn columns_ticks(ui: &mut Ui, q: &Query, text: &str) -> Option<String> {
                     next.sort_by_key(|x| order.iter().position(|o| o == x).unwrap_or(usize::MAX));
                     out = Some(next.join(", "));
                 }
+            }
+        });
+    }
+    out
+}
+
+/// The name each ticked column gives to its field in the row, when it is not the column's own name.
+fn column_as(ui: &mut Ui, id: egui::Id, step: &Value, text: &str) -> Option<String> {
+    let map: std::collections::BTreeMap<String, String> = parse(text);
+    let ticked: Vec<String> = serde_json::from_value(step["columns"].clone()).unwrap_or_default();
+    if ticked.is_empty() {
+        small(ui, "cochez d’abord des colonnes");
+        return None;
+    }
+    let mut out = None;
+    for c in &ticked {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.label(RichText::new(c).size(12.0));
+            let now = map.get(c).map_or("", String::as_str);
+            if let Some(v) = commit_entry(ui, id.with(("as", c)), now, true, "nom du champ", true) {
+                let mut next = map.clone();
+                if v.trim().is_empty() {
+                    next.remove(c);
+                } else {
+                    next.insert(c.clone(), v.trim().to_string());
+                }
+                out = Some(push(&next));
             }
         });
     }

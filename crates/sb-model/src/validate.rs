@@ -2127,6 +2127,7 @@ impl<'a> Checker<'a> {
         if !joins.is_empty() {
             self.sql_joins(env, scope, path, step);
         }
+        self.sql_aliases(env, path, step);
         if matches!(op, SqlOp::Update | SqlOp::Delete) && conditions.is_empty() {
             self.error(
                 "E_SQL_NO_WHERE",
@@ -2426,6 +2427,58 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `columnAs`: each key is a ticked column, each name a valid field name, and no two columns give the same field.
+    fn sql_aliases(&mut self, env: &Env, path: &str, step: &Step) {
+        let Step::Sql {
+            table,
+            joins,
+            columns,
+            column_as,
+            ..
+        } = step
+        else {
+            return;
+        };
+        if column_as.is_empty() {
+            return;
+        }
+        for (k, a) in column_as {
+            let ap = format!("{path}/columnAs/{k}");
+            if !columns.contains(k) {
+                self.error(
+                    "E_SQL_ALIAS_COLUMN",
+                    &ap,
+                    format!("`{k}` is not one of the columns the step reads"),
+                );
+            }
+            if !is_snake_ident(a) {
+                self.error(
+                    "E_SQL_ALIAS_NAME",
+                    &ap,
+                    format!("`{a}` must be a snake_case field name that is not a Rust keyword"),
+                );
+            }
+        }
+        // With joins, the clash of two fields is already reported by the joins.
+        if joins.is_empty() {
+            let mut fields: HashSet<String> = HashSet::new();
+            for (i, o) in env
+                .service
+                .sql_out_columns(table, joins, columns, column_as)
+                .iter()
+                .enumerate()
+            {
+                if !fields.insert(o.field.clone()) {
+                    self.error(
+                        "E_SQL_COLUMN_CLASH",
+                        format!("{path}/columns/{i}"),
+                        format!("two columns give the field `{}` of the row", o.field),
+                    );
+                }
+            }
+        }
+    }
+
     fn unknown_sql_column(table: &str, joins: &[SqlJoin], name: &str) -> String {
         match name.split_once('.') {
             Some((t, _)) if t != table && !joins.iter().any(|j| j.table == t) => {
@@ -2625,12 +2678,15 @@ impl<'a> Checker<'a> {
         }
         // Two columns that would give the same field of the row.
         let mut fields: HashSet<String> = HashSet::new();
-        let Step::Sql { columns, .. } = step else {
+        let Step::Sql {
+            columns, column_as, ..
+        } = step
+        else {
             return;
         };
         for (i, o) in env
             .service
-            .sql_out_columns(table, joins, columns)
+            .sql_out_columns(table, joins, columns, column_as)
             .iter()
             .enumerate()
         {
@@ -2860,6 +2916,7 @@ impl<'a> Checker<'a> {
             many,
             into,
             joins,
+            column_as,
             total_bind,
             more_bind,
             last_bind,
@@ -2877,7 +2934,9 @@ impl<'a> Checker<'a> {
                 );
             }
         }
-        let outs = env.service.sql_out_columns(table, joins, columns);
+        let outs = env
+            .service
+            .sql_out_columns(table, joins, columns, column_as);
         let Some(var) = bind else {
             self.error(
                 "E_SQL_BIND",
@@ -10689,6 +10748,36 @@ mod tests {
         };
         assert!(joins.is_empty());
         assert_eq!(conditions[0].test, SqlTest::Compare);
+    }
+
+    #[test]
+    fn column_aliases_are_checked() {
+        let broken = |key: &str, name: &str| {
+            let mut p = with_reads();
+            if let Step::Sql { column_as, .. } = reads_step(&mut p) {
+                column_as.insert(key.into(), name.into());
+            }
+            reads_codes(&p)
+        };
+        let codes = broken("authors.name", "Bad Name");
+        assert!(codes.contains(&"E_SQL_ALIAS_NAME".to_string()), "{codes:?}");
+        let codes = broken("authors.email", "email");
+        assert!(
+            codes.contains(&"E_SQL_ALIAS_COLUMN".to_string()),
+            "{codes:?}"
+        );
+        // Two columns giving the same field.
+        let codes = broken("authors.name", "title");
+        assert!(
+            codes.contains(&"E_SQL_COLUMN_CLASH".to_string()),
+            "{codes:?}"
+        );
+        // A good alias has no alias error.
+        let codes = broken("authors.name", "author");
+        assert!(
+            !codes.iter().any(|c| c.starts_with("E_SQL_ALIAS")),
+            "{codes:?}"
+        );
     }
 
     #[test]

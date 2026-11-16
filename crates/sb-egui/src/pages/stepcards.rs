@@ -260,6 +260,7 @@ fn field_name(key: &str) -> String {
         "set" => "Modifications",
         "filters" | "where" => "Conditions",
         "joins" => "Jointures",
+        "columnAs" => "Noms des champs",
         "thenBy" => "Tri secondaire",
         "limitFrom" => "Taille de page (depuis le flux)",
         "offset" => "Décalage (lignes sautées)",
