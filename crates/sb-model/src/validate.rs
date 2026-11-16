@@ -2098,6 +2098,8 @@ impl<'a> Checker<'a> {
             order_by,
             missing,
             joins,
+            into,
+            limit,
             ..
         } = step
         else {
@@ -2202,8 +2204,35 @@ impl<'a> Checker<'a> {
                     self.sql_result(env, path, step, t, scope);
                 }
             }
+            SqlOp::Count => {
+                if !columns.is_empty()
+                    || into.is_some()
+                    || *many
+                    || order_by.is_some()
+                    || limit.is_some()
+                {
+                    self.error(
+                        "E_SQL_COUNT_ROWS",
+                        path,
+                        "a count reads no row: leave out columns, `into`, `many`, the sort and the limit",
+                    );
+                }
+                match bind {
+                    Some(var) => {
+                        self.check_var_name(var, &format!("{path}/bind"));
+                        scope.bind(var.clone(), TypeRef::scalar(FieldType::Int64));
+                    }
+                    None => self.error(
+                        "E_SQL_BIND",
+                        format!("{path}/bind"),
+                        "name the variable that receives the number of rows",
+                    ),
+                }
+            }
         }
-        if *op != SqlOp::Select && (!joins.is_empty() || Self::sql_read_only_fields(step)) {
+        if !matches!(op, SqlOp::Select | SqlOp::Count)
+            && (!joins.is_empty() || Self::sql_read_only_fields(step))
+        {
             self.error(
                 "E_SQL_JOIN_OP",
                 path,
@@ -2211,6 +2240,13 @@ impl<'a> Checker<'a> {
             );
         }
 
+        if *op == SqlOp::Count && Self::sql_read_only_fields(step) {
+            self.error(
+                "E_SQL_JOIN_OP",
+                path,
+                "extra sort keys and pagination only exist in a select that reads rows",
+            );
+        }
         if let Some(m) = missing {
             let mp = format!("{path}/missing");
             let one_row = !columns.is_empty() && bind.is_some() && !*many;

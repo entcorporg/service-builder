@@ -428,7 +428,9 @@ fn form(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, index: usize) {
             continue;
         }
         // Joins, extra sorts and pages are for a read: an insert, an update or a delete does not show them.
-        if matches!(step, Step::Sql { op, .. } if *op != sb_model::SqlOp::Select)
+        // A count keeps the joins (it counts what a select would read), nothing else of that.
+        if matches!(step, Step::Sql { op, .. } if *op != sb_model::SqlOp::Select
+                && !(*op == sb_model::SqlOp::Count && spec.key == "joins"))
             && matches!(
                 spec.key.as_str(),
                 "joins"

@@ -2673,6 +2673,91 @@ mod tests {
     }
 
     #[test]
+    fn a_count_step_reads_one_number_with_the_rules_of_its_tables() {
+        use sb_model::{SqlOp, Step};
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        sample::add_sql_reads(&mut p);
+        let route = p.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == "list_posts")
+            .unwrap();
+        let mut count = route.steps[3].clone();
+        if let Step::Sql {
+            id,
+            op,
+            bind,
+            columns,
+            many,
+            into,
+            order_by,
+            then_by,
+            limit,
+            limit_from,
+            offset,
+            cursor,
+            total_bind,
+            more_bind,
+            last_bind,
+            ..
+        } = &mut count
+        {
+            *id = "count_posts".into();
+            *op = SqlOp::Count;
+            *bind = Some("post_count".into());
+            columns.clear();
+            *many = false;
+            *into = None;
+            *order_by = None;
+            then_by.clear();
+            *limit = None;
+            *limit_from = None;
+            *offset = None;
+            cursor.clear();
+            *total_bind = None;
+            *more_bind = None;
+            *last_bind = None;
+        } else {
+            panic!("a SQL step was expected");
+        }
+        route.steps.insert(3, count);
+        let diags = sb_model::validate(&p);
+        assert!(!sb_model::has_errors(&diags), "{diags:?}");
+        let files = generate(&p).unwrap();
+        let flat = file(&files, "services/orders/src/flows/api.rs")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let at = flat
+            .find("let post_count: i64 = sqlx::query_scalar")
+            .expect(&flat);
+        let stmt = &flat[at..];
+        let stmt = &stmt[..stmt.find(".fetch_one").unwrap()];
+        assert!(
+            stmt.contains("SELECT count(*) FROM")
+                && stmt.contains("deleted_at")
+                && !stmt.contains("LIMIT"),
+            "{stmt}"
+        );
+        // A count reads no row: a column or a sort is refused.
+        if let Step::Sql { columns, .. } = &mut p.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == "list_posts")
+            .unwrap()
+            .steps[3]
+        {
+            *columns = vec!["post_id".into()];
+        }
+        let diags = sb_model::validate(&p);
+        assert!(
+            diags.iter().any(|d| d.code == "E_SQL_COUNT_ROWS"),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
     fn joins_carry_the_rules_of_every_table_and_a_page_is_cut_by_a_cursor() {
         use sb_model::{Expr, SqlCondition, SqlTest, Step};
         let mut p = sample::orders();

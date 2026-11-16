@@ -1892,6 +1892,9 @@ pub enum SqlOp {
     Insert,
     Update,
     Delete,
+    // The number of rows that match (an int64 in `bind`), joins and conditions as in a select. No row is read.
+    // (A plain comment: a doc comment would turn the schema of the whole enum into a `oneOf` the forms cannot read.)
+    Count,
 }
 
 /// `column <op> value`.

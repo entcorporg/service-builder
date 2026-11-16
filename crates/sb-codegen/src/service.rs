@@ -3710,7 +3710,23 @@ fn sql_step(
         }
     }
 
+    // A count: one number, no row read.
+    if *op == SqlOp::Count {
+        let var = var.ok_or_else(|| CodegenError::Internal("a count needs a variable".into()))?;
+        let mut q = format!(
+            "sqlx::query_scalar::<_, i64>({:?})",
+            format!("SELECT count(*) FROM {from}{where_clause}")
+        );
+        for b in &binds {
+            q.push_str(&format!(".bind({b})"));
+        }
+        c.line(format!("let {var}: i64 = {q}.fetch_one(&mut *tx).await?;"));
+        scope.bind(var, TypeRef::scalar(sb_model::FieldType::Int64));
+        return Ok(());
+    }
+
     let mut sql = match op {
+        SqlOp::Count => unreachable!("a count returns above"),
         SqlOp::Insert => {
             let names: Vec<_> = set_sql.iter().map(|(n, _)| n.as_str()).collect();
             let params: Vec<_> = set_sql.iter().map(|(_, p)| p.as_str()).collect();
@@ -3971,6 +3987,7 @@ fn describe(step: &Step) -> String {
                 SqlOp::Insert => "insert into",
                 SqlOp::Update => "update",
                 SqlOp::Delete => "delete from",
+                SqlOp::Count => "count rows of",
             }
         ),
         Step::HttpCall {

@@ -685,6 +685,9 @@ Le bloc **SQL** est un bloc de logique à part entière. Il lit une table du ser
   `moreBind` (bool, une ligne suit : on lit une ligne de plus que la page) et `lastBind` (la dernière ligne de la page, typée par
   le schéma `into` : c'est d'elle que le flux tire le curseur suivant). Un offset avec un curseur est `E_SQL_PAGE_CONFLICT`,
   une page sans liste ni `limit` est `E_SQL_PAGE_NEEDS_LIMIT`.
+  **`op: count`** : `SELECT count(*)` seul, sans lire de ligne, dans `bind` (int64). Mêmes conditions et jointures qu'un select, avec les
+  règles de chaque table (tenant, suppression douce) ; colonnes, `into`, `many`, tri et `limit` sont refusés (`E_SQL_COUNT_ROWS`), la
+  pagination aussi (`E_SQL_JOIN_OP`). Sans variable : `E_SQL_BIND`.
 - Codes des jointures : `E_SQL_JOIN_OP` (un `insert`, `update` ou `delete` n'a ni jointure ni page), `E_SQL_JOIN_TABLE`,
   `E_SQL_JOIN_DUPLICATE`, `E_SQL_JOIN_ON`, `E_SQL_JOIN_TYPE` (colonnes de types différents), `E_SQL_COLUMN_CLASH` (deux colonnes
   donnent le même champ).
