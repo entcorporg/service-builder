@@ -150,7 +150,10 @@ pub fn service(p: &mut Project, from: &str, to: &str) {
     }
     for steps in handlers(p, |_| true) {
         rewrite(steps, |o| {
-            if matches!(kind(o), "callRpc" | "publishLive" | "liveGrants" | "sessionTrace" | "sessionRevoke") {
+            if matches!(
+                kind(o),
+                "callRpc" | "publishLive" | "liveGrants" | "sessionTrace" | "sessionRevoke"
+            ) {
                 set_if(o, "service", from, to);
             }
         });

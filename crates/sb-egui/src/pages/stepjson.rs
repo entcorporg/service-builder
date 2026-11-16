@@ -81,9 +81,10 @@ pub fn structured(
         ("httpCall", "auth" | "response" | "onError" | "bodyFormat") => true,
         ("sql", "values") => table.is_some(),
         ("sql", "table") => true,
-        ("sql", "columns" | "conflict" | "columnAs" | "orderBy" | "joins" | "thenBy" | "cursor") => {
-            table.is_some()
-        }
+        (
+            "sql",
+            "columns" | "conflict" | "columnAs" | "orderBy" | "joins" | "thenBy" | "cursor",
+        ) => table.is_some(),
         _ => matches!(spec.kind, Kind::Assignments),
     };
     if !known {

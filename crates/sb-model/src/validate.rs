@@ -3248,7 +3248,12 @@ impl<'a> Checker<'a> {
                     self.check_expr(scope, e, Some(&id), &format!("{path}/tenantId"));
                 }
                 let ttl = TypeRef::scalar(FieldType::Int64);
-                self.check_expr(scope, ttl_seconds, Some(&ttl), &format!("{path}/ttlSeconds"));
+                self.check_expr(
+                    scope,
+                    ttl_seconds,
+                    Some(&ttl),
+                    &format!("{path}/ttlSeconds"),
+                );
                 false
             }
             Step::SessionRevoke {
@@ -10686,8 +10691,18 @@ mod tests {
             rpc.steps.insert(0, s);
         };
         let mut ok = p.clone();
-        put(&mut ok, step("Realtime", json!({"kind": "path", "path": "input.customer_id"})));
-        assert!(!codes(&ok).contains(&"E_LIVE_SERVICE".into()), "{:?}", validate(&ok));
+        put(
+            &mut ok,
+            step(
+                "Realtime",
+                json!({"kind": "path", "path": "input.customer_id"}),
+            ),
+        );
+        assert!(
+            !codes(&ok).contains(&"E_LIVE_SERVICE".into()),
+            "{:?}",
+            validate(&ok)
+        );
         let mut bad = p.clone();
         put(&mut bad, step("Orders", json!(null)));
         assert!(codes(&bad).contains(&"E_LIVE_SERVICE".into()));
@@ -10722,14 +10737,30 @@ mod tests {
             })
         };
         let mut ok = p.clone();
-        put(&mut ok, trace("Realtime", json!({"kind": "literal", "value": 900})));
-        put(&mut ok, json!({"type": "sessionRevoke", "id": "t2", "service": "Realtime", "sessionId": {"kind": "path", "path": "order_id"}}));
-        assert!(!codes(&ok).contains(&"E_LIVE_SERVICE".into()), "{:?}", validate(&ok));
+        put(
+            &mut ok,
+            trace("Realtime", json!({"kind": "literal", "value": 900})),
+        );
+        put(
+            &mut ok,
+            json!({"type": "sessionRevoke", "id": "t2", "service": "Realtime", "sessionId": {"kind": "path", "path": "order_id"}}),
+        );
+        assert!(
+            !codes(&ok).contains(&"E_LIVE_SERVICE".into()),
+            "{:?}",
+            validate(&ok)
+        );
         let mut bad = p.clone();
-        put(&mut bad, trace("Orders", json!({"kind": "literal", "value": 900})));
+        put(
+            &mut bad,
+            trace("Orders", json!({"kind": "literal", "value": 900})),
+        );
         assert!(codes(&bad).contains(&"E_LIVE_SERVICE".into()));
         let mut revoke = p;
-        put(&mut revoke, json!({"type": "sessionRevoke", "id": "t2", "service": "Nowhere", "sessionId": {"kind": "path", "path": "order_id"}}));
+        put(
+            &mut revoke,
+            json!({"type": "sessionRevoke", "id": "t2", "service": "Nowhere", "sessionId": {"kind": "path", "path": "order_id"}}),
+        );
         assert!(codes(&revoke).contains(&"E_LIVE_SERVICE".into()));
     }
 

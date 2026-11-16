@@ -770,21 +770,30 @@ mod tests {
         };
         let branch = Step::Branch {
             id: "b".into(),
-            condition: Condition::Test { value: lit(true.into()) },
+            condition: Condition::Test {
+                value: lit(true.into()),
+            },
             then: vec![assign],
             otherwise: vec![],
         };
         let mut p = sample::orders();
-        p.services[0].routes[1].steps.splice(0..0, [let_step(true), branch.clone()]);
+        p.services[0].routes[1]
+            .steps
+            .splice(0..0, [let_step(true), branch.clone()]);
         let files = generate(&p).expect("a mutable variable is assignable");
         let code: String = files.iter().map(|f| f.content.as_str()).collect();
         assert!(code.contains("let mut total: i64 = 0;"), "{code}");
         assert!(code.contains("total = 5;"));
 
         let mut p = sample::orders();
-        p.services[0].routes[1].steps.splice(0..0, [let_step(false), branch]);
+        p.services[0].routes[1]
+            .steps
+            .splice(0..0, [let_step(false), branch]);
         let report = sb_model::validate(&p);
-        assert!(report.iter().any(|d| d.code == "E_ASSIGN_IMMUTABLE"), "{report:?}");
+        assert!(
+            report.iter().any(|d| d.code == "E_ASSIGN_IMMUTABLE"),
+            "{report:?}"
+        );
     }
 
     #[test]
@@ -1909,8 +1918,13 @@ mod tests {
             flat.contains("live.trace(\"sess\", (order_id.clone()).to_string(), (order_id.clone()).to_string(), None, 900"),
             "{flat}"
         );
-        assert!(flat.contains("live.revoke(\"sess\", (order_id.clone()).to_string());"), "{flat}");
-        let commit = flat.find("tx.commit().await?; live.flush().await;").expect("flushed after the commit");
+        assert!(
+            flat.contains("live.revoke(\"sess\", (order_id.clone()).to_string());"),
+            "{flat}"
+        );
+        let commit = flat
+            .find("tx.commit().await?; live.flush().await;")
+            .expect("flushed after the commit");
         assert!(flat.find("live.trace(").unwrap() < commit);
     }
 
@@ -2881,7 +2895,11 @@ mod tests {
             .iter_mut()
             .find(|r| r.name == "list_posts")
             .unwrap();
-        let sql_at = route.steps.iter().position(|s| matches!(s, Step::Sql { .. })).unwrap();
+        let sql_at = route
+            .steps
+            .iter()
+            .position(|s| matches!(s, Step::Sql { .. }))
+            .unwrap();
         let mut count = route.steps[sql_at].clone();
         if let Step::Sql {
             id,

@@ -84,7 +84,9 @@ fn tone(kind: &str) -> (Color32, u8, Color32) {
     let (bg, a, fg) = match kind {
         "log" => (0x8f97bd, 46, 0xb6bdea),
         "let" | "assign" => (0xb482ff, 46, 0xc7a0ff),
-        "publish" | "publishLive" | "liveGrants" | "sessionTrace" | "sessionRevoke" => (0xffb04a, 46, 0xffb04a),
+        "publish" | "publishLive" | "liveGrants" | "sessionTrace" | "sessionRevoke" => {
+            (0xffb04a, 46, 0xffb04a)
+        }
         "callRpc" | "sql" | "httpCall" => (0x7886ff, 51, 0x7886ff),
         "branch" => (0xff66a0, 43, 0xff8fb8),
         "forEach" => (0xa78bfa, 43, 0xbfa8ff),
@@ -667,7 +669,9 @@ fn hint(kind: &str) -> &'static str {
     match kind {
         "log" => "Écrire une ligne de log",
         "let" => "Calculer et nommer une valeur",
-        "assign" => "Donner une nouvelle valeur à une variable cochée « modifiable » (dans une condition, une boucle)",
+        "assign" => {
+            "Donner une nouvelle valeur à une variable cochée « modifiable » (dans une condition, une boucle)"
+        }
         "publish" => "Mis en file (outbox) avec la transaction, puis envoyé sur le topic",
         "publishLive" => {
             "Événement temps réel (SSE), envoyé après le commit, à un compte ou à une permission"
@@ -803,8 +807,9 @@ fn allowed(app: &App, list: &[Step], loc: &Loc) -> Vec<&'static str> {
         .filter(|t| match *t {
             "publishLive" | "liveGrants" | "sessionTrace" | "sessionRevoke" => has_realtime,
             "respond" => has_response,
-            "fail" | "requirePermission" | "rateLimit" | "checkQuota" | "verifyChallenge" | "passwordStrength"
-            | "verifyJwt" | "imageSniff" | "totpVerify" | "recoveryCodeUse" => http,
+            "fail" | "requirePermission" | "rateLimit" | "checkQuota" | "verifyChallenge"
+            | "passwordStrength" | "verifyJwt" | "imageSniff" | "totpVerify"
+            | "recoveryCodeUse" => http,
             t if t.starts_with("passkey") => http,
             "verifyHmac" => allow_signature,
             _ => true,

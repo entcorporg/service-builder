@@ -2449,7 +2449,12 @@ fn steps(
                     Some(e) => format!("Some({})", text(e)?),
                     None => "None".to_string(),
                 };
-                let ttl = lower(project, scope, ttl_seconds, &TypeRef::scalar(FieldType::Int64))?;
+                let ttl = lower(
+                    project,
+                    scope,
+                    ttl_seconds,
+                    &TypeRef::scalar(FieldType::Int64),
+                )?;
                 c.line(format!(
                     "live.trace({:?}, {}, {}, {tenant}, {ttl});",
                     target.session_key_prefix,

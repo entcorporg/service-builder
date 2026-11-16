@@ -722,7 +722,10 @@ fn apply_operation(document: &mut Value, operation: &Value) -> Result<(), String
         if op == "move" {
             apply_operation(document, &json!({ "op": "remove", "path": from }))?;
         }
-        return apply_operation(document, &json!({ "op": "add", "path": path, "value": moved }));
+        return apply_operation(
+            document,
+            &json!({ "op": "add", "path": path, "value": moved }),
+        );
     }
     let path = operation
         .get("path")
