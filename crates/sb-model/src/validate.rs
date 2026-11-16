@@ -3535,6 +3535,17 @@ impl<'a> Checker<'a> {
                         );
                     }
                     if for_realtime
+                        && name == "permissions"
+                        && let Some(t) = &claim_type
+                        && (!t.repeated || t.ty != FieldType::String)
+                    {
+                        self.warn(
+                            "W_RT_CLAIM_PERMISSIONS",
+                            format!("{cp}/value"),
+                            format!("the real-time service reads `permissions` as a list of texts (`module.view`, `module.manage`): this claim is a {t}"),
+                        );
+                    }
+                    if for_realtime
                         && matches!(name, "sub" | "tid" | "sid")
                         && let Some(t) = &claim_type
                         && (t.repeated || !matches!(t.ty, FieldType::Uuid | FieldType::String))
@@ -10130,6 +10141,20 @@ mod tests {
         );
         assert!(
             warnings(&p).contains(&"W_RT_ISSUER".to_string()),
+            "{:?}",
+            warnings(&p)
+        );
+        // `permissions` must be a list: a single text fails to decode in the service.
+        let p = build(
+            "orders",
+            &[
+                ("sub", "input.order_id"),
+                ("sid", "input.order_id"),
+                ("permissions", "input.order_id"),
+            ],
+        );
+        assert!(
+            warnings(&p).contains(&"W_RT_CLAIM_PERMISSIONS".to_string()),
             "{:?}",
             warnings(&p)
         );
