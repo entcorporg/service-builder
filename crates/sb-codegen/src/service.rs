@@ -1570,7 +1570,15 @@ fn commit(c: &mut Code, service: &Service) {
 fn uses_live(service: &Service) -> bool {
     let mut used = false;
     for step in service.handler_steps() {
-        step.walk(&mut |s| used |= matches!(s, Step::PublishLive { .. } | Step::LiveGrants { .. }));
+        step.walk(&mut |s| {
+            used |= matches!(
+                s,
+                Step::PublishLive { .. }
+                    | Step::LiveGrants { .. }
+                    | Step::SessionTrace { .. }
+                    | Step::SessionRevoke { .. }
+            )
+        });
     }
     used
 }
@@ -2418,6 +2426,54 @@ fn steps(
                 c.line(format!("    grants: {permissions},"));
                 c.line("    ..Default::default()");
                 c.line("});");
+            }
+            Step::SessionTrace {
+                service: realtime,
+                session_id,
+                account_id,
+                tenant_id,
+                ttl_seconds,
+                ..
+            } => {
+                let target = project
+                    .service(realtime)
+                    .and_then(|s| s.realtime.as_ref())
+                    .ok_or_else(|| {
+                        CodegenError::Internal(format!("`{realtime}` is not a real-time service"))
+                    })?;
+                let id = TypeRef::scalar(FieldType::Uuid);
+                let text = |e: &Expr| -> Result<String, CodegenError> {
+                    Ok(format!("({}).to_string()", lower(project, scope, e, &id)?))
+                };
+                let tenant = match tenant_id {
+                    Some(e) => format!("Some({})", text(e)?),
+                    None => "None".to_string(),
+                };
+                let ttl = lower(project, scope, ttl_seconds, &TypeRef::scalar(FieldType::Int64))?;
+                c.line(format!(
+                    "live.trace({:?}, {}, {}, {tenant}, {ttl});",
+                    target.session_key_prefix,
+                    text(session_id)?,
+                    text(account_id)?
+                ));
+            }
+            Step::SessionRevoke {
+                service: realtime,
+                session_id,
+                ..
+            } => {
+                let target = project
+                    .service(realtime)
+                    .and_then(|s| s.realtime.as_ref())
+                    .ok_or_else(|| {
+                        CodegenError::Internal(format!("`{realtime}` is not a real-time service"))
+                    })?;
+                let id = TypeRef::scalar(FieldType::Uuid);
+                c.line(format!(
+                    "live.revoke({:?}, ({}).to_string());",
+                    target.session_key_prefix,
+                    lower(project, scope, session_id, &id)?
+                ));
             }
             Step::CallRpc {
                 id,
@@ -3975,6 +4031,8 @@ fn describe(step: &Step) -> String {
         Step::Publish { topic, .. } => format!("publish to {topic}"),
         Step::PublishLive { event, .. } => format!("push `{event}` to the browsers"),
         Step::LiveGrants { .. } => "tell the browsers their rights changed".into(),
+        Step::SessionTrace { .. } => "leave the trace of the session".into(),
+        Step::SessionRevoke { .. } => "delete the trace of the session".into(),
         Step::CallRpc {
             service, method, ..
         } => format!("call {service}.{method}"),

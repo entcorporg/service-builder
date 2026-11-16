@@ -102,6 +102,23 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                     }
                 }
             }
+            Step::SessionTrace {
+                session_id,
+                account_id,
+                tenant_id,
+                ttl_seconds,
+                ..
+            } => {
+                expr(session_id, &format!("{path}/sessionId"), out);
+                expr(account_id, &format!("{path}/accountId"), out);
+                expr(ttl_seconds, &format!("{path}/ttlSeconds"), out);
+                if let Some(e) = tenant_id {
+                    expr(e, &format!("{path}/tenantId"), out);
+                }
+            }
+            Step::SessionRevoke { session_id, .. } => {
+                expr(session_id, &format!("{path}/sessionId"), out)
+            }
             Step::CallRpc { request, .. } => assignments(request, &format!("{path}/request"), out),
             Step::Respond {
                 fields, cookies, ..

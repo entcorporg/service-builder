@@ -1072,6 +1072,32 @@ pub enum Step {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         permissions: Option<Expr>,
     },
+    /// Leaves the trace of a session where a real-time service reads it: `<sessionKeyPrefix>:<sessionId>` =
+    /// `{accountId, tenantId, exp}`, with a lifetime of `ttlSeconds` (the one of the access token it goes with). A stream
+    /// of the real-time service lives while that trace does. The prefix is the one of the service's settings, so both
+    /// sides cannot drift. Written once the flow has committed, best effort, like `publishLive`.
+    #[serde(rename_all = "camelCase")]
+    SessionTrace {
+        id: String,
+        /// The real-time service that reads the trace.
+        service: String,
+        session_id: Expr,
+        account_id: Expr,
+        /// The company; absent in a system without companies.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tenant_id: Option<Expr>,
+        /// Lifetime of the trace, in seconds (an integer, the one of the access token).
+        ttl_seconds: Expr,
+    },
+    /// Deletes the trace of a session (logout, refresh token revoked): its streams close at once instead of at their next
+    /// deadline. Written once the flow has committed, best effort.
+    #[serde(rename_all = "camelCase")]
+    SessionRevoke {
+        id: String,
+        /// The real-time service that reads the trace.
+        service: String,
+        session_id: Expr,
+    },
     /// Call an RPC of another service.
     #[serde(rename_all = "camelCase")]
     CallRpc {
@@ -2171,6 +2197,8 @@ impl Step {
             | Step::Publish { id, .. }
             | Step::PublishLive { id, .. }
             | Step::LiveGrants { id, .. }
+            | Step::SessionTrace { id, .. }
+            | Step::SessionRevoke { id, .. }
             | Step::CallRpc { id, .. }
             | Step::Branch { id, .. }
             | Step::Respond { id, .. }

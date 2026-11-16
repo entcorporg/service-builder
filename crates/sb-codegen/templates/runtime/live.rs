@@ -1,4 +1,4 @@
-//! Events for the browsers: the step `publishLive`.
+//! Events for the browsers (the step `publishLive`) and the traces of sessions they depend on (`sessionTrace`, `sessionRevoke`).
 //!
 //! A flow does not talk to the browsers. It leaves a JSON message on a channel of DragonflyDB (or Valkey, or Redis) and the
 //! real-time service of the project, which listens to that channel, hands it to the open streams it is for. The shape of the
@@ -86,6 +86,15 @@ impl Event<'_> {
 #[derive(Debug, Default)]
 pub struct Live {
     pending: Vec<(&'static str, String)>,
+    /// The traces of sessions to write or delete (`sessionTrace`, `sessionRevoke`), kept like the events.
+    traces: Vec<Trace>,
+}
+
+/// What a `sessionTrace` or `sessionRevoke` step leaves for the real-time service, which reads `<prefix>:<session>`.
+#[derive(Debug, Clone, PartialEq)]
+enum Trace {
+    Write { key: String, json: String, ttl: i64 },
+    Delete { key: String },
 }
 
 impl Live {
@@ -98,14 +107,38 @@ impl Live {
         self.pending.push((channel, event.message().to_string()));
     }
 
-    /// Sends what was kept. To be called after the commit; it never fails the flow.
-    pub async fn flush(&mut self) {
-        if self.pending.is_empty() {
+    /// Keeps the trace of a session until [`Live::flush`]: `<prefix>:<session>` = `{accountId, tenantId, exp}`, which
+    /// expires after `ttl_seconds` (the lifetime of the access token); `exp` is that moment, in unix seconds.
+    pub fn trace(&mut self, prefix: &str, session: String, account: String, tenant: Option<String>, ttl_seconds: i64) {
+        if ttl_seconds <= 0 {
+            tracing::error!(%session, ttl_seconds, "session trace dropped: the lifetime is not positive");
             return;
         }
-        let pending = std::mem::take(&mut self.pending);
-        if let Err(e) = publish_all(&pending).await {
-            tracing::warn!(error = %e, events = pending.len(), "live events not published");
+        let exp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64)
+            .saturating_add(ttl_seconds);
+        self.traces.push(Trace::Write { key: format!("{prefix}:{session}"), json: trace_json(&account, tenant.as_deref(), exp), ttl: ttl_seconds });
+    }
+
+    /// Keeps the deletion of the trace of a session until [`Live::flush`].
+    pub fn revoke(&mut self, prefix: &str, session: String) {
+        self.traces.push(Trace::Delete { key: format!("{prefix}:{session}") });
+    }
+
+    /// Sends what was kept. To be called after the commit; it never fails the flow.
+    pub async fn flush(&mut self) {
+        if !self.pending.is_empty() {
+            let pending = std::mem::take(&mut self.pending);
+            if let Err(e) = publish_all(&pending).await {
+                tracing::warn!(error = %e, events = pending.len(), "live events not published");
+            }
+        }
+        if !self.traces.is_empty() {
+            let traces = std::mem::take(&mut self.traces);
+            if let Err(e) = write_traces(&traces).await {
+                tracing::warn!(error = %e, traces = traces.len(), "session traces not written");
+            }
         }
     }
 }
@@ -131,6 +164,33 @@ async fn publish_all(pending: &[(&'static str, String)]) -> Result<()> {
     let mut pipe = redis::pipe();
     for (channel, payload) in pending {
         pipe.cmd("PUBLISH").arg(*channel).arg(payload).ignore();
+    }
+    pipe.query_async::<()>(&mut connection).await?;
+    Ok(())
+}
+
+/// The trace as the real-time service reads it (`sessions.rs` of its template): camelCase, no `tenantId` without company.
+fn trace_json(account: &str, tenant: Option<&str>, exp: i64) -> String {
+    let mut m = Map::new();
+    m.insert("accountId".into(), json!(account));
+    if let Some(t) = tenant {
+        m.insert("tenantId".into(), json!(t));
+    }
+    m.insert("exp".into(), json!(exp));
+    Value::Object(m).to_string()
+}
+
+async fn write_traces(traces: &[Trace]) -> Result<()> {
+    let mut connection = CONNECTION
+        .get_or_try_init(|| async { ConnectionManager::new(redis::Client::open(url()?)?).await.map_err(anyhow::Error::from) })
+        .await?
+        .clone();
+    let mut pipe = redis::pipe();
+    for t in traces {
+        match t {
+            Trace::Write { key, json, ttl } => pipe.cmd("SET").arg(key).arg(json).arg("EX").arg(*ttl).ignore(),
+            Trace::Delete { key } => pipe.cmd("DEL").arg(key).ignore(),
+        };
     }
     pipe.query_async::<()>(&mut connection).await?;
     Ok(())
@@ -188,6 +248,25 @@ mod tests {
         );
         let close = Event { kind: "grants.updated", account_id: Some("a".into()), ..Default::default() };
         assert!(close.message().get("permissions").is_none());
+    }
+
+    #[test]
+    fn a_trace_is_what_the_real_time_service_reads() {
+        let json: Value = serde_json::from_str(&trace_json("a", Some("t"), 1700)).unwrap();
+        assert_eq!(json, json!({"accountId": "a", "tenantId": "t", "exp": 1700}));
+        let json: Value = serde_json::from_str(&trace_json("a", None, 1700)).unwrap();
+        assert_eq!(json, json!({"accountId": "a", "exp": 1700}));
+    }
+
+    #[test]
+    fn traces_are_kept_under_the_prefix_and_a_lifetime_that_is_not_positive_is_refused() {
+        let mut live = Live::default();
+        live.trace("sess", "s1".into(), "a".into(), None, 900);
+        live.trace("sess", "s2".into(), "a".into(), None, 0);
+        live.revoke("sess", "s3".into());
+        assert_eq!(live.traces.len(), 2);
+        assert!(matches!(&live.traces[0], Trace::Write { key, ttl: 900, .. } if key == "sess:s1"));
+        assert_eq!(live.traces[1], Trace::Delete { key: "sess:s3".into() });
     }
 
     #[test]

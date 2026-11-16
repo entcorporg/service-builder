@@ -51,7 +51,7 @@ vérité : le canvas, l'inspecteur et le code généré en sont des vues.
   Un producteur sans étape *Publier* donne un avertissement. Les projets enregistrés avant (`schemaVersion` 1) sont
   migrés à l'ouverture : tout service qui publiait sur un topic en devient producteur.
 - **Services** : des RPC (gRPC), des routes HTTP, des consumers (Kafka) et des tâches planifiées. Chacun contient une **liste d'étapes**.
-- **Étapes** : `log`, `let`, `publish`, `publishLive`, `liveGrants`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `rateLimit`, `checkQuota`, `verifyChallenge`, `passwordStrength`, `apiKeyVerify`, `apiKeyRevoke` et `verifyHmac` (routes HTTP), `meter`, `nextNumber`, `audit`, `auditRead`, `flag`, `apiKeyCreate`, `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
+- **Étapes** : `log`, `let`, `publish`, `publishLive`, `liveGrants`, `sessionTrace`, `sessionRevoke`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `rateLimit`, `checkQuota`, `verifyChallenge`, `passwordStrength`, `apiKeyVerify`, `apiKeyRevoke` et `verifyHmac` (routes HTTP), `meter`, `nextNumber`, `audit`, `auditRead`, `flag`, `apiKeyCreate`, `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
   Une liste d'étapes est un arbre (pas un graphe arbitraire) : cela se génère en Rust structuré et s'édite comme
   une pile de blocs, comme dans un page builder.
 
@@ -1174,6 +1174,8 @@ Les destinataires sont obligatoires, comme côté service : un compte (`accountI
 d'émettre. L'étape `liveGrants` (« Droits modifiés ») le publie : `accountId`, `tenantId` (facultatif) et `permissions` (liste de
 `module.view|manage`). Avec `permissions`, les flux ouverts de ce compte dans cette entreprise adoptent les nouveaux droits et le
 navigateur relit son état ; sans, ils se ferment (le compte a quitté l'entreprise). Même tampon, même envoi après le commit.
+
+**La trace de session : `sessionTrace` et `sessionRevoke`.** Le service temps réel ne garde un flux ouvert que tant que `<préfixe>:<session>` = `{accountId, tenantId, exp}` existe dans le serveur clé-valeur. L'étape `sessionTrace` (session, compte, société facultative, durée en secondes = celle du jeton d'accès) l'écrit avec cette durée de vie ; `sessionRevoke` la supprime (déconnexion, jeton de renouvellement révoqué : les flux se ferment tout de suite). Le préfixe vient des réglages du service temps réel (`sessionKeyPrefix`) : les deux côtés ne peuvent pas diverger. Comme `publishLive`, c'est écrit après le commit, au mieux (un échec est journalisé).
 
 - **Après le commit, jamais avant.** Le flux garde l'événement dans un tampon (`eda_runtime::live::Live`) et le publie juste après
   `tx.commit()`, y compris pour le commit d'une étape `respond` : un flux qui échoue n'envoie rien, et un navigateur n'apprend jamais un

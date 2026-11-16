@@ -21,7 +21,7 @@ pub fn path(name: &str) -> &'static str {
         "let" => "M5 9h14M5 15h14",
         "assign" => "M5 9h14M5 15h14M15 5l4 4-4 4",
         "publish" => "M22 2L11 13M22 2l-7 20-4-9-9-4z",
-        "publishLive" | "liveGrants" => {
+        "publishLive" | "liveGrants" | "sessionTrace" | "sessionRevoke" => {
             "M12 13a1 1 0 100-2 1 1 0 000 2zM8.5 8.5a5 5 0 000 7M15.5 8.5a5 5 0 010 7M5.5 5.5a9 9 0 000 13M18.5 5.5a9 9 0 010 13"
         }
         "callRpc" => "M7 7h13l-4-4M17 17H4l4 4",

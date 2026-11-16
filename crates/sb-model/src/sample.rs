@@ -1986,6 +1986,7 @@ pub fn add_calendar(p: &mut Project) {
                 value_type: FieldType::Int64,
                 optional: false,
                 repeated: false,
+                mutable: false,
                 value: call(Func::NowSeconds, vec![]),
             },
             Step::Respond {
@@ -2249,6 +2250,7 @@ pub fn add_invoices(p: &mut Project) {
                 value_type: FieldType::Uuid,
                 optional: false,
                 repeated: false,
+                mutable: false,
                 value: call(Func::NewUuidV7, vec![]),
             },
             // Last before the write: the runs of this company and year wait for one another from here.
@@ -2265,6 +2267,7 @@ pub fn add_invoices(p: &mut Project) {
                 value_type: FieldType::String,
                 optional: false,
                 repeated: false,
+                mutable: false,
                 value: call(Func::ShortId, vec![path("number")]),
             },
             Step::Respond {
@@ -2976,13 +2979,35 @@ pub fn add_live_events(p: &mut Project) {
     create.steps.insert(
         at + 1,
         Step::LiveGrants {
-            id: "o3c".into(),
+            id: "o3e".into(),
             service: "Realtime".into(),
             account_id: path("order_id"),
             tenant_id: None,
             permissions: Some(Expr::Literal {
                 value: serde_json::json!(["orders.view"]),
             }),
+        },
+    );
+    // The trace the real-time service reads to keep a stream open, and its deletion at logout.
+    create.steps.insert(
+        at + 1,
+        Step::SessionTrace {
+            id: "o3c".into(),
+            service: "Realtime".into(),
+            session_id: path("order_id"),
+            account_id: path("order_id"),
+            tenant_id: None,
+            ttl_seconds: Expr::Literal {
+                value: serde_json::json!(900),
+            },
+        },
+    );
+    create.steps.insert(
+        at + 2,
+        Step::SessionRevoke {
+            id: "o3d".into(),
+            service: "Realtime".into(),
+            session_id: path("order_id"),
         },
     );
 }

@@ -27,6 +27,8 @@ pub fn title(kind: &str) -> &'static str {
         "publish" => "Publier un événement",
         "publishLive" => "Pousser vers les navigateurs",
         "liveGrants" => "Droits modifiés (temps réel)",
+        "sessionTrace" => "Trace de session (temps réel)",
+        "sessionRevoke" => "Révoquer la trace de session",
         "callRpc" => "Appeler un RPC",
         "branch" => "Condition",
         "forEach" => "Pour chaque",
@@ -80,7 +82,7 @@ fn tone(kind: &str) -> (Color32, u8, Color32) {
     let (bg, a, fg) = match kind {
         "log" => (0x8f97bd, 46, 0xb6bdea),
         "let" | "assign" => (0xb482ff, 46, 0xc7a0ff),
-        "publish" | "publishLive" | "liveGrants" => (0xffb04a, 46, 0xffb04a),
+        "publish" | "publishLive" | "liveGrants" | "sessionTrace" | "sessionRevoke" => (0xffb04a, 46, 0xffb04a),
         "callRpc" | "sql" | "httpCall" => (0x7886ff, 51, 0x7886ff),
         "branch" => (0xff66a0, 43, 0xff8fb8),
         "forEach" => (0xa78bfa, 43, 0xbfa8ff),
@@ -583,10 +585,12 @@ fn form(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, index: usize) {
 }
 
 /// The blocks that can be added, in the order of the web version.
-const ORDER: [&str; 50] = [
+const ORDER: [&str; 52] = [
     "publish",
     "publishLive",
     "liveGrants",
+    "sessionTrace",
+    "sessionRevoke",
     "sql",
     "httpCall",
     "callRpc",
@@ -648,6 +652,12 @@ fn hint(kind: &str) -> &'static str {
         }
         "liveGrants" => {
             "Prévient le service temps réel que les droits d’un compte ont changé : ses flux adoptent les nouvelles permissions, ou se ferment si on n’en donne pas"
+        }
+        "sessionTrace" => {
+            "Écrit la trace d’une session (compte, société, durée du jeton) que le service temps réel lit : ses flux vivent tant qu’elle existe"
+        }
+        "sessionRevoke" => {
+            "Supprime la trace d’une session (déconnexion, jeton de renouvellement révoqué) : ses flux se ferment tout de suite"
         }
         "callRpc" => "Appeler un autre service en gRPC",
         "httpCall" => {
@@ -764,7 +774,7 @@ fn allowed(app: &App, list: &[Step], loc: &Loc) -> Vec<&'static str> {
     ORDER
         .into_iter()
         .filter(|t| match *t {
-            "publishLive" | "liveGrants" => has_realtime,
+            "publishLive" | "liveGrants" | "sessionTrace" | "sessionRevoke" => has_realtime,
             "respond" => has_response,
             "fail" | "rateLimit" | "checkQuota" | "verifyChallenge" | "passwordStrength"
             | "verifyJwt" | "imageSniff" | "totpVerify" | "recoveryCodeUse" => http,

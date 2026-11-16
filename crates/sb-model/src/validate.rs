@@ -3083,6 +3083,35 @@ impl<'a> Checker<'a> {
                 }
                 false
             }
+            Step::SessionTrace {
+                service,
+                session_id,
+                account_id,
+                tenant_id,
+                ttl_seconds,
+                ..
+            } => {
+                self.realtime_target(path, service);
+                let id = TypeRef::scalar(FieldType::Uuid);
+                self.check_expr(scope, session_id, Some(&id), &format!("{path}/sessionId"));
+                self.check_expr(scope, account_id, Some(&id), &format!("{path}/accountId"));
+                if let Some(e) = tenant_id {
+                    self.check_expr(scope, e, Some(&id), &format!("{path}/tenantId"));
+                }
+                let ttl = TypeRef::scalar(FieldType::Int64);
+                self.check_expr(scope, ttl_seconds, Some(&ttl), &format!("{path}/ttlSeconds"));
+                false
+            }
+            Step::SessionRevoke {
+                service,
+                session_id,
+                ..
+            } => {
+                self.realtime_target(path, service);
+                let id = TypeRef::scalar(FieldType::Uuid);
+                self.check_expr(scope, session_id, Some(&id), &format!("{path}/sessionId"));
+                false
+            }
             Step::PublishLive {
                 service,
                 event,
@@ -4843,17 +4872,8 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// The step `liveGrants`: the service must be a real-time one; the account and the company are ids, the permissions a
-    /// list of text (the service itself refuses a permission that is not `module.view|manage`).
-    fn live_grants(
-        &mut self,
-        scope: &Scope,
-        path: &str,
-        service: &str,
-        account_id: &Expr,
-        tenant_id: &Option<Expr>,
-        permissions: &Option<Expr>,
-    ) {
+    /// The steps that write in the store of a real-time service: the service must be one.
+    fn realtime_target(&mut self, path: &str, service: &str) {
         match self.project.service(service) {
             Some(s) if s.kind == ServiceKind::Realtime => {}
             Some(_) => self.error(
@@ -4867,6 +4887,20 @@ impl<'a> Checker<'a> {
                 format!("unknown service `{service}`: pick a real-time service"),
             ),
         }
+    }
+
+    /// The step `liveGrants`: the service must be a real-time one; the account and the company are ids, the permissions a
+    /// list of text (the service itself refuses a permission that is not `module.view|manage`).
+    fn live_grants(
+        &mut self,
+        scope: &Scope,
+        path: &str,
+        service: &str,
+        account_id: &Expr,
+        tenant_id: &Option<Expr>,
+        permissions: &Option<Expr>,
+    ) {
+        self.realtime_target(path, service);
         let id = TypeRef::scalar(FieldType::Uuid);
         self.check_expr(scope, account_id, Some(&id), &format!("{path}/accountId"));
         if let Some(e) = tenant_id {
@@ -7338,6 +7372,7 @@ mod tests {
                     value_type: FieldType::String,
                     optional: false,
                     repeated: false,
+                    mutable: false,
                     value,
                 },
             );
@@ -7594,6 +7629,7 @@ mod tests {
                     value_type,
                     optional,
                     repeated: false,
+                    mutable: false,
                     value,
                 },
             );
@@ -7667,6 +7703,7 @@ mod tests {
                     value_type,
                     optional,
                     repeated: false,
+                    mutable: false,
                     value,
                 },
             );
@@ -10245,6 +10282,43 @@ mod tests {
         let mut gone = p;
         put(&mut gone, step("Nowhere", json!(null)));
         assert!(codes(&gone).contains(&"E_LIVE_SERVICE".into()));
+    }
+
+    #[test]
+    fn session_steps_need_a_real_time_service_and_an_integer_lifetime() {
+        use serde_json::json;
+        let mut p = sample::orders();
+        sample::add_live_events(&mut p);
+        let put = |p: &mut Project, v: serde_json::Value| {
+            let rpc = p
+                .services
+                .iter_mut()
+                .find(|s| s.name == "Orders")
+                .unwrap()
+                .rpcs
+                .iter_mut()
+                .find(|r| r.name == "CreateOrder")
+                .unwrap();
+            rpc.steps.insert(0, serde_json::from_value(v).unwrap());
+        };
+        let trace = |service: &str, ttl: serde_json::Value| {
+            json!({
+                "type": "sessionTrace", "id": "t1", "service": service,
+                "sessionId": {"kind": "path", "path": "order_id"},
+                "accountId": {"kind": "path", "path": "order_id"},
+                "ttlSeconds": ttl,
+            })
+        };
+        let mut ok = p.clone();
+        put(&mut ok, trace("Realtime", json!({"kind": "literal", "value": 900})));
+        put(&mut ok, json!({"type": "sessionRevoke", "id": "t2", "service": "Realtime", "sessionId": {"kind": "path", "path": "order_id"}}));
+        assert!(!codes(&ok).contains(&"E_LIVE_SERVICE".into()), "{:?}", validate(&ok));
+        let mut bad = p.clone();
+        put(&mut bad, trace("Orders", json!({"kind": "literal", "value": 900})));
+        assert!(codes(&bad).contains(&"E_LIVE_SERVICE".into()));
+        let mut revoke = p;
+        put(&mut revoke, json!({"type": "sessionRevoke", "id": "t2", "service": "Nowhere", "sessionId": {"kind": "path", "path": "order_id"}}));
+        assert!(codes(&revoke).contains(&"E_LIVE_SERVICE".into()));
     }
 
     /// Changes some fields of a step, by their JSON names (`null` removes one).

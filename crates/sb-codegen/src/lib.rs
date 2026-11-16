@@ -1757,7 +1757,7 @@ mod tests {
     }
 
     #[test]
-    fn a_grants_step_sends_the_control_message_after_the_commit() {
+    fn the_live_steps_send_their_control_messages_after_the_commit() {
         let mut p = sample::orders();
         sample::add_live_events(&mut p);
         let rpc = p
@@ -1783,6 +1783,23 @@ mod tests {
             }))
             .unwrap(),
         );
+        let path = |p: &str| serde_json::json!({"kind": "path", "path": p});
+        rpc.steps.insert(
+            at,
+            serde_json::from_value(serde_json::json!({
+                "type": "sessionTrace", "id": "t1", "service": "Realtime",
+                "sessionId": path("order_id"), "accountId": path("order_id"),
+                "ttlSeconds": {"kind": "literal", "value": 900},
+            }))
+            .unwrap(),
+        );
+        rpc.steps.insert(
+            at,
+            serde_json::from_value(serde_json::json!({
+                "type": "sessionRevoke", "id": "t2", "service": "Realtime", "sessionId": path("order_id"),
+            }))
+            .unwrap(),
+        );
         assert!(
             !sb_model::has_errors(&sb_model::validate(&p)),
             "{:?}",
@@ -1797,6 +1814,13 @@ mod tests {
             flat.contains("kind: \"grants.updated\", account_id: Some((order_id.clone()).to_string()), tenant_id: Some((order_id.clone()).to_string()), grants: None, ..Default::default() });"),
             "{flat}"
         );
+        assert!(
+            flat.contains("live.trace(\"sess\", (order_id.clone()).to_string(), (order_id.clone()).to_string(), None, 900"),
+            "{flat}"
+        );
+        assert!(flat.contains("live.revoke(\"sess\", (order_id.clone()).to_string());"), "{flat}");
+        let commit = flat.find("tx.commit().await?; live.flush().await;").expect("flushed after the commit");
+        assert!(flat.find("live.trace(").unwrap() < commit);
     }
 
     #[test]
