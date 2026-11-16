@@ -934,7 +934,7 @@ pub struct Route {
     pub path: String,
     pub request: String,
     pub response: String,
-    /// Success status code (200, 201 or 202).
+    /// Success status code (200, 201, 202 or 204: no content, the response is not sent).
     #[serde(default = "default_status")]
     pub status: u16,
     #[serde(default)]

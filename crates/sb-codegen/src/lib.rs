@@ -340,6 +340,23 @@ mod tests {
     }
 
     #[test]
+    fn a_204_route_answers_without_a_body() {
+        let mut p = sample::orders();
+        let name = {
+            let r = p.services[0]
+                .routes
+                .iter_mut()
+                .find(|r| r.name == "get_order")
+                .unwrap();
+            r.status = 204;
+            r.name.clone()
+        };
+        let files = generate(&p).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        assert!(http.contains(".map(|_| StatusCode::NO_CONTENT)"), "{name}");
+    }
+
+    #[test]
     fn routes_become_axum_handlers_that_delegate_to_flows() {
         let files = generate(&sample::orders()).unwrap();
         let http = file(&files, "services/orders/src/transport/http.rs");

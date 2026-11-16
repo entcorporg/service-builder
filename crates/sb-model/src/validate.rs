@@ -1156,11 +1156,11 @@ impl<'a> Checker<'a> {
                     vec![]
                 }
             };
-            if !(200..=202).contains(&r.status) {
+            if !matches!(r.status, 200..=202 | 204) {
                 self.error(
                     "E_ROUTE_STATUS",
                     format!("{rp}/status"),
-                    "the success status must be 200, 201 or 202",
+                    "the success status must be 200, 201, 202 or 204",
                 );
             }
             let req_ok = self.require_message(&r.request, &format!("{rp}/request"));
@@ -5943,6 +5943,8 @@ mod tests {
         p.services[0].routes[2].method = HttpMethod::Delete;
         assert!(errors(&p).is_empty(), "{:?}", errors(&p));
 
+        route_of(&mut p).status = 204;
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
         route_of(&mut p).status = 404;
         assert!(errors(&p).contains(&"E_ROUTE_STATUS".into()));
     }

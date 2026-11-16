@@ -426,10 +426,14 @@ fn operation(
     statuses.sort();
     let mut responses = Map::new();
     for status in statuses {
-        let mut response = json!({
-            "description": "Success",
-            "content": { "application/json": { "schema": schemas.reference(&route.response) } },
-        });
+        let mut response = if status == 204 {
+            json!({ "description": "Success, no content" })
+        } else {
+            json!({
+                "description": "Success",
+                "content": { "application/json": { "schema": schemas.reference(&route.response) } },
+            })
+        };
         if !headers.is_empty() {
             response["headers"] = Value::Object(headers.clone().into_iter().collect());
         }
@@ -547,6 +551,22 @@ mod tests {
             ["schema"]["properties"];
         assert_eq!(signup["email"]["format"], "email");
         assert_eq!(signup["email"]["type"], "string");
+    }
+
+    #[test]
+    fn a_204_route_has_no_content() {
+        let mut project = sample::showcase();
+        let route = &mut project.services[0].routes[0];
+        let path = route.path.clone();
+        route.status = 204;
+        let doc = openapi(&project, &project.services[0]).unwrap();
+        let ok = &doc["paths"][path.as_str()]
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()["responses"]["204"];
+        assert!(ok.is_object() && ok.get("content").is_none(), "{ok}");
     }
 
     #[test]

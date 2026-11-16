@@ -527,7 +527,7 @@ fn header(
                 });
             }
         });
-        let statuses: Vec<String> = ["200 OK", "201 Created", "202 Accepted"]
+        let statuses: Vec<String> = ["200 OK", "201 Created", "202 Accepted", "204 No Content"]
             .map(String::from)
             .to_vec();
         let now = statuses

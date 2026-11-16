@@ -1253,6 +1253,7 @@ fn http_rs(project: &Project, service: &Service) -> String {
         let status = match r.status {
             201 => "StatusCode::CREATED",
             202 => "StatusCode::ACCEPTED",
+            204 => "StatusCode::NO_CONTENT",
             _ => "StatusCode::OK",
         };
         let sourced = sourced_fields(project, r);
@@ -1400,7 +1401,7 @@ fn http_rs(project: &Project, service: &Service) -> String {
             c.line(format!(
                 "        let status = reply.status.and_then(|s| StatusCode::from_u16(s).ok()).unwrap_or({status});"
             ));
-            c.line("        let mut response = (status, Json(reply.body)).into_response();");
+            c.line("        let mut response = if status == StatusCode::NO_CONTENT { status.into_response() } else { (status, Json(reply.body)).into_response() };");
             c.line("        for (name, value) in &reply.headers {");
             c.line("            // A name or value the flow computed that is not a valid header is a flaw of the flow, not of the client.");
             c.line("            let pair = axum::http::HeaderName::try_from(name.as_str()).ok().zip(Some(value).filter(|v| eda_runtime::http::header_value_ok(v)).and_then(|v| HeaderValue::from_str(v).ok()));");
@@ -1420,7 +1421,11 @@ fn http_rs(project: &Project, service: &Service) -> String {
             c.line("        Ok(response)");
             c.line("    })");
         } else {
-            c.line(format!("    .map(|body| ({status}, Json(body)))"));
+            if r.status == 204 {
+                c.line(format!("    .map(|_| {status})"));
+            } else {
+                c.line(format!("    .map(|body| ({status}, Json(body)))"));
+            }
             c.line("    .map_err(ApiError::from)");
         }
         c.close();
