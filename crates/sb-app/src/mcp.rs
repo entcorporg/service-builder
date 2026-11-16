@@ -68,7 +68,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "patch_project",
-        description: "Edits the project with RFC 6902 operations (add, replace, remove; JSON pointers like /services/0/routes/-) plus insert_before and insert_after, and with items addressed by name or id (/services/name=Orders/consumers/name=on_paid/steps/id=h2) rather than by index, validates the result once and saves it. Operations (or one operation's `value`) can be read from a JSON file the server can see (`operations_path`, `value_path`), so a script can prepare a large change. Put every edit of a step in one call: nothing is written if an operation fails or the result is not a project. Returns the totals and only the diagnostics this edit introduced or fixed (`validate` lists them all).",
+        description: "Edits the project with RFC 6902 operations (add, replace, remove; JSON pointers like /services/0/routes/-) plus insert_before, insert_after, move and copy (between two pointers, e.g. to move a route to another service), and with items addressed by name or id (/services/name=Orders/consumers/name=on_paid/steps/id=h2) rather than by index, validates the result once and saves it. Operations (or one operation's `value`) can be read from a JSON file the server can see (`operations_path`, `value_path`), so a script can prepare a large change. Put every edit of a step in one call: nothing is written if an operation fails or the result is not a project. Returns the totals and only the diagnostics this edit introduced or fixed (`validate` lists them all).",
         properties: || {
             json!({ "operations": {
                 "type": "array",
@@ -76,7 +76,8 @@ const TOOLS: &[ToolDef] = &[
                 "items": {
                     "type": "object",
                     "properties": {
-                        "op": { "type": "string", "enum": ["add", "replace", "remove", "insert_before", "insert_after"], "description": "insert_before and insert_after put `value` next to the array item `path` designates." },
+                        "op": { "type": "string", "enum": ["add", "replace", "remove", "insert_before", "insert_after", "move", "copy"], "description": "insert_before and insert_after put `value` next to the array item `path` designates. move and copy take the value at `from` (a service, route, table, consumer, step...) and add it at `path`, so a big item changes service without being re-sent." },
+                        "from": { "type": "string", "description": "Source pointer of move and copy; same syntax as path." },
                         "path": { "type": "string", "description": "JSON pointer. In an array a segment may be an index or key=value, which selects the item whose key equals value: /services/name=Orders/rpcs/name=CreateOrder/steps/id=h2. Prefer names and ids: indexes shift when something is inserted." },
                         "value": { "description": "New value for add and replace." },
                         "value_path": { "type": "string", "description": "Instead of `value`: path of a JSON file holding the value." }
@@ -684,11 +685,45 @@ fn descend<'a>(value: &'a mut Value, segment: &str, at: &str) -> Result<&'a mut 
     }
 }
 
+/// The value a JSON pointer designates (names and ids allowed in arrays), cloned.
+fn fetch(document: &mut Value, path: &str) -> Result<Value, String> {
+    let pointer = path
+        .strip_prefix('/')
+        .ok_or("`from` must be a JSON pointer starting with /")?;
+    let mut current = &mut *document;
+    let mut walked = String::new();
+    for segment in pointer.split('/').map(unescape) {
+        current = descend(current, &segment, &walked)?;
+        walked.push('/');
+        walked.push_str(&segment);
+    }
+    Ok(current.clone())
+}
+
 fn apply_operation(document: &mut Value, operation: &Value) -> Result<(), String> {
     let op = operation
         .get("op")
         .and_then(Value::as_str)
         .ok_or("missing `op`")?;
+    if op == "move" || op == "copy" {
+        // RFC 6902: copy = add the value found at `from`; move = remove it from there, then add it.
+        let from = operation
+            .get("from")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("`{op}` needs a `from` pointer"))?;
+        let path = operation
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or("missing `path`")?;
+        if op == "move" && (path == from || path.starts_with(&format!("{from}/"))) {
+            return Err(format!("cannot move {from} into itself"));
+        }
+        let moved = fetch(document, from)?;
+        if op == "move" {
+            apply_operation(document, &json!({ "op": "remove", "path": from }))?;
+        }
+        return apply_operation(document, &json!({ "op": "add", "path": path, "value": moved }));
+    }
     let path = operation
         .get("path")
         .and_then(Value::as_str)
@@ -762,7 +797,7 @@ fn apply_operation(document: &mut Value, operation: &Value) -> Result<(), String
         }
         _ => {
             return Err(format!(
-                "unsupported op `{op}` (add, replace, remove, insert_before, insert_after)"
+                "unsupported op `{op}` (add, replace, remove, insert_before, insert_after, move, copy)"
             ));
         }
     }
@@ -1337,6 +1372,40 @@ mod tests {
         assert_eq!(route.steps.len(), 3);
         assert_eq!(route.steps[1].id(), "n1");
         assert_eq!(route.steps[2].id(), "h4");
+    }
+
+    #[test]
+    fn move_and_copy_relocate_items_between_pointers() {
+        let mut doc = json!({
+            "services": [
+                { "name": "A", "routes": [{ "name": "r1" }, { "name": "r2" }] },
+                { "name": "B", "routes": [] }
+            ]
+        });
+        apply_operation(
+            &mut doc,
+            &json!({ "op": "move", "from": "/services/name=A/routes/name=r1", "path": "/services/name=B/routes/-" }),
+        )
+        .unwrap();
+        apply_operation(
+            &mut doc,
+            &json!({ "op": "copy", "from": "/services/name=A/routes/name=r2", "path": "/services/name=B/routes/-" }),
+        )
+        .unwrap();
+        assert_eq!(doc["services"][0]["routes"], json!([{ "name": "r2" }]));
+        assert_eq!(
+            doc["services"][1]["routes"],
+            json!([{ "name": "r1" }, { "name": "r2" }])
+        );
+        let before = doc.clone();
+        let err = apply_operation(
+            &mut doc,
+            &json!({ "op": "move", "from": "/services/0", "path": "/services/0/routes/-" }),
+        )
+        .unwrap_err();
+        assert!(err.contains("into itself"), "{err}");
+        assert!(apply_operation(&mut doc, &json!({ "op": "copy", "path": "/x" })).is_err());
+        assert_eq!(doc, before);
     }
 
     #[test]
