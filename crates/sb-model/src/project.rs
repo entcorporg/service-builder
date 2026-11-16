@@ -1813,6 +1813,21 @@ pub enum Step {
         #[serde(default)]
         retry_after: Option<Expr>,
     },
+    /// Ends an HTTP route early with an error status unless `claims` (a list of strings, typically the
+    /// `permissions` claim of a verified token) contains `permission`. Replaces the raw `if !claims.contains(..)`
+    /// conditions every protected route repeats.
+    #[serde(rename_all = "camelCase")]
+    RequirePermission {
+        id: String,
+        /// A list of strings: `claims.permissions`.
+        claims: Expr,
+        /// The permission that must be in the list, e.g. `crm.manage`.
+        permission: String,
+        #[serde(default = "default_forbidden_status")]
+        status: u16,
+        #[serde(default = "default_forbidden_message")]
+        message: String,
+    },
     /// Runs `steps` once per element of a list: a repeated field, a `Vec` variable, the rows of a `many` SQL step.
     /// `item` is the element, visible inside only (a scalar, or a schema whose fields are read with `item.field`);
     /// the variables of the enclosing flow stay visible, the ones bound inside do not leak out. The steps share the
@@ -2195,6 +2210,14 @@ fn default_http_error_status() -> u16 {
     502
 }
 
+fn default_forbidden_status() -> u16 {
+    403
+}
+
+fn default_forbidden_message() -> String {
+    "Forbidden".into()
+}
+
 fn default_http_error_message() -> String {
     "the external service did not answer correctly".into()
 }
@@ -2215,6 +2238,7 @@ impl Step {
             | Step::Respond { id, .. }
             | Step::Sql { id, .. }
             | Step::Fail { id, .. }
+            | Step::RequirePermission { id, .. }
             | Step::RateLimit { id, .. }
             | Step::NextNumber { id, .. }
             | Step::Flag { id, .. }

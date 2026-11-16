@@ -1065,6 +1065,7 @@ mod tests {
         // An agent can copy a step of each kind from it...
         for kind in [
             "verifyHmac",
+            "requirePermission",
             "rateLimit",
             "encrypt",
             "hashPassword",

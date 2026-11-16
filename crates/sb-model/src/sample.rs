@@ -2723,6 +2723,14 @@ pub fn add_sql_reads(p: &mut Project) {
             }],
             otherwise: vec![],
         },
+        // The rights of the caller: the token must carry the `reader` role.
+        Step::RequirePermission {
+            id: "q3b".into(),
+            claims: path("claims.roles"),
+            permission: "reader".into(),
+            status: 403,
+            message: "this account cannot read posts".into(),
+        },
         Step::Let {
             id: "q4".into(),
             name: "tenant_id".into(),

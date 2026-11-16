@@ -339,6 +339,7 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                     expr(key, &format!("{path}/idempotencyKey"), out);
                 }
             }
+            Step::RequirePermission { claims, .. } => expr(claims, &format!("{path}/claims"), out),
             Step::Fail { retry_after, .. } => {
                 if let Some(wait) = retry_after {
                     expr(wait, &format!("{path}/retryAfter"), out);

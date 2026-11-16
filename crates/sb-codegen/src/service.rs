@@ -3336,6 +3336,26 @@ fn steps(
                 }
                 c.line("return Err(error.into());");
             }
+            Step::RequirePermission {
+                claims,
+                permission,
+                status,
+                message,
+                ..
+            } => {
+                let list = TypeRef {
+                    repeated: true,
+                    ..TypeRef::scalar(FieldType::String)
+                };
+                let claims = lower(project, scope, claims, &list)?;
+                c.line(format!(
+                    "if !({claims}).iter().any(|p| p.as_str() == {permission:?}) {{"
+                ));
+                c.line(format!(
+                    "    return Err(eda_runtime::http::HttpError::new({status}, {message:?}).into());"
+                ));
+                c.line("}");
+            }
             Step::Code { code, .. } => {
                 c.line(code.trim_end());
             }
@@ -4070,6 +4090,7 @@ fn describe(step: &Step) -> String {
         Step::ForEach { item, .. } => format!("for each {item}"),
         Step::Respond { .. } => "respond".into(),
         Step::Fail { status, .. } => format!("fail {status}"),
+        Step::RequirePermission { permission, .. } => format!("require `{permission}`"),
         Step::VerifyHmac { header, .. } => format!("verify the signature in {header}"),
         Step::RateLimit {
             max,

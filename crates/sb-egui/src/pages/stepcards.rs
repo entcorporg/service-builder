@@ -70,6 +70,7 @@ pub fn title(kind: &str) -> &'static str {
         "randomToken" => "Jeton aléatoire",
         "sha256" => "Empreinte SHA-256",
         "fail" => "Refuser",
+        "requirePermission" => "Exiger une permission",
         "httpCall" => "Appeler une API HTTP",
         "sql" => "SQL",
         "code" => "Code Rust",
@@ -87,7 +88,7 @@ fn tone(kind: &str) -> (Color32, u8, Color32) {
         "branch" => (0xff66a0, 43, 0xff8fb8),
         "forEach" => (0xa78bfa, 43, 0xbfa8ff),
         "respond" => (0x3ecf8e, 43, 0x3ecf8e),
-        "fail" => (0xff6678, 38, 0xff6678),
+        "fail" | "requirePermission" => (0xff6678, 38, 0xff6678),
         "rateLimit" | "meter" | "checkQuota" | "verifyChallenge" => (0xff8c5a, 41, 0xff9c6e),
         "nextNumber" | "audit" | "auditRead" | "flag" => (0x3ecf8e, 43, 0x3ecf8e),
         "code" => (0x78dcff, 38, 0x7fdcff),
@@ -161,6 +162,7 @@ fn summary(step: &Step, kind: &str) -> String {
             format!("si {c}")
         }
         "forEach" => format!("{} dans {}", get("item"), get("list")),
+        "requirePermission" => format!("{} → {}", get("permission"), get("status")),
         "fail" => format!("{} {}", get("status"), get("message"))
             .trim()
             .to_string(),
@@ -599,7 +601,7 @@ fn form(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, index: usize) {
 }
 
 /// The blocks that can be added, in the order of the web version.
-const ORDER: [&str; 52] = [
+const ORDER: [&str; 53] = [
     "publish",
     "publishLive",
     "liveGrants",
@@ -615,6 +617,7 @@ const ORDER: [&str; 52] = [
     "log",
     "respond",
     "fail",
+    "requirePermission",
     "rateLimit",
     "checkQuota",
     "meter",
@@ -766,6 +769,9 @@ fn hint(kind: &str) -> &'static str {
         "verifyPassword" => "Vrai ou faux ; un compte inconnu coûte le même temps",
         "randomToken" => "256 bits en hexadécimal : session, e-mail, réinitialisation",
         "sha256" => "Ce qu’on stocke d’un jeton, en hexadécimal",
+        "requirePermission" => {
+            "Refuse l’appel (403 par défaut) si la liste de permissions du jeton ne contient pas la permission demandée"
+        }
         "fail" => "Arrêter la route avec un statut d’erreur HTTP (400, 401, 404, 429…)",
         "sql" => "Lire, insérer, modifier ou supprimer dans une table du service",
         "code" => "Insérer du Rust écrit à la main",
@@ -790,7 +796,7 @@ fn allowed(app: &App, list: &[Step], loc: &Loc) -> Vec<&'static str> {
         .filter(|t| match *t {
             "publishLive" | "liveGrants" | "sessionTrace" | "sessionRevoke" => has_realtime,
             "respond" => has_response,
-            "fail" | "rateLimit" | "checkQuota" | "verifyChallenge" | "passwordStrength"
+            "fail" | "requirePermission" | "rateLimit" | "checkQuota" | "verifyChallenge" | "passwordStrength"
             | "verifyJwt" | "imageSniff" | "totpVerify" | "recoveryCodeUse" => http,
             t if t.starts_with("passkey") => http,
             "verifyHmac" => allow_signature,

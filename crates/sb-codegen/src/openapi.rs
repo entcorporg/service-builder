@@ -227,6 +227,9 @@ fn step_statuses(route: &Route) -> Vec<(u16, String, bool)> {
                     retry_after,
                     ..
                 } => Some((*status, message.clone(), retry_after.is_some())),
+                Step::RequirePermission {
+                    status, message, ..
+                } => Some((*status, message.clone(), false)),
                 Step::RateLimit { .. } => Some((429, "Too many attempts".into(), true)),
                 Step::VerifyChallenge { .. } => Some((
                     400,

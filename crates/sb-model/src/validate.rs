@@ -4428,6 +4428,48 @@ impl<'a> Checker<'a> {
                 // Nothing runs after it, like a Respond.
                 true
             }
+            Step::RequirePermission {
+                claims,
+                permission,
+                status,
+                message,
+                ..
+            } => {
+                if !matches!(env.handler, Handler::Route { .. }) {
+                    self.error(
+                        "E_FAIL_OUTSIDE_ROUTE",
+                        path,
+                        "RequirePermission answers an HTTP status: it only makes sense in an HTTP route",
+                    );
+                }
+                if !(400..=599).contains(status) || matches!(status, 429 | 503) {
+                    self.error(
+                        "E_FAIL_STATUS",
+                        format!("{path}/status"),
+                        format!("`{status}` is not a refusal status (400 to 599, not 429 or 503)"),
+                    );
+                }
+                if message.trim().is_empty() {
+                    self.error(
+                        "E_FAIL_MESSAGE",
+                        format!("{path}/message"),
+                        "say what the client is told",
+                    );
+                }
+                if permission.trim().is_empty() {
+                    self.error(
+                        "E_REQUIRE_PERMISSION",
+                        format!("{path}/permission"),
+                        "name the permission the caller must hold (e.g. `crm.manage`)",
+                    );
+                }
+                let list = TypeRef {
+                    repeated: true,
+                    ..TypeRef::scalar(FieldType::String)
+                };
+                self.check_expr(scope, claims, Some(&list), &format!("{path}/claims"));
+                false
+            }
             Step::HttpCall { .. } => {
                 self.http_call(scope, path, step);
                 false
@@ -10699,7 +10741,7 @@ mod tests {
             .iter_mut()
             .find(|r| r.name == "list_posts")
             .unwrap();
-        &mut route.steps[3]
+        &mut route.steps[4]
     }
 
     fn reads_codes(p: &Project) -> Vec<String> {
@@ -10718,7 +10760,7 @@ mod tests {
             .unwrap();
         let typed = p.with_sql_rows();
         let _ = typed;
-        assert!(matches!(route.steps[4], Step::Respond { .. }));
+        assert!(matches!(route.steps[5], Step::Respond { .. }));
     }
 
     #[test]
@@ -10854,7 +10896,7 @@ mod tests {
             .iter_mut()
             .find(|r| r.name == "list_posts")
             .unwrap();
-        route.steps.remove(2);
+        route.steps.remove(3);
         assert!(
             reads_codes(&p).contains(&"E_TENANT_SCOPE".to_string()),
             "{:?}",

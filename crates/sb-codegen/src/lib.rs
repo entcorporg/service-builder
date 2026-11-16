@@ -657,6 +657,71 @@ mod tests {
     }
 
     #[test]
+    fn require_permission_refuses_a_caller_without_the_permission() {
+        use sb_model::{Expr, Step};
+        let mut p = sample::orders();
+        let steps = &mut p.services[0].routes[1].steps;
+        steps.insert(
+            0,
+            Step::RequirePermission {
+                id: "rp1".into(),
+                claims: Expr::Path {
+                    path: "granted".into(),
+                },
+                permission: "crm.manage".into(),
+                status: 403,
+                message: "Forbidden".into(),
+            },
+        );
+        steps.insert(
+            0,
+            Step::Let {
+                id: "rp0".into(),
+                name: "granted".into(),
+                value_type: sb_model::FieldType::String,
+                optional: false,
+                repeated: true,
+                mutable: false,
+                value: Expr::Literal {
+                    value: serde_json::json!(["crm.view"]),
+                },
+            },
+        );
+        assert_eq!(
+            sb_model::validate(&p),
+            vec![],
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        assert!(api.contains(".iter().any(|p| p.as_str() == \"crm.manage\")"));
+        assert!(api.contains("HttpError::new(403, \"Forbidden\")"));
+        let mut q = sample::orders();
+        q.services[0].routes[1].steps.insert(
+            0,
+            Step::RequirePermission {
+                id: "rp1".into(),
+                claims: Expr::Path {
+                    path: "input.nothing".into(),
+                },
+                permission: "".into(),
+                status: 200,
+                message: "".into(),
+            },
+        );
+        let codes: Vec<String> = sb_model::validate(&q).into_iter().map(|d| d.code).collect();
+        for code in [
+            "E_FAIL_STATUS",
+            "E_FAIL_MESSAGE",
+            "E_REQUIRE_PERMISSION",
+            "E_UNKNOWN_PATH",
+        ] {
+            assert!(codes.contains(&code.to_string()), "{code}: {codes:?}");
+        }
+    }
+
+    #[test]
     fn fail_can_wait_before_a_retry() {
         use sb_model::{Expr, Step};
         let mut p = sample::orders();
@@ -2941,7 +3006,7 @@ mod tests {
             .routes
             .iter_mut()
             .find(|r| r.name == "list_posts")
-            .map(|r| &mut r.steps[3])
+            .map(|r| &mut r.steps[4])
         {
             cursor.clear();
             *offset = Some(Expr::Path {

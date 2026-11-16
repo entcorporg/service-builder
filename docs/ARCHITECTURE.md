@@ -51,7 +51,7 @@ vérité : le canvas, l'inspecteur et le code généré en sont des vues.
   Un producteur sans étape *Publier* donne un avertissement. Les projets enregistrés avant (`schemaVersion` 1) sont
   migrés à l'ouverture : tout service qui publiait sur un topic en devient producteur.
 - **Services** : des RPC (gRPC), des routes HTTP, des consumers (Kafka) et des tâches planifiées. Chacun contient une **liste d'étapes**.
-- **Étapes** : `log`, `let`, `publish`, `publishLive`, `liveGrants`, `sessionTrace`, `sessionRevoke`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `rateLimit`, `checkQuota`, `verifyChallenge`, `passwordStrength`, `apiKeyVerify`, `apiKeyRevoke` et `verifyHmac` (routes HTTP), `meter`, `nextNumber`, `audit`, `auditRead`, `flag`, `apiKeyCreate`, `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
+- **Étapes** : `log`, `let`, `publish`, `publishLive`, `liveGrants`, `sessionTrace`, `sessionRevoke`, `callRpc`, `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `requirePermission` (403 si la liste de permissions du jeton ne contient pas la permission), `rateLimit`, `checkQuota`, `verifyChallenge`, `passwordStrength`, `apiKeyVerify`, `apiKeyRevoke` et `verifyHmac` (routes HTTP), `meter`, `nextNumber`, `audit`, `auditRead`, `flag`, `apiKeyCreate`, `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
   Une liste d'étapes est un arbre (pas un graphe arbitraire) : cela se génère en Rust structuré et s'édite comme
   une pile de blocs, comme dans un page builder.
 
