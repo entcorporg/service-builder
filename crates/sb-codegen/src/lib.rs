@@ -542,6 +542,85 @@ mod tests {
     }
 
     #[test]
+    fn a_read_model_is_fed_by_an_idempotent_consumer_that_upserts_and_deletes() {
+        use sb_model::{CmpOp, Condition, Consumer, Expr, SqlCondition, SqlOp, Step, validate};
+        let mut p = sample::orders();
+        let mut upsert = p.services[0].routes[0].steps[3].clone();
+        if let Step::Sql {
+            id,
+            op,
+            conflict,
+            values,
+            ..
+        } = &mut upsert
+        {
+            *id = "rm2".into();
+            *op = SqlOp::Upsert;
+            *conflict = vec!["order_id".into()];
+            // The route read its own variables; an event is read through `input`.
+            for a in values.iter_mut() {
+                if let Expr::Path { path } = &mut a.value {
+                    if !path.starts_with("input.") {
+                        *path = format!("input.{path}");
+                    }
+                }
+            }
+        } else {
+            panic!("sample changed");
+        }
+        let mut delete = upsert.clone();
+        if let Step::Sql {
+            id,
+            op,
+            values,
+            conflict,
+            conditions,
+            ..
+        } = &mut delete
+        {
+            *id = "rm1".into();
+            *op = SqlOp::Delete;
+            values.clear();
+            conflict.clear();
+            *conditions = vec![SqlCondition {
+                column: "order_id".into(),
+                op: CmpOp::Eq,
+                value: Expr::Path {
+                    path: "input.order_id".into(),
+                },
+                test: Default::default(),
+                or: vec![],
+            }];
+        }
+        p.services[0].consumers.push(Consumer {
+            name: "project_orders".into(),
+            topic: "orders.created".into(),
+            group_id: None,
+            idempotent_on: Some("order_id".into()),
+            mail: None,
+            steps: vec![Step::Branch {
+                id: "rm0".into(),
+                condition: Condition::Compare {
+                    left: Expr::Path {
+                        path: "input.amount".into(),
+                    },
+                    op: CmpOp::Eq,
+                    right: Expr::Literal { value: 0.into() },
+                },
+                then: vec![delete],
+                otherwise: vec![upsert],
+            }],
+        });
+        let d = validate(&p);
+        assert!(d.iter().all(|d| !d.code.starts_with("E_")), "{d:?}");
+        let files = generate(&p).unwrap();
+        let all: String = files.iter().map(|f| f.content.clone()).collect();
+        assert!(all.contains("ON CONFLICT"));
+        assert!(all.contains("DELETE FROM"));
+        assert!(all.contains("processed_events"));
+    }
+
+    #[test]
     fn jsonb_columns_are_read_as_text_and_written_through_a_cast() {
         use sb_model::{Column, ColumnType, SqlOp, Step};
         let mut p = sample::orders();
