@@ -647,20 +647,68 @@ fn generated(project: &Path) -> Result<Vec<sb_codegen::GeneratedFile>, String> {
 
 /// Checks that `document` is a project, saves it, and reports what the validator says about it.
 fn store(project_file: &Path, document: Value) -> Result<String, String> {
-    let mut project: Project =
-        serde_json::from_value(document).map_err(|e| format!("not a valid project: {e}"))?;
+    let mut project: Project = serde_json::from_value(document.clone())
+        .map_err(|e| format!("not a valid project: {e}"))?;
     project.migrate();
     project.freeze_field_numbers();
+    // A field this build does not know is dropped by the parse: say so instead of losing it silently.
+    let mut dropped = Vec::new();
+    if let Ok(kept) = serde_json::to_value(&project) {
+        dropped_fields(&document, &kept, "", &mut dropped);
+    }
     // What was already wrong before this edit is not news: only the difference is listed.
     let before = load_project(project_file)
         .map(|p| sb_codegen::diagnose(&p))
         .unwrap_or_default();
     save_project(project_file, &project)?;
-    Ok(format!(
+    let mut text = format!(
         "saved {}\n{}",
         project_file.display(),
         report_change(&before, &sb_codegen::diagnose(&project))
-    ))
+    );
+    if !dropped.is_empty() {
+        text.push_str(&format!(
+            "\nWARNING: {} field(s) are unknown to this Service Builder build and were NOT saved \
+             (typo, or a build older than the feature; see get_schema): {}",
+            dropped.len(),
+            dropped.join(", ")
+        ));
+    }
+    Ok(text)
+}
+
+/// Paths of the keys of `input` that `kept` (the project parsed and written again) no longer has.
+/// A value that is empty or false is not reported: the file leaves such defaults out.
+fn dropped_fields(input: &Value, kept: &Value, path: &str, out: &mut Vec<String>) {
+    match (input, kept) {
+        (Value::Object(a), Value::Object(b)) => {
+            for (key, value) in a {
+                let here = format!("{path}/{key}");
+                match b.get(key) {
+                    Some(other) => dropped_fields(value, other, &here, out),
+                    None if is_default_value(value) => {}
+                    None => out.push(here),
+                }
+            }
+        }
+        (Value::Array(a), Value::Array(b)) => {
+            for (i, (x, y)) in a.iter().zip(b).enumerate() {
+                dropped_fields(x, y, &format!("{path}/{i}"), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_default_value(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Bool(b) => !b,
+        Value::Number(n) => n.as_f64() == Some(0.0),
+        Value::String(s) => s.is_empty() || s == "json",
+        Value::Array(a) => a.is_empty(),
+        Value::Object(o) => o.is_empty(),
+    }
 }
 
 fn summary(diagnostics: &[sb_model::Diagnostic]) -> String {
@@ -1814,6 +1862,26 @@ mod tests {
             doc,
             json!({ "routes": [{ "path": "/orders/{id}", "status": 202 }] })
         );
+    }
+
+    #[test]
+    fn unknown_fields_are_reported_not_lost_silently() {
+        let f = Fixture::new("unknown");
+        let mut doc = serde_json::to_value(Project::new("P")).unwrap();
+        doc["bogusOption"] = json!("x");
+        doc["flag"] = json!(false);
+        let (text, err) = f.call("set_project", json!({ "project": doc }));
+        assert!(!err, "{text}");
+        assert!(
+            text.contains("WARNING") && text.contains("/bogusOption"),
+            "{text}"
+        );
+        assert!(!text.contains("/flag"), "{text}");
+        let (text, _) = f.call(
+            "set_project",
+            json!({ "project": serde_json::to_value(Project::new("P")).unwrap() }),
+        );
+        assert!(!text.contains("WARNING"), "{text}");
     }
 
     #[test]
