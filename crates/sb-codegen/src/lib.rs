@@ -2692,16 +2692,18 @@ mod tests {
         // Signed: the author's claims, each as the JSON of its own type; the standard ones are the step's.
         assert!(
             api.contains(
-                "claims.insert(\"sub\".to_string(), eda_runtime::jwt::json!(input.email.clone()));"
+                "__claims.insert(\"sub\".to_string(), eda_runtime::jwt::json!(input.email.clone()));"
             ),
             "{api}"
         );
         assert!(api.contains(
-            "claims.insert(\"roles\".to_string(), eda_runtime::jwt::json!([\"member\"]));"
+            "__claims.insert(\"roles\".to_string(), eda_runtime::jwt::json!([\"member\"]));"
         ));
         assert!(
-            api.contains("eda_runtime::jwt::sign(\"JWT_SIGNING_KEY\", \"orders\", 300, claims)?")
+            api.contains("eda_runtime::jwt::sign(\"JWT_SIGNING_KEY\", \"orders\", 300, __claims)?")
         );
+        // The map of the step never carries the name a project may bind (verifyJwt bind = claims).
+        assert!(!api.contains("let mut claims"), "{api}");
         // Checked: read as the schema of the claims, with the key of the environment.
         assert!(api.contains("let claims: pb::AccessClaims ="));
         assert!(api.contains("eda_runtime::jwt::verify(eda_runtime::jwt::Source::Keys(&[\"JWT_SIGNING_KEY\"]), \"orders\", &token).await?"));

@@ -3122,16 +3122,17 @@ fn steps(
                 ..
             } => {
                 c.open(format!("let {bind}: String ="));
-                c.line("let mut claims = eda_runtime::jwt::Map::new();");
+                // `__claims` so the map never shadows a variable of the project (a `claims` bound by verifyJwt).
+                c.line("let mut __claims = eda_runtime::jwt::Map::new();");
                 for claim in claims {
                     let value = claim_json(project, scope, &claim.value)?;
                     c.line(format!(
-                        "claims.insert({:?}.to_string(), {value});",
+                        "__claims.insert({:?}.to_string(), {value});",
                         claim.field
                     ));
                 }
                 c.line(format!(
-                    "eda_runtime::jwt::sign({key_env:?}, {issuer:?}, {ttl_secs}, claims)?"
+                    "eda_runtime::jwt::sign({key_env:?}, {issuer:?}, {ttl_secs}, __claims)?"
                 ));
                 c.close_with(";");
                 scope.bind(bind.clone(), TypeRef::scalar(FieldType::String));
