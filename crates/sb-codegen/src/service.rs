@@ -1543,17 +1543,19 @@ fn http_rs(project: &Project, service: &Service) -> String {
     rules_rs(&mut c, project, service);
 
     c.blank();
-    c.line("/// Errors are answered as `{ \"error\": \"...\" }`. A flow picks the status with `eda_runtime::http::HttpError`;");
-    c.line("/// a 5xx, like anything that is not an `HttpError`, answers a generic text and keeps the details in the logs.");
+    c.line("/// Errors are answered as `{ \"error\": \"...\" }`, plus `\"code\"` and `\"message\"` when the flow names a code. A flow picks the");
+    c.line("/// status with `eda_runtime::http::HttpError`; a 5xx, like anything that is not an `HttpError`, answers a generic text");
+    c.line("/// and keeps the details in the logs.");
     c.open("struct ApiError");
     c.line("status: StatusCode,");
     c.line("message: String,");
     c.line("retry_after: Option<u64>,");
+    c.line("code: Option<String>,");
     c.close();
     c.blank();
     c.open("impl ApiError");
     c.open("fn new(status: StatusCode, message: impl Into<String>) -> Self");
-    c.line("Self { status, message: message.into(), retry_after: None }");
+    c.line("Self { status, message: message.into(), retry_after: None, code: None }");
     c.close();
     c.close();
     c.blank();
@@ -1567,9 +1569,9 @@ fn http_rs(project: &Project, service: &Service) -> String {
     c.open("if status.is_server_error()");
     c.line("tracing::error!(status = e.status, \"HTTP flow failed: {}\", e.message);");
     c.line("let message = if status == StatusCode::INTERNAL_SERVER_ERROR { \"internal error\".to_string() } else { status.canonical_reason().unwrap_or(\"server error\").to_lowercase() };");
-    c.line("return Self { status, message, retry_after: e.retry_after };");
+    c.line("return Self { status, message, retry_after: e.retry_after, code: e.code.clone() };");
     c.close();
-    c.line("Self { status, message: e.message.clone(), retry_after: e.retry_after }");
+    c.line("Self { status, message: e.message.clone(), retry_after: e.retry_after, code: e.code.clone() }");
     c.close();
     c.open("None =>");
     c.line("tracing::error!(\"HTTP handler failed: {error:#}\");");
@@ -1581,7 +1583,12 @@ fn http_rs(project: &Project, service: &Service) -> String {
     c.blank();
     c.open("impl IntoResponse for ApiError");
     c.open("fn into_response(self) -> Response");
-    c.line("let mut response = (self.status, Json(HashMap::from([(\"error\", self.message)]))).into_response();");
+    c.line("let mut body = HashMap::from([(\"error\", self.message.clone())]);");
+    c.open("if let Some(code) = self.code");
+    c.line("body.insert(\"code\", code);");
+    c.line("body.insert(\"message\", self.message);");
+    c.close();
+    c.line("let mut response = (self.status, Json(body)).into_response();");
     c.open("if let Some(seconds) = self.retry_after");
     c.line("response.headers_mut().insert(axum::http::header::RETRY_AFTER, axum::http::HeaderValue::from(seconds));");
     c.close();
@@ -3411,6 +3418,7 @@ fn steps(
             Step::Fail {
                 status,
                 message,
+                code,
                 retry_after,
                 ..
             } => {
@@ -3418,6 +3426,9 @@ fn steps(
                 c.line(format!(
                     "let error = eda_runtime::http::HttpError::new({status}, {message:?});"
                 ));
+                if let Some(code) = code {
+                    c.line(format!("let error = error.with_code({code:?});"));
+                }
                 if let Some(wait) = retry_after {
                     let seconds = lower(project, scope, wait, &TypeRef::scalar(FieldType::Int64))?;
                     c.line(format!(
@@ -4042,8 +4053,13 @@ fn sql_step(
     // What the route answers when one row was expected and none came back.
     let missing_error = match missing {
         Some(m) => format!(
-            "eda_runtime::http::HttpError::new({}, {:?})",
-            m.status, m.message
+            "eda_runtime::http::HttpError::new({}, {:?}){}",
+            m.status,
+            m.message,
+            m.code
+                .as_ref()
+                .map(|code| format!(".with_code({code:?})"))
+                .unwrap_or_default()
         ),
         None => format!("eda_runtime::http::HttpError::not_found(\"{table}: no row matches\")"),
     };

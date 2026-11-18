@@ -1886,6 +1886,10 @@ pub enum Step {
         id: String,
         status: u16,
         message: String,
+        /// A stable machine code (`STOCK_INSUFFISANT`): when set, the body is `{ "code", "message", "error" }`
+        /// (`error` repeats the message, for the clients that read the plain form).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
         /// 429 and 503: seconds written in the `Retry-After` header.
         #[serde(default)]
         retry_after: Option<Expr>,
@@ -1936,6 +1940,9 @@ pub enum Step {
 pub struct SqlMissing {
     pub status: u16,
     pub message: String,
+    /// A stable machine code, like the one of `Fail`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 /// Where the public keys that check a token come from.

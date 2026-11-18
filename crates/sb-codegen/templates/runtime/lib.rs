@@ -53,6 +53,8 @@ pub mod http {
         pub message: String,
         /// Seconds for the `Retry-After` header (429 and 503).
         pub retry_after: Option<u64>,
+        /// A stable machine code (`STOCK_INSUFFISANT`) the client can branch on.
+        pub code: Option<String>,
     }
 
     impl HttpError {
@@ -61,7 +63,13 @@ pub mod http {
                 status,
                 message: message.into(),
                 retry_after: None,
+                code: None,
             }
+        }
+
+        pub fn with_code(mut self, code: impl Into<String>) -> Self {
+            self.code = Some(code.into());
+            self
         }
 
         pub fn with_retry_after(mut self, seconds: u64) -> Self {
@@ -87,6 +95,18 @@ pub mod http {
 
         pub fn conflict(message: impl Into<String>) -> Self {
             Self::new(409, message)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::HttpError;
+
+        #[test]
+        fn a_code_is_optional_and_kept() {
+            assert_eq!(HttpError::conflict("x").code, None);
+            let e = HttpError::conflict("x").with_code("STOCK_INSUFFISANT");
+            assert_eq!((e.status, e.code.as_deref()), (409, Some("STOCK_INSUFFISANT")));
         }
     }
 

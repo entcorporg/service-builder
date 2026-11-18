@@ -826,6 +826,7 @@ mod tests {
                 id: "f9".into(),
                 status: 429,
                 message: "slow down".into(),
+                code: None,
                 retry_after: Some(Expr::Literal { value: 30.into() }),
             },
         );
@@ -833,6 +834,56 @@ mod tests {
         let api = file(&files, "services/orders/src/flows/api.rs");
         assert!(api.contains("HttpError::new(429, \"slow down\")"));
         assert!(api.contains("error.with_retry_after(u64::try_from(30).unwrap_or(0))"));
+    }
+
+    #[test]
+    fn fail_and_missing_can_carry_a_machine_code() {
+        use sb_model::{SqlMissing, Step};
+        let mut p = sample::orders();
+        sample::add_single_use_token(&mut p);
+        p.services[0].routes[1].steps.insert(
+            0,
+            Step::Fail {
+                id: "f9".into(),
+                status: 409,
+                message: "stock would go negative".into(),
+                code: Some("STOCK_INSUFFISANT".into()),
+                retry_after: None,
+            },
+        );
+        for route in &mut p.services[0].routes {
+            for step in &mut route.steps {
+                if let Step::Sql {
+                    missing: Some(missing),
+                    ..
+                } = step
+                {
+                    *missing = SqlMissing {
+                        status: 404,
+                        message: "no such row".into(),
+                        code: Some("ROW_ABSENTE".into()),
+                    };
+                }
+            }
+        }
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        assert!(api.contains("let error = error.with_code(\"STOCK_INSUFFISANT\");"));
+        let all: String = files.iter().map(|f| f.content.as_str()).collect();
+        assert!(all.contains("HttpError::new(404, \"no such row\").with_code(\"ROW_ABSENTE\")"));
+        // The body keeps `error` and adds `code` and `message`.
+        assert!(all.contains("body.insert(\"code\", code);"));
+        let spec = all
+            .lines()
+            .find(|l| l.contains("STOCK_INSUFFISANT") && l.contains("code `"));
+        assert!(spec.is_some() || all.contains("(code `STOCK_INSUFFISANT`)"));
+        // Without a code the output of a project is unchanged.
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(
+            !plain
+                .iter()
+                .any(|f| f.path.starts_with("services/") && f.content.contains("with_code(\""))
+        );
     }
 
     #[test]

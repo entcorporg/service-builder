@@ -526,6 +526,7 @@ fn missing(ui: &mut Ui, id: egui::Id, text: &str) -> Option<String> {
             push(&Some(SqlMissing {
                 status: 400,
                 message: "invalid request".into(),
+                code: None,
             }))
         } else {
             "null".into()
@@ -547,7 +548,7 @@ fn missing(ui: &mut Ui, id: egui::Id, text: &str) -> Option<String> {
                     .unwrap_or(400);
                 out = Some(push(&Some(SqlMissing {
                     status,
-                    message: m.message.clone(),
+                    ..m.clone()
                 })));
             }
             if let Some(v) = commit_entry(
@@ -559,8 +560,8 @@ fn missing(ui: &mut Ui, id: egui::Id, text: &str) -> Option<String> {
                 true,
             ) {
                 out = Some(push(&Some(SqlMissing {
-                    status: m.status,
                     message: v,
+                    ..m.clone()
                 })));
             }
         });

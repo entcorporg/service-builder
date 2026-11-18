@@ -303,6 +303,7 @@ pub fn orders() -> Project {
                             id: "h7".into(),
                             status: 400,
                             message: "the amount must be positive".into(),
+                            code: None,
                             retry_after: None,
                         }],
                         otherwise: vec![],
@@ -650,6 +651,7 @@ pub fn add_single_use_token(p: &mut Project) {
                 missing: Some(SqlMissing {
                     status: 400,
                     message: "invalid or expired token".into(),
+                    code: None,
                 }),
                 joins: vec![],
                 column_as: Default::default(),
@@ -1122,6 +1124,7 @@ pub fn add_login(p: &mut Project) {
                     id: "g5".into(),
                     status: 401,
                     message: "invalid credentials".into(),
+                    code: None,
                     retry_after: None,
                 }],
                 otherwise: vec![],
@@ -1452,6 +1455,7 @@ pub fn add_totp(p: &mut Project) {
         Some(SqlMissing {
             status: 401,
             message: "invalid code".into(),
+            code: None,
         })
     };
     p.services[0].routes.push(route(
@@ -2498,6 +2502,7 @@ pub fn add_notes(p: &mut Project) {
                     id: fail.into(),
                     status: 403,
                     message: "this account has no tenant".into(),
+                    code: None,
                     retry_after: None,
                 }],
                 otherwise: vec![],
@@ -2534,6 +2539,7 @@ pub fn add_notes(p: &mut Project) {
         missing: bind.map(|_| SqlMissing {
             status: 404,
             message: "no such note".into(),
+            code: None,
         }),
         joins: vec![],
         column_as: Default::default(),
@@ -2795,6 +2801,7 @@ pub fn add_sql_reads(p: &mut Project) {
                 id: "q3".into(),
                 status: 403,
                 message: "this account has no tenant".into(),
+                code: None,
                 retry_after: None,
             }],
             otherwise: vec![],
@@ -3189,6 +3196,7 @@ pub fn add_basket_lines(p: &mut Project) {
                 id: "l2".into(),
                 status: 400,
                 message: "an order has at least one line".into(),
+                code: None,
                 retry_after: None,
             }],
             otherwise: vec![],
@@ -3231,6 +3239,7 @@ pub fn add_basket_lines(p: &mut Project) {
                         id: "l6".into(),
                         status: 400,
                         message: "a line needs a sku and a quantity from 1 to 1000".into(),
+                        code: None,
                         retry_after: None,
                     }],
                     otherwise: vec![],
@@ -3646,6 +3655,7 @@ pub fn add_http_calls(p: &mut Project) {
                     id: "s4".into(),
                     status: 502,
                     message: "the SMS provider refused the message".into(),
+                    code: None,
                     retry_after: None,
                 }],
             },

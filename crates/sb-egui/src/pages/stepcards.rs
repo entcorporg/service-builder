@@ -193,6 +193,7 @@ fn field_name(key: &str) -> String {
     let known = match key {
         "message" => "Message",
         "status" => "Statut",
+        "code" => "Code d'erreur",
         "retryAfter" => "Réessayer après (s)",
         "name" => "Nom",
         "optional" => "Optionnel",

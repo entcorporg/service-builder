@@ -2389,6 +2389,22 @@ impl<'a> Checker<'a> {
                     "say what the client is told (a 5xx answers a generic text)",
                 );
             }
+            self.check_error_code(m.code.as_deref(), &format!("{mp}/code"));
+        }
+    }
+
+    /// The machine code of an error answer: letters, digits and `_`, starting with a letter.
+    fn check_error_code(&mut self, code: Option<&str>, path: &str) {
+        let Some(code) = code else { return };
+        let ok = code.len() <= 64
+            && code.starts_with(|c: char| c.is_ascii_alphabetic())
+            && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !ok {
+            self.error(
+                "E_ERROR_CODE",
+                path,
+                format!("`{code}` is not an error code: letters, digits and `_`, starting with a letter, 64 characters at most (e.g. STOCK_INSUFFISANT)"),
+            );
         }
     }
 
@@ -4509,9 +4525,11 @@ impl<'a> Checker<'a> {
             Step::Fail {
                 status,
                 message,
+                code,
                 retry_after,
                 ..
             } => {
+                self.check_error_code(code.as_deref(), &format!("{path}/code"));
                 if !matches!(env.handler, Handler::Route { .. }) {
                     self.error(
                         "E_FAIL_OUTSIDE_ROUTE",
@@ -7108,7 +7126,32 @@ mod tests {
             id: "f1".into(),
             status,
             message: "too many attempts".into(),
+            code: None,
             retry_after,
+        }
+    }
+
+    #[test]
+    fn an_error_code_is_checked() {
+        let mut p = sample::orders();
+        for (code, ok) in [
+            ("STOCK_INSUFFISANT", true),
+            ("not_found_2", true),
+            ("", false),
+            ("1ABC", false),
+            ("A B", false),
+            ("é", false),
+        ] {
+            let mut step = fail(409, None);
+            if let Step::Fail { code: c, .. } = &mut step {
+                *c = Some(code.into());
+            }
+            route_of(&mut p).steps = vec![step];
+            assert_eq!(
+                errors(&p).contains(&"E_ERROR_CODE".to_string()),
+                !ok,
+                "{code:?}"
+            );
         }
     }
 

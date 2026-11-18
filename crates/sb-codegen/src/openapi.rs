@@ -46,8 +46,12 @@ pub fn openapi(project: &Project, service: &Service) -> Option<Value> {
         error_name,
         json!({
             "type": "object",
-            "description": "Every error is answered as `{ \"error\": \"...\" }`.",
-            "properties": { "error": { "type": "string" } },
+            "description": "Every error is answered as `{ \"error\": \"...\" }`. When the step that refuses names a machine code, the body also carries `code` (stable, to branch on) and `message` (the same text as `error`).",
+            "properties": {
+                "error": { "type": "string" },
+                "code": { "type": "string", "description": "Stable machine code, present when the route names one for this error." },
+                "message": { "type": "string", "description": "Same text as `error`, present with `code`." },
+            },
             "required": ["error"],
         }),
     );
@@ -227,6 +231,14 @@ fn nullable(schema: Value) -> Value {
     }
 }
 
+/// The text of an error answer, followed by its machine code when it has one.
+fn with_code(message: &str, code: Option<&str>) -> String {
+    match code {
+        Some(code) => format!("{message} (code `{code}`)"),
+        None => message.to_string(),
+    }
+}
+
 /// What a step can make a route answer with, besides the success: status and what it means.
 fn step_statuses(route: &Route) -> Vec<(u16, String, bool)> {
     let mut out: Vec<(u16, String, bool)> = vec![];
@@ -236,9 +248,14 @@ fn step_statuses(route: &Route) -> Vec<(u16, String, bool)> {
                 Step::Fail {
                     status,
                     message,
+                    code,
                     retry_after,
                     ..
-                } => Some((*status, message.clone(), retry_after.is_some())),
+                } => Some((
+                    *status,
+                    with_code(message, code.as_deref()),
+                    retry_after.is_some(),
+                )),
                 Step::RequirePermission {
                     status, message, ..
                 } => Some((*status, message.clone(), false)),
@@ -301,7 +318,7 @@ fn step_statuses(route: &Route) -> Vec<(u16, String, bool)> {
                     missing,
                     ..
                 } => Some(match missing {
-                    Some(m) => (m.status, m.message.clone(), false),
+                    Some(m) => (m.status, with_code(&m.message, m.code.as_deref()), false),
                     None => (404, "No row matches".into(), false),
                 }),
                 _ => None,

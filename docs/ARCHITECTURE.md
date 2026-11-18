@@ -209,7 +209,9 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
   comportement tant qu'on ne décoche pas « déf. » champ par champ. Les champs créés ensuite sont obligatoires. Les jetons
   des exemples (`Authorization`, `X-Client-Id`…) sont `lenient` : c'est le flow qui répond 401, pas un 400. Chaque
   route générée a un test (`cargo test -p <service>`) qui vérifie que chaque champ obligatoire est nommé quand il manque.
-- **Erreurs** : `{ "error": "..." }`. L'étape **Refuser** (`fail`) arrête la route avec un statut d'erreur (400 à 599) et
+- **Erreurs** : `{ "error": "..." }`. Avec un `code` (étape `fail`, ou `missing` d'un `sql` ; lettres, chiffres, `_`, ex.
+  `STOCK_INSUFFISANT`, `E_ERROR_CODE` sinon) le corps devient `{ "error", "code", "message" }` (`error` et `message` portent le même
+  texte, `error` reste pour la compatibilité) ; sans `code`, rien ne change. L'étape **Refuser** (`fail`) arrête la route avec un statut d'erreur (400 à 599) et
   un message fixe ; elle compte comme une réponse (pas d'avertissement `W_NO_RESPOND`), et ce que la route avait écrit en
   base ou publié est annulé avec la transaction. `retryAfter` (secondes, un champ ou un littéral) pose l'en-tête
   `Retry-After` et ne va qu'avec 429 et 503 (`E_FAIL_RETRY_AFTER`). Pour un statut 5xx, le message reste dans les
