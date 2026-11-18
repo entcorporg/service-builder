@@ -234,6 +234,30 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
   *calculée* (un champ de la requête, par exemple) est vérifiée à l'exécution par `eda_runtime::http::header_value_ok` : si
   elle ne passe pas, c'est un défaut du flow, pas du client, donc un 500 (détail dans les journaux) et jamais un en-tête
   coupé en deux. Seulement dans une route (`E_HEADER_OUTSIDE_ROUTE`) ; une route qui en pose renvoie un `Reply`.
+- **CSV** (RFC 4180) : une route peut répondre ou lire du CSV au lieu du JSON, par deux options de la route, `responseFormat`
+  et `bodyFormat` (`"json"` par défaut, absentes du fichier tant qu'elles valent `json` : un projet existant s'ouvre inchangé).
+  - **Export** (`responseFormat: "csv"`) : la réponse a `Content-Type: text/csv; charset=utf-8`. Le schéma de réponse n'a
+    qu'**un champ liste** d'un schéma à plat (champs simples, ni liste ni schéma imbriqué) : la première ligne porte les clés
+    JSON de l'élément dans l'ordre du schéma, puis une ligne par élément, lignes terminées par CRLF, une cellule qui contient
+    `,`, `"` ou un saut de ligne est entre guillemets (`"` doublé). Pour choisir les colonnes, on fait `select` *into* un schéma
+    qui n'a que celles-là. Le flux de la route répond comme d'habitude avec *Répondre* (la liste est le champ du schéma) ; il
+    peut poser `Content-Disposition` par les en-têtes de *Répondre*. Statut 204 refusé.
+  - **Import** (`bodyFormat: "csv"`, `POST`/`PUT`/`PATCH`) : le corps est du texte (5 Mo au plus, `413` au-delà), la première
+    ligne nomme les colonnes (dans n'importe quel ordre, colonnes en trop ignorées, BOM ignoré). Le schéma de requête a **un
+    champ liste** d'un schéma à plat ; ses autres champs viennent du chemin ou d'un en-tête, ou sont `optional`/`lenient`.
+    Chaque cellule est lue selon le type de sa colonne (`int32`, `int64`, `float`, `double`, `bool` : `true`/`false`/`1`/`0` ;
+    le reste est du texte que le schéma relit ensuite : `timestamp` RFC 3339, `uuid`, `bytes` en base64). Une cellule vide est
+    refusée si le champ est obligatoire (sauf un texte : vide mais présent), absente sinon. **Toutes les lignes refusées sont
+    rapportées d'un coup** (50 au plus) : `400 { "error": "csv: line 3: seuil : not a whole number; line 7: ..." }`. La requête
+    lue passe alors par les mêmes contrôles qu'un corps JSON (champs obligatoires, règles) puis le flux : `forEach` sur la
+    liste et `sql insert` dans la transaction de la route, donc **tout ou rien** (une ligne refusée par le flux — *Refuser*
+    dans la boucle — annule les autres).
+  - Validation : `E_CSV_RESPONSE` (204, pas une seule liste, élément pas à plat, autre champ dans la réponse), `E_CSV_BODY`
+    (méthode sans corps, pas une seule liste, champ obligatoire hors de la liste, webhook signé). OpenAPI : `text/csv`, avec les colonnes
+    dans la description. Le module `runtime/src/csv.rs` porte l'écriture et la lecture, avec ses tests.
+  - Limites : le corps est lu en entier en mémoire (pas de flux) ; un fichier avec une ligne refusée est refusé en entier
+    (pas d'import partiel qui rapporte et garde le reste) ; séparateur `,` seulement ; le texte qui commence par `=`, `+`, `-` ou `@`
+    est écrit tel quel (un tableur peut le lire comme une formule) ; pas d'encodage autre qu'UTF-8.
 - **Spécification OpenAPI** : chaque service qui a des routes écrit `services/<nom>/openapi.json`, un document **OpenAPI 3.1**
   dérivé du même modèle que les handlers (`sb-codegen/src/openapi.rs`), visible dans l'onglet « Code généré » comme les
   autres fichiers. Une opération par route : `operationId` (le nom de la route), les **paramètres** (chemin ; query string

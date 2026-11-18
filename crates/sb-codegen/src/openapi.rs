@@ -7,8 +7,20 @@
 use std::collections::BTreeMap;
 
 use sb_model::names::route_params;
-use sb_model::{Field, FieldType, Project, RequestSource, Route, Rule, Service, Step};
+use sb_model::{BodyFormat, Field, FieldType, Project, RequestSource, Route, Rule, Service, Step};
 use serde_json::{Map, Value, json};
+
+/// The columns of the CSV that a schema is read from or written as, for the description of the operation.
+fn csv_columns(project: &Project, message: &str, params: &[String]) -> Option<String> {
+    let (_, item) = sb_model::csv_list(project, project.message(message)?, params).ok()?;
+    Some(
+        item.fields
+            .iter()
+            .map(|f| format!("`{}`", f.json_key()))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
 
 /// The document of a service, or `None` when it has no route.
 pub fn openapi(project: &Project, service: &Service) -> Option<Value> {
@@ -381,12 +393,15 @@ fn operation(
     if route.method.has_body() {
         let body = schemas.object(&body_fields);
         let required = body.get("required").is_some();
+        let content = match csv_columns(project, &route.request, &params) {
+            Some(columns) if route.body_format == BodyFormat::Csv => json!({ "text/csv": {
+                "schema": { "type": "string", "description": format!("CSV (RFC 4180): a header line naming the columns ({columns}), then one item per line. Every refused line is reported in the 400.") },
+            } }),
+            _ => json!({ "application/json": { "schema": body } }),
+        };
         op.insert(
             "requestBody".into(),
-            json!({
-                "required": required,
-                "content": { "application/json": { "schema": body } },
-            }),
+            json!({ "required": required, "content": content }),
         );
     }
 
@@ -431,6 +446,12 @@ fn operation(
     for status in statuses {
         let mut response = if status == 204 {
             json!({ "description": "Success, no content" })
+        } else if route.response_format == BodyFormat::Csv {
+            let columns = csv_columns(project, &route.response, &[]).unwrap_or_default();
+            json!({
+                "description": "Success",
+                "content": { "text/csv": { "schema": { "type": "string", "description": format!("CSV (RFC 4180): a header line ({columns}), then one item per line.") } } },
+            })
         } else {
             json!({
                 "description": "Success",

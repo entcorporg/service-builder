@@ -16,6 +16,7 @@ const RUNTIME_JWT: &str = include_str!("../templates/runtime/jwt.rs");
 const RUNTIME_LOGIC: &str = include_str!("../templates/runtime/logic.rs");
 const RUNTIME_JOBS: &str = include_str!("../templates/runtime/jobs.rs");
 const RUNTIME_CRYPTO: &str = include_str!("../templates/runtime/crypto.rs");
+const RUNTIME_CSV: &str = include_str!("../templates/runtime/csv.rs");
 const RUNTIME_VALIDATION: &str = include_str!("../templates/runtime/validation.rs");
 const RUNTIME_TOTP: &str = include_str!("../templates/runtime/totp.rs");
 const RUNTIME_LIVE: &str = include_str!("../templates/runtime/live.rs");
@@ -57,6 +58,7 @@ pub fn files(project: &Project) -> Vec<GeneratedFile> {
         GeneratedFile::new("runtime/src/outbox.rs", RUNTIME_OUTBOX),
         GeneratedFile::new("runtime/src/db.rs", RUNTIME_DB),
         GeneratedFile::new("runtime/src/crypto.rs", RUNTIME_CRYPTO),
+        GeneratedFile::new("runtime/src/csv.rs", RUNTIME_CSV),
         GeneratedFile::new("runtime/src/dedup.rs", RUNTIME_DEDUP),
         GeneratedFile::new("runtime/src/jobs.rs", RUNTIME_JOBS),
         GeneratedFile::new("runtime/src/jwt.rs", RUNTIME_JWT),

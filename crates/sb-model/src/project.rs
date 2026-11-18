@@ -950,8 +950,72 @@ pub struct Route {
     /// Success status code (200, 201, 202 or 204: no content, the response is not sent).
     #[serde(default = "default_status")]
     pub status: u16,
+    /// How the response is written: JSON (default), or CSV for a route whose response schema is one list of
+    /// messages (`text/csv`, one column per scalar field of the item, RFC 4180).
+    #[serde(default, skip_serializing_if = "is_default_format")]
+    pub response_format: BodyFormat,
+    /// How the body is read: JSON (default), or CSV for a `POST`/`PUT`/`PATCH` whose request schema is one list
+    /// of messages (`text/csv`, first line = header, one item per following line).
+    #[serde(default, skip_serializing_if = "is_default_format")]
+    pub body_format: BodyFormat,
     #[serde(default)]
     pub steps: Vec<Step>,
+}
+
+/// The format of an HTTP body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum BodyFormat {
+    #[default]
+    Json,
+    Csv,
+}
+
+fn is_default_format(f: &BodyFormat) -> bool {
+    *f == BodyFormat::Json
+}
+
+/// Largest CSV body a route reads, in bytes.
+pub const CSV_MAX_BODY_BYTES: usize = 5 * 1024 * 1024;
+
+/// The list that a CSV body or answer is made of: the one repeated message field of `message` that is not filled
+/// by the path (`params`) or a header, and the item it holds. A CSV line is flat, so the item has only single
+/// scalar fields.
+pub fn csv_list<'a>(
+    project: &'a Project,
+    message: &'a Message,
+    params: &[String],
+) -> Result<(&'a Field, &'a Message), String> {
+    let lists: Vec<&Field> = message
+        .fields
+        .iter()
+        .filter(|f| f.repeated && f.source.is_none() && !params.contains(&f.name))
+        .collect();
+    let [list] = lists[..] else {
+        return Err("it needs exactly one list field (the lines of the file)".into());
+    };
+    let FieldType::Message { name } = &list.ty else {
+        return Err(format!(
+            "the list `{}` must hold a schema (one per line), not single values",
+            list.name
+        ));
+    };
+    let Some(item) = project.message(name) else {
+        return Err(format!("the list `{}` holds an unknown schema", list.name));
+    };
+    if let Some(f) = item.fields.iter().find(|f| f.repeated || f.ty.is_message()) {
+        return Err(format!(
+            "`{}` has a list or a nested schema (`{}`): a line of CSV is flat",
+            item.name, f.name
+        ));
+    }
+    if item.fields.is_empty() {
+        return Err(format!(
+            "`{}` has no field: nothing to write on a line",
+            item.name
+        ));
+    }
+    Ok((list, item))
 }
 
 /// Clock tolerance of a signed webhook: Stripe's own default.

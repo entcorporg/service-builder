@@ -17,8 +17,9 @@ use sb_model::names::route_params;
 use sb_model::names::{shouty, snake, topic_const};
 use sb_model::typing::{Scope, TypeRef};
 use sb_model::{
-    Column, ColumnType, DEFAULT_HTTP_PORT, Expr, FieldType, HttpMethod, Project, RequestSource,
-    Rule, Service, SqlOp, Step, sql_row_name,
+    BodyFormat, CSV_MAX_BODY_BYTES, Column, ColumnType, DEFAULT_HTTP_PORT, Expr, FieldType,
+    HttpMethod, Message, Project, RequestSource, Rule, Service, SqlOp, Step, csv_list,
+    sql_row_name,
 };
 
 use crate::expr::{condition_code, log_code, lower, rust_let_type, struct_literal};
@@ -1106,7 +1107,16 @@ fn http_rs(project: &Project, service: &Service) -> String {
     });
     c.line(format!(
         "    extract::{{{}{}{}State}},",
-        if any_image { "DefaultBodyLimit, " } else { "" },
+        if any_image
+            || service
+                .routes
+                .iter()
+                .any(|r| r.body_format == BodyFormat::Csv)
+        {
+            "DefaultBodyLimit, "
+        } else {
+            ""
+        },
         if service.routes.iter().any(|r| !r.method.has_body()
             && !required_fields(project, r, &route_params(&r.path).unwrap_or_default()).is_empty())
         {
@@ -1172,6 +1182,10 @@ fn http_rs(project: &Project, service: &Service) -> String {
                     }
                 });
             }
+        }
+        // A CSV file is sent as it is, not inside a JSON string.
+        if routes.iter().any(|r| r.body_format == BodyFormat::Csv) {
+            limit = limit.max(CSV_MAX_BODY_BYTES);
         }
         if limit > 0 {
             chain.push_str(&format!(".layer(DefaultBodyLimit::max({limit}))"));
@@ -1260,7 +1274,8 @@ fn http_rs(project: &Project, service: &Service) -> String {
         let required = required_fields(project, r, &params);
         let needs = needs_presence_check(project, r, &params);
         // A body is read as a `Value` first when some of its fields must be there: presence cannot be seen on the struct.
-        let checked = r.method.has_body() && needs && hmac_of(r).is_none();
+        let csv_in = r.body_format == BodyFormat::Csv && r.method.has_body();
+        let checked = r.method.has_body() && needs && hmac_of(r).is_none() && !csv_in;
         let query_checked = !r.method.has_body() && !required.is_empty();
         let m = if params.is_empty() && sourced.is_empty() {
             ""
@@ -1287,7 +1302,9 @@ fn http_rs(project: &Project, service: &Service) -> String {
             if query_checked {
                 c.line("RawQuery(raw_query): RawQuery,");
             }
-            c.line(if checked {
+            c.line(if csv_in {
+                "body: String,".to_string()
+            } else if checked {
                 "Json(body): Json<serde_json::Value>,".to_string()
             } else if r.method.has_body() {
                 format!("Json({m}input): Json<pb::{}>,", r.request)
@@ -1329,6 +1346,31 @@ fn http_rs(project: &Project, service: &Service) -> String {
                 c.line("    .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.body_text()))?");
                 c.line("    .0;");
             }
+        } else if csv_in {
+            // The lines of the file are typed by the columns of the item; every line refused is reported at once.
+            // The validation has checked the shape (`E_CSV_BODY`), so the list is there.
+            let (list, item) = project
+                .message(&r.request)
+                .and_then(|m| csv_list(project, m, &params).ok())
+                .expect("a CSV body has a list: checked by the validation");
+            c.line(format!(
+                "let rows = eda_runtime::csv::items(&body, &{}).map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, format!(\"csv: {{}}\", e.join(\"; \"))))?;",
+                csv_columns(item)
+            ));
+            c.line(format!(
+                "let body = serde_json::json!({{ {:?}: rows }});",
+                list.json_key()
+            ));
+            if needs {
+                c.line(format!(
+                    "{}(&body).map_err(invalid)?;",
+                    required_fn(&r.name)
+                ));
+            }
+            c.line(format!(
+                "let {m}input: pb::{} = serde_json::from_value(body).map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;",
+                r.request
+            ));
         } else if checked {
             // What a client left out is refused by name; what it sent is then read as the schema.
             c.line(format!(
@@ -1401,7 +1443,26 @@ fn http_rs(project: &Project, service: &Service) -> String {
             c.line(format!(
                 "        let status = reply.status.and_then(|s| StatusCode::from_u16(s).ok()).unwrap_or({status});"
             ));
-            c.line("        let mut response = if status == StatusCode::NO_CONTENT { status.into_response() } else { (status, Json(reply.body)).into_response() };");
+            if r.response_format == BodyFormat::Csv {
+                let (list, item) = project
+                    .message(&r.response)
+                    .and_then(|m| csv_list(project, m, &[]).ok())
+                    .expect("a CSV answer has a list: checked by the validation");
+                let keys: Vec<String> = item
+                    .fields
+                    .iter()
+                    .map(|f| format!("{:?}", f.json_key()))
+                    .collect();
+                c.line("        let json = serde_json::to_value(&reply.body).map_err(|e| { tracing::error!(error = %e, \"the CSV answer could not be built\"); ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, \"internal error\") })?;");
+                c.line(format!(
+                    "        let text = eda_runtime::csv::write(json.get({:?}).unwrap_or(&serde_json::Value::Null), &[{}]);",
+                    list.json_key(),
+                    keys.join(", ")
+                ));
+                c.line("        let mut response = (status, [(axum::http::header::CONTENT_TYPE, \"text/csv; charset=utf-8\")], text).into_response();");
+            } else {
+                c.line("        let mut response = if status == StatusCode::NO_CONTENT { status.into_response() } else { (status, Json(reply.body)).into_response() };");
+            }
             c.line("        for (name, value) in &reply.headers {");
             c.line("            // A name or value the flow computed that is not a valid header is a flaw of the flow, not of the client.");
             c.line("            let pair = axum::http::HeaderName::try_from(name.as_str()).ok().zip(Some(value).filter(|v| eda_runtime::http::header_value_ok(v)).and_then(|v| HeaderValue::from_str(v).ok()));");
@@ -2071,9 +2132,33 @@ fn webhook_secrets(service: &Service) -> BTreeSet<&str> {
         .collect()
 }
 
+/// The columns of an item read from a CSV body, as the Rust literal the handler passes to the runtime.
+fn csv_columns(item: &Message) -> String {
+    let columns: Vec<String> = item
+        .fields
+        .iter()
+        .map(|f| {
+            let kind = match f.ty {
+                FieldType::Int32 => "Int32",
+                FieldType::Int64 => "Int64",
+                FieldType::Float | FieldType::Double => "Float",
+                FieldType::Bool => "Bool",
+                _ => "Text",
+            };
+            format!(
+                "eda_runtime::csv::Column {{ key: {:?}, kind: eda_runtime::csv::Kind::{kind}, required: {} }}",
+                f.json_key(),
+                !f.optional && !f.lenient
+            )
+        })
+        .collect();
+    format!("[{}]", columns.join(", "))
+}
+
 /// Whether a route answers with a status or cookies of its own: its flow then returns a `Reply`.
+/// A CSV answer is one too: the handler writes the list itself.
 fn needs_reply(route: &sb_model::Route) -> bool {
-    let mut extras = false;
+    let mut extras = route.response_format == BodyFormat::Csv;
     for step in &route.steps {
         step.walk(&mut |s| {
             extras |= matches!(s, Step::Respond { status, cookies, headers, .. } if status.is_some() || !cookies.is_empty() || !headers.is_empty())

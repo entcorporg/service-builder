@@ -273,6 +273,8 @@ pub fn orders() -> Project {
         dropped_tables: vec![],
         routes: vec![
             Route {
+                response_format: Default::default(),
+                body_format: Default::default(),
                 name: "place_order".into(),
                 method: HttpMethod::Post,
                 path: "/orders".into(),
@@ -369,6 +371,8 @@ pub fn orders() -> Project {
                 ],
             },
             Route {
+                response_format: Default::default(),
+                body_format: Default::default(),
                 name: "get_order".into(),
                 method: HttpMethod::Get,
                 path: "/orders/{order_id}".into(),
@@ -586,6 +590,8 @@ pub fn add_single_use_token(p: &mut Project) {
         ],
     ));
     service.routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "verify_email".into(),
         method: HttpMethod::Post,
         path: "/verify-email".into(),
@@ -750,6 +756,8 @@ pub fn add_stripe_webhook(p: &mut Project) {
     p.messages
         .push(api("WebhookAck", vec![field("received", FieldType::Bool)]));
     p.services[0].routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "stripe_webhook".into(),
         method: HttpMethod::Post,
         path: "/webhook/stripe".into(),
@@ -792,6 +800,8 @@ pub fn add_sealed_text(p: &mut Project) {
         ],
     ));
     p.services[0].routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "seal_text".into(),
         method: HttpMethod::Post,
         path: "/notes/seal".into(),
@@ -855,6 +865,8 @@ pub fn add_signup(p: &mut Project) {
     p.messages
         .push(api("SignupAck", vec![field("email", string())]));
     p.services[0].routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "signup".into(),
         method: HttpMethod::Post,
         path: "/signup".into(),
@@ -904,6 +916,8 @@ pub fn add_challenge(p: &mut Project) {
         .push(api("ContactAck", vec![field("received", FieldType::Bool)]));
     p.services[0].challenge = Some(ChallengeConfig::default());
     p.services[0].routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "contact".into(),
         method: HttpMethod::Post,
         path: "/contact".into(),
@@ -1004,6 +1018,7 @@ pub fn showcase() -> Project {
     add_mail_design(&mut p);
     add_live_events(&mut p);
     add_basket_lines(&mut p);
+    add_csv_lines(&mut p);
     add_schema_changes(&mut p);
     add_receipts(&mut p);
     add_http_calls(&mut p);
@@ -1060,6 +1075,8 @@ pub fn add_login(p: &mut Project) {
     let mut access = Cookie::new("access_token", path("access_token"));
     access.max_age_secs = Some(300);
     p.services[0].routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "login".into(),
         method: HttpMethod::Post,
         path: "/login".into(),
@@ -1204,6 +1221,8 @@ pub fn add_jwt(p: &mut Project) {
     p.messages.push(api("Jwks", vec![keys]));
     p.messages.push(api("JwksRequest", vec![]));
     p.services[0].routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "whoami".into(),
         method: HttpMethod::Get,
         path: "/whoami".into(),
@@ -1236,6 +1255,8 @@ pub fn add_jwt(p: &mut Project) {
         ],
     });
     p.services[0].routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "jwks".into(),
         method: HttpMethod::Get,
         path: "/.well-known/jwks.json".into(),
@@ -1259,6 +1280,8 @@ pub fn add_jwt(p: &mut Project) {
     });
     // The same check, for a browser that keeps the token in a cookie.
     p.services[0].routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "session".into(),
         method: HttpMethod::Get,
         path: "/session".into(),
@@ -1372,6 +1395,8 @@ pub fn add_totp(p: &mut Project) {
         headers: vec![],
     };
     let route = |name: &str, path: &str, request: &str, response: &str, steps| Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: name.into(),
         method: HttpMethod::Post,
         path: path.into(),
@@ -1535,6 +1560,8 @@ pub fn add_passkeys(p: &mut Project) {
         bind: "claims".into(),
     };
     let route = |name: &str, route: &str, request: &str, response: &str, steps| Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: name.into(),
         method: HttpMethod::Post,
         path: route.into(),
@@ -1724,6 +1751,8 @@ pub fn add_avatars(p: &mut Project) {
         bind: "claims".into(),
     };
     let route = |name: &str, method, request: &str, response: &str, steps| Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: name.into(),
         method,
         path: "/avatar".into(),
@@ -1909,6 +1938,8 @@ pub fn add_api_keys(p: &mut Project) {
     };
     let routes = &mut p.services[0].routes;
     routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "issue_api_key".into(),
         method: HttpMethod::Post,
         path: "/tenant/api-keys".into(),
@@ -1940,6 +1971,8 @@ pub fn add_api_keys(p: &mut Project) {
         ],
     });
     routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "revoke_api_key".into(),
         method: HttpMethod::Delete,
         path: "/tenant/api-keys/{key_id}".into(),
@@ -1964,6 +1997,8 @@ pub fn add_api_keys(p: &mut Project) {
         ],
     });
     routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "machine_orders".into(),
         method: HttpMethod::Get,
         path: "/machine/orders".into(),
@@ -2010,6 +2045,8 @@ pub fn add_calendar(p: &mut Project) {
     ));
     let zone = || path("input.zone");
     p.services[0].routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "calendar".into(),
         method: HttpMethod::Get,
         path: "/calendar/{zone}".into(),
@@ -2117,6 +2154,8 @@ pub fn add_audit(p: &mut Project) {
     };
     let routes = &mut p.services[0].routes;
     routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "send_invoice".into(),
         method: HttpMethod::Post,
         path: "/tenant/invoices/{invoice_id}/send".into(),
@@ -2146,6 +2185,8 @@ pub fn add_audit(p: &mut Project) {
         ],
     });
     routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "audit_journal".into(),
         method: HttpMethod::Get,
         path: "/tenant/audit".into(),
@@ -2201,6 +2242,8 @@ pub fn add_flags(p: &mut Project) {
         ],
     ));
     p.services[0].routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "checkout_flag".into(),
         method: HttpMethod::Get,
         path: "/checkout/flag".into(),
@@ -2263,6 +2306,8 @@ pub fn add_invoices(p: &mut Project) {
         ],
     ));
     p.services[0].routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "issue_invoice".into(),
         method: HttpMethod::Post,
         path: "/tenant/invoices".into(),
@@ -2337,6 +2382,8 @@ pub fn add_usage(p: &mut Project) {
         vec![field("calls_left", FieldType::Int64)],
     ));
     p.services[0].routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "usage_report".into(),
         method: HttpMethod::Get,
         path: "/tenant/usage".into(),
@@ -2509,6 +2556,8 @@ pub fn add_notes(p: &mut Project) {
         }]
     };
     let route = |name: &str, method, route: &str, request: &str, response: &str, steps| Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: name.into(),
         method,
         path: route.into(),
@@ -2825,6 +2874,8 @@ pub fn add_sql_reads(p: &mut Project) {
         },
     ];
     p.services[0].routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "list_posts".into(),
         method: HttpMethod::Get,
         path: "/tenant/posts".into(),
@@ -3249,6 +3300,8 @@ pub fn add_basket_lines(p: &mut Project) {
         },
     ];
     p.services[0].routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "add_lines".into(),
         method: HttpMethod::Post,
         path: "/orders/{order_id}/lines".into(),
@@ -3323,6 +3376,8 @@ pub fn add_basket_lines(p: &mut Project) {
         },
     ];
     p.services[0].routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "get_lines".into(),
         method: HttpMethod::Get,
         path: "/orders/{order_id}/lines".into(),
@@ -3330,6 +3385,45 @@ pub fn add_basket_lines(p: &mut Project) {
         response: "AddedLines".into(),
         status: 200,
         steps,
+    });
+}
+
+/// Adds to the first service, on top of [`add_basket_lines`], the CSV form of its two routes: the lines of an order are
+/// read from a CSV file (`POST .../lines/import`, the steps of `add_lines`: each line checked, then inserted, all in
+/// one transaction) and written as one (`GET .../lines/export`, `text/csv`, columns `sku,qty,note`).
+pub fn add_csv_lines(p: &mut Project) {
+    let mut lines = msg_field("lines", "OrderLine");
+    lines.repeated = true;
+    p.messages.push(api("LinesFile", vec![lines]));
+
+    let add = p.services[0]
+        .routes
+        .iter()
+        .find(|r| r.name == "add_lines")
+        .expect("add_basket_lines comes first")
+        .clone();
+    let mut get = p.services[0]
+        .routes
+        .iter()
+        .find(|r| r.name == "get_lines")
+        .expect("add_basket_lines comes first")
+        .clone();
+    // The rows of the query are the answer itself.
+    if let Some(Step::Respond { fields, .. }) = get.steps.last_mut() {
+        *fields = vec![set("lines", path("found"))];
+    }
+    p.services[0].routes.push(Route {
+        name: "import_lines".into(),
+        path: "/orders/{order_id}/lines/import".into(),
+        body_format: BodyFormat::Csv,
+        ..add
+    });
+    p.services[0].routes.push(Route {
+        name: "export_lines".into(),
+        path: "/orders/{order_id}/lines/export".into(),
+        response: "LinesFile".into(),
+        response_format: BodyFormat::Csv,
+        ..get
     });
 }
 
@@ -3360,6 +3454,8 @@ pub fn add_receipts(p: &mut Project) {
         ],
     ));
     p.services[0].routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "put_receipt".into(),
         method: HttpMethod::Put,
         path: "/orders/{order_id}/receipt".into(),
@@ -3436,6 +3532,8 @@ pub fn add_http_calls(p: &mut Project) {
     p.messages.push(api("SmsAck", vec![field("sid", string())]));
     let routes = &mut p.services[0].routes;
     routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "create_payment_intent".into(),
         method: HttpMethod::Post,
         path: "/payments/intents".into(),
@@ -3486,6 +3584,8 @@ pub fn add_http_calls(p: &mut Project) {
         ],
     });
     routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
         name: "send_sms".into(),
         method: HttpMethod::Post,
         path: "/sms".into(),

@@ -1246,6 +1246,7 @@ impl<'a> Checker<'a> {
                 }
             }
 
+            self.csv_shape(r, &rp, &params);
             self.hmac_placement(r, &format!("{rp}/steps"));
             let env = Env {
                 service: s,
@@ -1265,6 +1266,91 @@ impl<'a> Checker<'a> {
                         r.path,
                         r.response
                     ),
+                );
+            }
+        }
+    }
+
+    /// The CSV options of a route: the list that is written or read, and the item it is made of.
+    fn csv_shape(&mut self, r: &Route, rp: &str, params: &[String]) {
+        let p = self.project;
+        if r.response_format == BodyFormat::Csv {
+            let at = format!("{rp}/responseFormat");
+            if r.status == 204 {
+                self.error(
+                    "E_CSV_RESPONSE",
+                    &at,
+                    "a CSV answer has a body: the status cannot be 204",
+                );
+            }
+            if let Some(response) = p.message(&r.response) {
+                match csv_list(p, response, &[]) {
+                    Err(why) => self.error(
+                        "E_CSV_RESPONSE",
+                        &at,
+                        format!("`{}` cannot be answered as CSV: {why}", r.response),
+                    ),
+                    Ok(_) if response.fields.len() > 1 => self.error(
+                        "E_CSV_RESPONSE",
+                        &at,
+                        format!(
+                            "`{}` cannot be answered as CSV: only the list is written, so it has no other field",
+                            r.response
+                        ),
+                    ),
+                    Ok(_) => {}
+                }
+            }
+        }
+        if r.body_format == BodyFormat::Csv {
+            let at = format!("{rp}/bodyFormat");
+            if !r.method.has_body() {
+                self.error(
+                    "E_CSV_BODY",
+                    &at,
+                    format!(
+                        "a {} has no body to read as CSV (use POST, PUT or PATCH)",
+                        r.method.as_str()
+                    ),
+                );
+            }
+            if let Some(request) = p.message(&r.request) {
+                match csv_list(p, request, params) {
+                    Err(why) => self.error(
+                        "E_CSV_BODY",
+                        &at,
+                        format!("`{}` cannot be read from CSV: {why}", r.request),
+                    ),
+                    Ok((_, _)) => {
+                        // What is not in the file has to come from elsewhere, or be allowed to be absent.
+                        for f in request.fields.iter().filter(|f| {
+                            !f.repeated
+                                && f.source.is_none()
+                                && !params.contains(&f.name)
+                                && !f.optional
+                                && !f.lenient
+                        }) {
+                            self.error(
+                                "E_CSV_BODY",
+                                &at,
+                                format!(
+                                    "field `{}` of `{}` is not in a CSV body: fill it from the path or a header, or make it optional",
+                                    f.name, r.request
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+            if r.steps.iter().any(|s| {
+                let mut signed = false;
+                s.walk(&mut |s| signed |= matches!(s, Step::VerifyHmac { .. }));
+                signed
+            }) {
+                self.error(
+                    "E_CSV_BODY",
+                    &at,
+                    "a signed webhook reads the raw body as JSON: it cannot read CSV",
                 );
             }
         }
@@ -6298,6 +6384,115 @@ mod tests {
         assert!(errors(&p).is_empty(), "{:?}", errors(&p));
         route_of(&mut p).status = 404;
         assert!(errors(&p).contains(&"E_ROUTE_STATUS".into()));
+    }
+
+    fn csv_project() -> Project {
+        let mut p = sample::orders();
+        sample::add_basket_lines(&mut p);
+        sample::add_csv_lines(&mut p);
+        p
+    }
+
+    fn csv_route<'a>(p: &'a mut Project, name: &str) -> &'a mut Route {
+        p.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == name)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_csv_import_and_export_are_valid() {
+        let p = csv_project();
+        assert!(errors(&p).is_empty(), "{:?}", validate(&p));
+        // The default is JSON, and a project saved before the option still reads.
+        let json = serde_json::to_string(&p.services[0].routes[0]).unwrap();
+        assert!(!json.contains("responseFormat") && !json.contains("bodyFormat"));
+        let old: Route = serde_json::from_str(&json).unwrap();
+        assert_eq!(old.response_format, BodyFormat::Json);
+        assert_eq!(old.body_format, BodyFormat::Json);
+        let json = serde_json::to_string(csv_route(&mut csv_project(), "export_lines")).unwrap();
+        assert!(json.contains("\"responseFormat\":\"csv\""));
+    }
+
+    #[test]
+    fn a_csv_answer_is_one_flat_list() {
+        let mut p = csv_project();
+        csv_route(&mut p, "export_lines").status = 204;
+        assert!(errors(&p).contains(&"E_CSV_RESPONSE".into()), "204");
+
+        let mut p = csv_project();
+        csv_route(&mut p, "get_lines").response_format = BodyFormat::Csv;
+        assert!(errors(&p).contains(&"E_CSV_RESPONSE".into()), "no list");
+
+        let mut p = csv_project();
+        p.messages
+            .iter_mut()
+            .find(|m| m.name == "LinesFile")
+            .unwrap()
+            .fields
+            .push(Field::new("total", FieldType::Int32));
+        assert!(
+            errors(&p).contains(&"E_CSV_RESPONSE".into()),
+            "another field"
+        );
+
+        let mut p = csv_project();
+        let mut nested = Field::new(
+            "more",
+            FieldType::Message {
+                name: "OrderLine".into(),
+            },
+        );
+        nested.repeated = true;
+        p.messages
+            .iter_mut()
+            .find(|m| m.name == "OrderLine")
+            .unwrap()
+            .fields
+            .push(nested);
+        assert!(
+            errors(&p).contains(&"E_CSV_RESPONSE".into()),
+            "a nested item"
+        );
+    }
+
+    #[test]
+    fn a_csv_body_needs_a_body_a_list_and_nothing_else_to_send() {
+        let mut p = csv_project();
+        csv_route(&mut p, "import_lines").method = HttpMethod::Delete;
+        assert!(
+            errors(&p).contains(&"E_CSV_BODY".into()),
+            "no body in a DELETE"
+        );
+
+        let mut p = csv_project();
+        csv_route(&mut p, "import_lines").request = "OrderRef".into();
+        assert!(errors(&p).contains(&"E_CSV_BODY".into()), "no list");
+
+        // `coupon` would have to be in the file: it is not, so it must be optional (or come from the path).
+        let mut p = csv_project();
+        p.messages
+            .iter_mut()
+            .find(|m| m.name == "AddLines")
+            .unwrap()
+            .fields
+            .iter_mut()
+            .find(|f| f.name == "coupon")
+            .unwrap()
+            .optional = false;
+        assert!(
+            errors(&p).contains(&"E_CSV_BODY".into()),
+            "a required field outside the list"
+        );
+    }
+
+    #[test]
+    fn a_signed_webhook_cannot_read_csv() {
+        let mut p = csv_project();
+        sample::add_stripe_webhook(&mut p);
+        csv_route(&mut p, "stripe_webhook").body_format = BodyFormat::Csv;
+        assert!(errors(&p).contains(&"E_CSV_BODY".into()));
     }
 
     #[test]

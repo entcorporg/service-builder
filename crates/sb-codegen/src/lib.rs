@@ -13,6 +13,11 @@ pub mod pods;
 mod proto;
 pub mod rawcheck;
 mod realtime;
+/// The CSV module of the generated runtime, compiled here too so that its own tests run with the generator's.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../templates/runtime/csv.rs"]
+mod runtime_csv;
 mod service;
 mod workspace;
 mod writer;
@@ -171,6 +176,7 @@ mod tests {
                 "runtime/src/audit.rs",
                 "runtime/src/challenge.rs",
                 "runtime/src/crypto.rs",
+                "runtime/src/csv.rs",
                 "runtime/src/db.rs",
                 "runtime/src/dedup.rs",
                 "runtime/src/flags.rs",
@@ -1130,6 +1136,73 @@ mod tests {
         let other = file(&files, "services/notifications/src/flows/consumers.rs");
         assert!(!other.contains("dedup"));
         assert!(!file(&files, "services/notifications/src/transport/kafka.rs").contains("dedup"));
+    }
+
+    #[test]
+    fn a_csv_route_reads_a_text_body_and_a_csv_route_answers_text_csv() {
+        let mut p = sample::orders();
+        sample::add_basket_lines(&mut p);
+        sample::add_csv_lines(&mut p);
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&p)),
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        let files = generate(&p).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+
+        // Import: the body is text, typed by the columns of the item, every refused line reported, then read as the schema.
+        let handler = &http[http.find("async fn handle_import_lines(").unwrap()..];
+        let handler = &handler[..handler.find("flows::api::import_lines").unwrap()];
+        assert!(handler.contains("body: String,"), "{handler}");
+        assert!(!handler.contains("Json("), "{handler}");
+        assert!(handler.contains("eda_runtime::csv::items(&body, &[eda_runtime::csv::Column { key: \"sku\", kind: eda_runtime::csv::Kind::Text, required: true }, eda_runtime::csv::Column { key: \"qty\", kind: eda_runtime::csv::Kind::Int32, required: true }, eda_runtime::csv::Column { key: \"note\", kind: eda_runtime::csv::Kind::Text, required: false }])"), "{handler}");
+        assert!(handler.contains("StatusCode::BAD_REQUEST"));
+        assert!(handler.contains("serde_json::json!({ \"lines\": rows })"));
+        // The file is not a JSON string: its limit is its own, and the route has it.
+        assert!(http.contains(".layer(DefaultBodyLimit::max(5242880))"));
+        assert!(http.contains("extract::{DefaultBodyLimit,"));
+
+        // Export: the list of the answer written as `text/csv` with the columns of the item.
+        let handler = &http[http.find("async fn handle_export_lines(").unwrap()..];
+        let handler = &handler[..handler.find("\nasync fn ").unwrap_or(handler.len())];
+        assert!(
+            handler.contains("eda_runtime::csv::write(json.get(\"lines\")"),
+            "{handler}"
+        );
+        assert!(
+            handler.contains("&[\"sku\", \"qty\", \"note\"]"),
+            "{handler}"
+        );
+        assert!(handler.contains("text/csv; charset=utf-8"));
+        assert!(!handler.contains("Json(reply.body)"));
+        // Its flow returns a `Reply`, which carries the list to the handler.
+        let flows = file(&files, "services/orders/src/flows/api.rs");
+        assert!(flows.contains("pub async fn export_lines(ctx: &Ctx, input: pb::OrderRef) -> anyhow::Result<eda_runtime::http::Reply<pb::LinesFile>>"));
+        // The routes that stay JSON are as they were.
+        let handler = &http[http.find("async fn handle_get_lines(").unwrap()..];
+        assert!(
+            handler[..handler.find("\nasync fn ").unwrap_or(handler.len())].contains("Json(body)")
+        );
+
+        // The runtime carries the module, and the OpenAPI document says what the routes take and give.
+        assert!(file(&files, "runtime/src/lib.rs").contains("pub mod csv;"));
+        let doc: serde_json::Value =
+            serde_json::from_str(file(&files, "services/orders/openapi.json")).unwrap();
+        let import = &doc["paths"]["/orders/{order_id}/lines/import"]["post"];
+        assert!(
+            import["requestBody"]["content"]["text/csv"]["schema"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("`sku`, `qty`, `note`")
+        );
+        assert!(import["requestBody"]["content"]["application/json"].is_null());
+        let export = &doc["paths"]["/orders/{order_id}/lines/export"]["get"];
+        assert_eq!(
+            export["responses"]["200"]["content"]["text/csv"]["schema"]["type"],
+            "string"
+        );
+        assert!(export["responses"]["200"]["content"]["application/json"].is_null());
     }
 
     #[test]

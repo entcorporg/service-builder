@@ -654,6 +654,8 @@ fn routes(app: &mut App, ui: &mut Ui, svc: &Service, sname: &str) {
                     s.http_port = Some(next_http);
                 }
                 s.routes.push(Route {
+                    response_format: Default::default(),
+                    body_format: Default::default(),
                     path: format!("/{}", name.replace('_', "-")),
                     name,
                     method: HttpMethod::Get,

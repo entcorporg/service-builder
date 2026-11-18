@@ -4,7 +4,7 @@
 | --- | --- |
 | Branche | `feature/import-export-csv` |
 | Famille | Données |
-| État | Identifiée, non implémentée |
+| État | Implémentée en partie : export `text/csv` d'une liste et import d'un corps CSV (options `responseFormat` et `bodyFormat` d'une route, voir `docs/ARCHITECTURE.md`, « CSV ») ; ni flux continu, ni import partiel, ni tâche de fond |
 | Référence open source | [PostgREST (`Accept: text/csv`, insertion en masse)](https://github.com/PostgREST/postgrest) |
 | Licence | MIT |
 | Langage d'origine | Haskell |
