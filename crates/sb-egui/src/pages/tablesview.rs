@@ -410,7 +410,7 @@ pub fn page(app: &mut App, ui: &mut Ui) {
 
     // ---- sidebar ----
     egui::Panel::left("tables-side")
-        .exact_size(250.0)
+        .exact_size(crate::theme::side(ui, 250.0, 190.0))
         .resizable(false)
         .frame(
             Frame::new()

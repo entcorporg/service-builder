@@ -197,7 +197,7 @@ impl<'a> Checker<'a> {
 
     // ---- pods ------------------------------------------------------------------------
 
-    /// The settings of the Pods page: they end up in a compose file and in the configuration of Traefik, so
+    /// The settings of the Infra page: they end up in a compose file and in the configuration of Traefik, so
     /// what would not be valid there is refused here.
     fn pods(&mut self) {
         use crate::pods::*;

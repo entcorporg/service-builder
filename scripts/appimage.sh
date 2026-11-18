@@ -2,6 +2,7 @@
 # Packs target/release/service-builder into dist/Service.Builder_<version>_amd64.AppImage.
 # The window is egui over wgpu (Vulkan, Metal, GL): the graphics libraries (libvulkan, libGL, libxkbcommon, Wayland, X11)
 # are opened at run time from the system, like every desktop has them; nothing else needs bundling.
+# The Garage binary (scripts/fetch-garage.sh) is packed too, in usr/bin: the application starts it as its own store.
 # usage: scripts/appimage.sh <tag>      (run after `cargo build --release -p service-builder`)
 set -euo pipefail
 
@@ -23,8 +24,10 @@ mkdir -p "$icon" && cp "$data/service-builder-512.png" "$icon/service-builder.pn
 export PATH="$tools:$PATH" APPIMAGE_EXTRACT_AND_RUN=1 LINUXDEPLOY_OUTPUT_VERSION="$version"
 export OUTPUT="$root/dist/Service.Builder_${version}_amd64.AppImage"
 
+garage="$("$root/scripts/fetch-garage.sh")"
 "$tools/linuxdeploy" --appdir "$appdir" \
   --executable "$root/target/release/service-builder" \
+  --executable "$garage" \
   --desktop-file "$data/dev.servicebuilder.app.desktop" \
   --icon-file "$icon/service-builder.png" \
   --output appimage

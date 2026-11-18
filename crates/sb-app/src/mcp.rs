@@ -1,9 +1,11 @@
 //! A Model Context Protocol server over stdio, so that an AI client (Claude Code, Claude Desktop…)
 //! can read, edit, validate and export a Service Builder project.
 //!
-//! The server is stateless: every call reads the project file and every edit writes it back, so
-//! it always sees what the desktop app saved and the app sees what the client changed. Stdout
-//! carries nothing but protocol messages (one JSON object per line); diagnostics go to stderr.
+//! The server holds no project in memory: every call reads the project file and every edit writes it back, so
+//! it always sees what the desktop app saved and the app sees what the client changed. The file is the one the
+//! server was started on, or the last one the app opened, and `load_project` changes it: an agent finds a project of
+//! the S3 store with `search_projects` and loads it by itself. Stdout carries nothing but protocol messages (one
+//! JSON object per line); diagnostics go to stderr.
 
 use std::fs;
 use std::io::{self, BufRead, Write};
@@ -42,6 +44,36 @@ fn no_properties() -> Value {
 }
 
 const TOOLS: &[ToolDef] = &[
+    ToolDef {
+        name: "search_projects",
+        description: "Searches the projects Service Builder keeps: the ones in its S3 store (Garage) and the ones opened on this machine, by part of their id or name (no query: all of them). Each result gives the id to pass to load_project, the latest stored version and where the project is. Use it when no project is loaded, or to work on another one.",
+        properties: || json!({ "query": { "type": "string", "description": "Part of the id or of the name, any case. Omit to list every project." } }),
+        required: &[],
+    },
+    ToolDef {
+        name: "load_project",
+        description: "Makes a project the one every other tool works on, and the one the Service Builder window shows (when it has no unsaved changes). The project comes from the S3 store into its working copy on this machine; one that was never stored is opened from this machine. Give its id, or its name (an exact one, or text that only one project holds). `version` loads an older version, which then counts as a change to store. Refuses to overwrite changes that were not stored with save_version, unless `discard_local` is true.",
+        properties: || {
+            json!({
+                "project": { "type": "string", "description": "Id or name, as search_projects lists them." },
+                "version": { "type": "integer", "description": "An older version, as list_versions lists them. Omit for the latest." },
+                "discard_local": { "type": "boolean", "description": "Overwrite working-copy changes that were not stored." }
+            })
+        },
+        required: &["project"],
+    },
+    ToolDef {
+        name: "list_versions",
+        description: "The stored versions of the current project in the S3 store, the newest first, with their date and size. Each save_version that changed something made one.",
+        properties: no_properties,
+        required: &[],
+    },
+    ToolDef {
+        name: "save_version",
+        description: "Stores the current project in the S3 store as a new version (nothing happens if it did not change since the last one). The edits of patch_project and set_project only reach the working copy: call this when a set of edits is done and valid.",
+        properties: no_properties,
+        required: &[],
+    },
     ToolDef {
         name: "describe_project",
         description: "Outline of the project: messages, topics, and for each service its RPCs, routes, tables (with their unique constraints, indexes and foreign keys), consumers and scheduled jobs, with the id and type of each step. Start here, then read details with get_project.",
@@ -172,15 +204,47 @@ fn tools_list() -> Value {
     json!({ "tools": tools })
 }
 
-/// Serves the protocol on `input`/`output` until `input` closes.
-pub fn serve(project: &Path, input: impl BufRead, mut output: impl Write) -> io::Result<()> {
+/// What a connection works on: the project file, which `load_project` changes.
+pub struct Session {
+    project: Option<PathBuf>,
+}
+
+impl Session {
+    pub fn at(project: Option<&Path>) -> Self {
+        Self {
+            project: project.map(Path::to_path_buf),
+        }
+    }
+
+    fn require(&self) -> Result<&Path, String> {
+        self.project.as_deref().ok_or_else(|| {
+            "no project is loaded: search_projects, then load_project (or start the server on a project file)"
+                .to_string()
+        })
+    }
+}
+
+/// Serves the protocol on `input`/`output` until `input` closes. Without a project, the one the app opened last.
+pub fn serve<'a>(
+    project: impl Into<Option<&'a Path>>,
+    input: impl BufRead,
+    mut output: impl Write,
+) -> io::Result<()> {
+    let mut session = Session::at(project.into());
+    if session.project.is_none() {
+        session.project = crate::store::Store::system()
+            .local
+            .state()
+            .last_open()
+            .map(|r| PathBuf::from(&r.path));
+    }
     for line in input.lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
         let reply = match serde_json::from_str::<Value>(&line) {
-            Ok(message) => handle(project, &message),
+            Ok(message) => handle_in(&mut session, &message),
             Err(e) => Some(error_reply(
                 &Value::Null,
                 PARSE_ERROR,
@@ -203,8 +267,13 @@ fn error_reply(id: &Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
-/// One message in, at most one reply out. Notifications (no `id`) never get a reply.
+/// One message in, at most one reply out, on a connection that works on `project`.
 pub fn handle(project: &Path, message: &Value) -> Option<Value> {
+    handle_in(&mut Session::at(Some(project)), message)
+}
+
+/// One message in, at most one reply out. Notifications (no `id`) never get a reply.
+pub fn handle_in(session: &mut Session, message: &Value) -> Option<Value> {
     let id = message.get("id")?;
     let params = message.get("params").unwrap_or(&Value::Null);
     let reply = match message.get("method").and_then(Value::as_str) {
@@ -219,7 +288,7 @@ pub fn handle(project: &Path, message: &Value) -> Option<Value> {
                     "protocolVersion": protocol,
                     "capabilities": { "tools": {} },
                     "serverInfo": { "name": "service-builder", "version": env!("CARGO_PKG_VERSION") },
-                    "instructions": "Edits a Service Builder project (event-driven Rust backends). Call describe_project first; edit with patch_project; check with validate.",
+                    "instructions": "Edits a Service Builder project (event-driven Rust backends). Without a loaded project: search_projects, then load_project. Call describe_project first; edit with patch_project; check with validate; keep the result with save_version.",
                 }),
             )
         }
@@ -238,13 +307,16 @@ pub fn handle(project: &Path, message: &Value) -> Option<Value> {
             }
             let arguments = params.get("arguments").unwrap_or(&Value::Null);
             // A failing tool is a result the model can read and react to, not a protocol error.
-            let (text, is_error) = match call_tool(project, name, arguments) {
+            let (text, is_error) = match call_tool(session, name, arguments) {
                 Ok(text) => (text, false),
                 Err(text) => (text, true),
             };
             let mut content = vec![json!({ "type": "text", "text": text })];
             // Every few calls the agent is asked, in the result itself, for a feedback report.
-            if name != "submit_report" && crate::feedback::tick(project) {
+            if name != "submit_report"
+                && let Some(project) = session.project.as_deref()
+                && crate::feedback::tick(project)
+            {
                 content.push(json!({ "type": "text", "text": crate::feedback::request_text() }));
             }
             result_reply(id, json!({ "content": content, "isError": is_error }))
@@ -260,7 +332,20 @@ fn read_json_file(path: &str) -> Result<Value, String> {
     serde_json::from_str(&text).map_err(|e| format!("{path} is not valid JSON: {e}"))
 }
 
-fn call_tool(project: &Path, name: &str, args: &Value) -> Result<String, String> {
+fn call_tool(session: &mut Session, name: &str, args: &Value) -> Result<String, String> {
+    match name {
+        "search_projects" => search_projects(args),
+        "load_project" => load_project_tool(session, args),
+        "list_versions" => list_versions(session.require()?),
+        "save_version" => save_version(session.require()?),
+        // These two do not read the project.
+        "get_schema" => schema_tool(args.get("definition").and_then(Value::as_str)),
+        "get_example_project" => Ok(pretty(&sb_model::sample::showcase())),
+        _ => call_project_tool(session.require()?, name, args),
+    }
+}
+
+fn call_project_tool(project: &Path, name: &str, args: &Value) -> Result<String, String> {
     match name {
         "describe_project" => Ok(pretty(&outline(&load_project(project)?))),
         "get_project" => Ok(pretty(&load_project(project)?)),
@@ -325,6 +410,144 @@ fn call_tool(project: &Path, name: &str, args: &Value) -> Result<String, String>
         }
         _ => Err(format!("unknown tool {name}")),
     }
+}
+
+// ---- The projects of the store ----
+
+/// The text of the date a project was saved, without the fraction of second: `2026-11-18T12:46:03Z`.
+fn short_date(date: &str) -> String {
+    match date.split_once('.') {
+        Some((seconds, _)) => format!("{seconds}Z"),
+        None => date.to_string(),
+    }
+}
+
+fn search_projects(args: &Value) -> Result<String, String> {
+    let query = args.get("query").and_then(Value::as_str).unwrap_or("");
+    let found = crate::store::Store::system().search(query);
+    let projects: Vec<Value> = found
+        .projects
+        .iter()
+        .map(|p| {
+            json!({
+                "id": p.id,
+                "name": p.name,
+                "latestVersion": p.version,
+                "updatedAt": short_date(&p.updated_at),
+                "where": p.source.to_string(),
+            })
+        })
+        .collect();
+    let mut text = if projects.is_empty() {
+        match query {
+            "" => "no project yet".to_string(),
+            q => format!("no project matches \"{q}\""),
+        }
+    } else {
+        pretty(&projects)
+    };
+    if let Some(e) = found.bucket_error {
+        text.push_str(&format!(
+            "\nthe S3 store could not be read ({e}): only the projects opened on this machine are listed"
+        ));
+    }
+    Ok(text)
+}
+
+/// The project a text designates: an id, an exact name, or the only one that holds the text.
+fn resolve(store: &crate::store::Store, text: &str) -> Result<String, String> {
+    let all = store.search("").projects;
+    let wanted = text.trim().to_lowercase();
+    if let Some(p) = all.iter().find(|p| p.id == wanted) {
+        return Ok(p.id.clone());
+    }
+    let named: Vec<_> = all
+        .iter()
+        .filter(|p| p.name.to_lowercase() == wanted)
+        .collect();
+    if let [p] = named.as_slice() {
+        return Ok(p.id.clone());
+    }
+    let partial: Vec<_> = all
+        .iter()
+        .filter(|p| p.id.contains(&wanted) || p.name.to_lowercase().contains(&wanted))
+        .collect();
+    match partial.as_slice() {
+        [p] => Ok(p.id.clone()),
+        [] => Err(format!("no project \"{text}\"; see search_projects")),
+        many => Err(format!(
+            "\"{text}\" matches {} projects ({}): give an id",
+            many.len(),
+            many.iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+fn load_project_tool(session: &mut Session, args: &Value) -> Result<String, String> {
+    let wanted = string_arg(args, "project")?;
+    let version = match args.get("version") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or("`version` must be a version number")?,
+        ),
+    };
+    let discard = args
+        .get("discard_local")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let store = crate::store::Store::system();
+    let id = resolve(&store, wanted)?;
+    let pulled = store.pull(&id, version, discard)?;
+    // Whoever reads the file next gets it checked, and the answer tells what the agent now works on.
+    let project = load_project(&pulled.path)?;
+    session.project = Some(pulled.path.clone());
+    let version = match pulled.version {
+        Some(n) => format!("version {n}"),
+        None => "the copy of this machine (never stored, or the store is out of reach)".to_string(),
+    };
+    Ok(format!(
+        "loaded {} ({}), {version}, working copy {}\n{}",
+        project.name,
+        pulled.id,
+        pulled.path.display(),
+        summary(&sb_codegen::diagnose(&project))
+    ))
+}
+
+fn list_versions(project: &Path) -> Result<String, String> {
+    let store = crate::store::Store::system();
+    let name = load_project(project)?.name;
+    let id = store.id_of(project, &name);
+    let versions = store.remote()?.versions(&id)?;
+    if versions.is_empty() {
+        return Ok(format!(
+            "{id} has no stored version yet: save_version makes the first"
+        ));
+    }
+    let list: Vec<Value> = versions
+        .iter()
+        .map(
+            |v| json!({ "version": v.number, "savedAt": short_date(&v.saved_at), "bytes": v.size }),
+        )
+        .collect();
+    Ok(format!("{id}\n{}", pretty(&list)))
+}
+
+fn save_version(project: &Path) -> Result<String, String> {
+    let store = crate::store::Store::system();
+    // What is kept must be a project this version of the app opens.
+    load_project(project)?;
+    let pushed = store.push_file(project)?;
+    Ok(if pushed.created {
+        format!("stored as version {}", pushed.version)
+    } else {
+        format!("nothing new: version {} is the same", pushed.version)
+    })
 }
 
 fn schema_tool(definition: Option<&str>) -> Result<String, String> {
@@ -1021,12 +1244,105 @@ mod tests {
             && !t["description"].as_str().unwrap().is_empty()));
     }
 
+    /// The tools of the store, with the folders of the application and the bucket both made for the test.
+    #[test]
+    fn an_agent_finds_loads_and_stores_projects_by_itself() {
+        let dir = std::env::temp_dir().join(format!("sb-mcp-store-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        // SAFETY: the only test that touches this variable; the others pass their folders explicitly.
+        unsafe { std::env::set_var("XDG_DATA_HOME", dir.join("data")) };
+        let (config, _) = crate::s3::testing::fake_server();
+        let local = crate::store::Local::system();
+        fs::create_dir_all(&local.data).unwrap();
+        fs::write(
+            local.data.join("test-s3.json"),
+            serde_json::to_string(&config).unwrap(),
+        )
+        .unwrap();
+
+        let call = |session: &mut Session, name: &str, args: Value| {
+            let reply = handle_in(
+                session,
+                &json!({ "id": 1, "method": "tools/call", "params": { "name": name, "arguments": args } }),
+            )
+            .unwrap();
+            let result = &reply["result"];
+            (
+                result["content"][0]["text"].as_str().unwrap().to_string(),
+                result["isError"] == true,
+            )
+        };
+
+        // A project of the editor: its working copy is in the folder of the application.
+        let file = local.working_copy("orders-demo");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        save_project(&file, &sb_model::sample::orders()).unwrap();
+        let mut agent = Session::at(Some(&file));
+
+        let (text, err) = call(&mut agent, "list_versions", json!({}));
+        assert!(!err && text.contains("no stored version"), "{text}");
+        let (text, err) = call(&mut agent, "save_version", json!({}));
+        assert!(!err && text.contains("version 1"), "{text}");
+        let (text, _) = call(&mut agent, "save_version", json!({}));
+        assert!(text.contains("nothing new"), "{text}");
+        let (text, _) = call(&mut agent, "list_versions", json!({}));
+        assert!(text.contains("\"version\": 1"), "{text}");
+
+        // Another agent, started on no project at all: it can do nothing but look for one.
+        let mut other = Session::at(None);
+        let (text, err) = call(&mut other, "describe_project", json!({}));
+        assert!(err && text.contains("search_projects"), "{text}");
+        let (text, _) = call(&mut other, "get_example_project", json!({}));
+        assert!(text.contains("services"));
+        let (text, err) = call(&mut other, "search_projects", json!({ "query": "ORDER" }));
+        assert!(
+            !err && text.contains("\"id\": \"orders-demo\"") && text.contains("bucket+local"),
+            "{text}"
+        );
+        let (text, _) = call(
+            &mut other,
+            "search_projects",
+            json!({ "query": "nothing like it" }),
+        );
+        assert!(text.contains("no project matches"), "{text}");
+
+        let (text, err) = call(&mut other, "load_project", json!({ "project": "nope" }));
+        assert!(err && text.contains("no project"), "{text}");
+        let (text, err) = call(&mut other, "load_project", json!({ "project": "orders" }));
+        assert!(!err && text.contains("version 1"), "{text}");
+        let (text, err) = call(&mut other, "describe_project", json!({}));
+        assert!(!err && text.contains("Orders"), "{text}");
+        // It is the project the app would open next.
+        assert_eq!(local.state().last.as_deref(), Some("orders-demo"));
+
+        // An edit is kept in the working copy, and is a change the store does not have until it is saved.
+        let (_, err) = call(
+            &mut other,
+            "patch_project",
+            json!({ "operations": [{ "op": "replace", "path": "/name", "value": "Orders v2" }] }),
+        );
+        assert!(!err);
+        let (text, err) = call(&mut other, "load_project", json!({ "project": "orders" }));
+        assert!(err && text.contains("not stored"), "{text}");
+        let (text, _) = call(&mut other, "save_version", json!({}));
+        assert!(text.contains("version 2"), "{text}");
+        let (text, err) = call(
+            &mut other,
+            "load_project",
+            json!({ "project": "orders", "version": 1 }),
+        );
+        assert!(!err && text.contains("version 1"), "{text}");
+        let (text, _) = call(&mut other, "get_project", json!({}));
+        assert!(text.contains("\"name\": \"Orders Demo\""), "{text}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn serves_lines_over_a_stream() {
         let f = Fixture::new("stream");
         let input = "{\"id\":1,\"method\":\"ping\"}\n\n{\"method\":\"notifications/initialized\"}\nnot json\n";
         let mut out = Vec::new();
-        serve(&f.file, input.as_bytes(), &mut out).unwrap();
+        serve(f.file.as_path(), input.as_bytes(), &mut out).unwrap();
         let lines: Vec<Value> = String::from_utf8(out)
             .unwrap()
             .lines()

@@ -212,7 +212,7 @@ pub fn page(app: &mut App, ui: &mut Ui) {
     }
 
     egui::Panel::left("code-tree")
-        .exact_size(236.0)
+        .exact_size(crate::theme::side(ui, 236.0, 190.0))
         .resizable(false)
         .frame(
             Frame::new()

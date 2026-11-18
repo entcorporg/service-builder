@@ -19,8 +19,8 @@ flowchart LR
 | --- | --- |
 | `crates/sb-model` | Le document : `Project`, `Service`, `Topic`, `Message`, `Step`… (JSON camelCase), règles de nommage, typage léger des mappings, validation avec diagnostics. Aucune dépendance à l'interface ni au générateur. |
 | `crates/sb-codegen` | Du modèle vers un workspace Cargo : `.proto`, crate `contracts`, crate `runtime` embarquée, un crate par service, `docker-compose.yml`. Pur et déterministe. |
-| `crates/sb-app` | Services applicatifs partagés par l'app et le CLI `sb` : `analyze` (validation + génération + rustfmt), ouvrir/sauver, exporter, lancer en conteneurs (`pods`), serveur MCP, et la logique d'édition sans fenêtre : formulaires d'étapes (`stepform`), renommages en cascade (`rename`), portée des variables (`scope`). |
-| `crates/sb-egui` | L'application (paquet `service-builder`, egui/eframe sur wgpu) au-dessus de `sb-app` : coque (`app.rs`, `header.rs`), pages (`pages/`), thème (`theme.rs`, `fonts.rs`, `icons.rs`), mise à jour (`updater.rs`). |
+| `crates/sb-app` | Services applicatifs partagés par l'app et le CLI `sb` : `analyze` (validation + génération + rustfmt), ouvrir/sauver, exporter, fichiers de l'infrastructure (`infra`), stockage des projets sur S3 (`s3`, `store`), serveur MCP, et la logique d'édition sans fenêtre : formulaires d'étapes (`stepform`), renommages en cascade (`rename`), portée des variables (`scope`). |
+| `crates/sb-egui` | L'application (paquet `service-builder`, egui/eframe sur wgpu) au-dessus de `sb-app` : coque (`app.rs`, `header.rs`), pages (`pages/`), thème (`theme.rs`, `fonts.rs`, `icons.rs`). |
 
 ## Le modèle de projet
 
@@ -266,7 +266,7 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
   Le magasin est un confort, pas une dépendance : s'il est injoignable ou ne répond pas en 250 ms, l'étape compte en mémoire
   comme sans l'option, l'écrit dans le journal et ne l'interroge plus pendant 5 s ; une requête n'est jamais refusée parce que
   le magasin est tombé (pendant ce temps, la limite redevient « par instance »). Le service ne démarre pas en production sans
-  `DRAGONFLY_URL`. Le générateur ajoute DragonflyDB à la pile (`docker-compose.yml`, Pods) pour tout projet qui a une étape
+  `DRAGONFLY_URL`. Le générateur ajoute DragonflyDB à la pile (`docker-compose.yml`, onglet Infra) pour tout projet qui a une étape
   partagée, même sans service temps réel.
   Routes seulement (`E_RATE_LIMIT_OUTSIDE_ROUTE`), `E_RATE_LIMIT_MAX`, `E_RATE_LIMIT_WINDOW`.
 - **Compter une consommation et poser un quota** : les étapes `meter` et `checkQuota` comptent un usage par locataire et par
@@ -298,7 +298,7 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
     `{ algorithm: "SHA-256", challenge, maxnumber, salt, signature }`, ce que lit le widget ALTCHA : `salt` est un aléa suivi de
     `?expires=<unix>&`, `challenge` le SHA-256 du sel suivi d'un nombre secret tiré dans `0..=maxnumber` (que le widget retrouve
     en les essayant tous), `signature` le HMAC-SHA256 du `challenge` sous la clé. Le chemin est servi par l'API HTTP du service
-    (le proxy des Pods l'y envoie), décrit dans son document OpenAPI. Validé : `E_CHALLENGE_PATH` (forme, pas celui d'une route
+    (le proxy de l'infra l'y envoie), décrit dans son document OpenAPI. Validé : `E_CHALLENGE_PATH` (forme, pas celui d'une route
     `GET` ni du document OpenAPI), `E_CHALLENGE_KEY_ENV`, `E_CHALLENGE_WORK` (1 à 10 000 000), `E_CHALLENGE_TTL` (10 s à 24 h),
     `E_CHALLENGE_NO_HTTP` (un service sans route ne sert pas d'HTTP). Au démarrage le service ne tourne pas sans clé en
     production (16 caractères au moins) ; hors production, une clé de développement, dite dans le journal.
@@ -1297,7 +1297,7 @@ modèle lit, pas une erreur de protocole. Stdout ne porte que le protocole.
 
 L'activation écrit l'entrée dans le `.mcp.json` du dossier du projet (la configuration par projet de Claude Code) en
 conservant le reste du fichier, et refuse d'écraser un fichier qui n'est pas du JSON. L'entrée vaut `Stale` quand elle
-démarre un autre programme que l'actuel (application déplacée ou mise à jour : un AppImage se lance depuis `$APPIMAGE`).
+démarre un autre programme que l'actuel (application déplacée ou réinstallée : un AppImage se lance depuis `$APPIMAGE`).
 Pour que les éditions du client apparaissent, l'UI compare la date de modification du fichier à celle qu'elle a lue ou
 écrite en dernier quand la fenêtre reprend le focus.
 
@@ -1312,10 +1312,12 @@ par un agent peut contenir, malgré la consigne, un détail du projet, et une is
 une URL « new issue » pré-remplie (corps tronqué pour tenir dans la limite d'URL de GitHub) et l'ouvre dans le
 navigateur (`egui::OpenUrl`), limité aux pages du dépôt.
 
-### Pods : lancer sans exporter
+### Infra : les fichiers qui lancent les services
 
-L'onglet **Pods** (`pages/pods.rs`) lance les services générés dans des conteneurs, avec leur infrastructure, sans
-passer par un export. Trois couches, comme le reste :
+Service Builder ne démarre plus rien lui-même (plus de moteur de conteneurs, de `up`/`down`, de logs) : l'onglet **Infra**
+(`pages/infra.rs`) règle l'infrastructure et le bouton **Exporter l'infra** (aussi dans le menu ⋮ de la barre d'outils, `files::export_infra`)
+écrit tous les fichiers qui la lancent dans un dossier, le même que celui du code exporté (l'image se construit depuis
+lui). `docker compose up -d` fait le reste. Trois couches :
 
 - **Le réglage** (`sb-model/src/pods.rs`, clé `pods` du projet, absente tant qu'elle vaut les défauts) : les ressources
   (`cpuset`, politique de redémarrage, mémoire d'un service, de Kafka, de PostgreSQL ; le swap est plafonné à la même
@@ -1326,32 +1328,28 @@ passer par un export. Trois couches, comme le reste :
   authentification des interfaces, limite de débit, un sous-domaine par hôte, et les **frontends** (nom, sous-domaine,
   port du serveur de développement sur l'hôte). Validé comme le reste
   (`E_PODS_*`, pointeurs `/pods/...`, affichés sous le champ fautif) : tout ce qui finit dans un YAML y est vérifié.
-- **Les fichiers** (`sb-codegen/src/pods.rs`, purs et testés) : `Dockerfile` (deux images : `builder`, Rust + cmake, et
-  `runtime`, Debian + OpenSSL), `build.sh`, `compose.pods.yml` et, si Traefik est actif, `traefik/traefik.yml` et
-  `traefik/dynamic/{services,routers,middlewares}.yaml`, et, avec Garage, `garage/garage.toml` et `garage/init.sh`.
-  Ils ne font pas partie d'un export, qui reste ce dont
-  `cargo run` a besoin ; l'onglet les montre (« Fichiers générés ») et `sb pods` les écrit.
-- **L'exécution** (`sb-app/src/pods.rs`, bloquant, appelé sur un fil) : le workspace est écrit dans
-  `~/.local/share/service-builder/pods/sb-<projet>/` (un fichier inchangé n'est pas réécrit : sa date dit à cargo qu'il
-  n'a rien à recompiler), les deux images sont construites, puis `build.sh` compile les services **dans un conteneur**
-  de l'image `builder`, sources montées en lecture seule et trois volumes pour le registre de cargo, le dossier de
-  build et les binaires. Rien de BuildKit n'est utilisé : le builder classique de Docker suffit, Podman aussi. Enfin
-  `compose up -d` démarre la stack ; chaque service monte le volume des binaires et lance le sien. Un service déjà en
-  marche n'est redémarré que si son binaire a changé (`build.sh` le signale). Le premier build prend plusieurs minutes
-  (librdkafka est compilé), les suivants quelques secondes.
+- **Les fichiers** (`sb-codegen/src/pods.rs`, purs et testés) :
+  - `docker-compose.yml` : l'infrastructure (Kafka, PostgreSQL, Mailpit, DragonflyDB) avec ses ports sur l'hôte, le
+    **même** fichier que « Exporter le code » écrit (`workspace::docker_compose`) ;
+  - `docker-compose.override.yml` : ce que `docker compose` fusionne par-dessus, sans `-f` : limites de ressources,
+    Adminer, Kafka UI, Garage, Traefik et les services eux-mêmes. Kafka y reçoit un second écouteur, `EXTERNAL` sur
+    `localhost:9092`, pour que le port publié par le fichier de base reste celui où `cargo run` le trouve ; l'override ne
+    republie aucun port du fichier de base (fusionnés, ils seraient liés deux fois) ;
+  - `Dockerfile` (deux images : `builder`, Rust + cmake, et `runtime`, Debian + OpenSSL), `build.sh`, `.dockerignore` ;
+  - si Traefik est actif, `traefik/traefik.yml` et `traefik/dynamic/{services,routers,middlewares}.yaml` ; avec Garage,
+    `garage/garage.toml` et `garage/init.sh`.
+  L'onglet les montre à droite, tels qu'ils seront écrits. L'en-tête de l'override rappelle les commandes, dans l'ordre :
+  construire les deux images, compiler les services dans le conteneur `builder` (sources montées en lecture seule, trois
+  volumes pour le registre de cargo, le dossier de build et les binaires ; rien de BuildKit, Docker classique suffit),
+  `docker compose up -d`, puis `sh garage/init.sh`.
+- **L'écriture** (`sb-app/src/infra.rs`, `export_infra`, aussi `sb infra <projet> <dossier>`) : refuse un projet qui a des
+  erreurs, n'écrit pas un fichier dont le contenu n'a pas changé, et tire une fois pour toutes les secrets de Garage.
 
-**Moteur.** Avec Podman et `podman-compose` installés, la stack tourne dans un Podman *rootless* au store privé
-(`~/.local/share/service-builder/engine`, par `XDG_DATA_HOME`/`XDG_CONFIG_HOME`) : ses images, conteneurs et volumes ne
-se mélangent pas à ceux de l'utilisateur. Sinon Docker est utilisé, et la stack n'est isolée que par son nom de projet
-compose (`sb-<projet>`). En rootless, `cpuset` demande la délégation du contrôleur cgroup correspondant, et les ports
-80/443 un `net.ipv4.ip_unprivileged_port_start` adapté.
-
-**La stack.** Kafka (KRaft, joint en `kafka:19092`), PostgreSQL (une base par service, volume `postgres-data`), Mailpit
-s'il y a un service mail, DragonflyDB s'il y a un service temps réel, Garage s'il y a une étape objet, puis les services : `KAFKA_BROKERS`,
-`<SERVICE>_DATABASE_URL`, `<SERVICE>_URL` des autres services, `DRAGONFLY_URL`, `SMTP_HOST`, `JWKS_URL` sont posés
-pour qu'ils se trouvent par leur nom. Les services s'arrêtent sur `SIGINT`, relayé par un processus init (sans lui, le
-premier processus d'un conteneur ignore le signal et l'arrêt attend dix secondes). Les ports de Kafka et de PostgreSQL
-ne sont pas publiés : les interfaces d'administration les remplacent, et la stack ne heurte pas un Kafka local.
+**La stack.** Kafka (KRaft, joint en `kafka:19092` par les conteneurs), PostgreSQL (une base par service, volume
+`postgres-data`), Mailpit s'il y a un service mail, DragonflyDB s'il y a un service temps réel, Garage s'il y a une étape
+objet, puis les services : `KAFKA_BROKERS`, `<SERVICE>_DATABASE_URL`, `<SERVICE>_URL` des autres services, `DRAGONFLY_URL`,
+`SMTP_HOST`, `JWKS_URL` sont posés pour qu'ils se trouvent par leur nom. Les services s'arrêtent sur `SIGINT`, relayé par un
+processus init (sans lui, le premier processus d'un conteneur ignore le signal et l'arrêt attend dix secondes).
 
 **Traefik.** Sans domaine : HTTP sur `*.localhost` (résolu par les navigateurs), sans certificat. Avec un domaine :
 redirection vers HTTPS et certificats Let's Encrypt (défi HTTP : le port 80 doit être joignable). Pas de fournisseur
@@ -1366,52 +1364,109 @@ répond au CORS (origines des frontends, avec identifiants) et les services dém
 l'en-tête ne parte pas deux fois. Les chemins `/.well-known/...` sont servis sans préfixe. Sur un domaine public, des
 interfaces sans authentification donnent l'avertissement `W_PODS_ADMIN_OPEN`.
 
-**Garage (stockage objet).** Dès qu'un service a une étape objet (`objectPut`, `objectGet`, `objectDelete`,
+**Garage (stockage objet des services générés).** Dès qu'un service a une étape objet (`objectPut`, `objectGet`, `objectDelete`,
 `objectPresignGet`, `objectPresignPut`) et que `pods.garage` est actif, la stack contient un Garage à un seul nœud
 (`dxflrs/garage:v2.0.0`, volumes `garage-meta` et `garage-data`). Les services concernés, et eux seuls, reçoivent
 `S3_ENDPOINT=http://garage:3900`, `AWS_REGION=garage`, et le nom du bucket dans chaque variable que leurs étapes
-nomment : un bucket par variable, nommé d'après elle (`AVATAR_BUCKET` donne `avatar-bucket`).
+nomment : un bucket par variable, nommé d'après elle (`AVATAR_BUCKET` donne `avatar-bucket`). (Ce Garage n'a rien à voir
+avec celui où Service Builder range ses projets, voir « Stockage des projets ».)
 - **Les secrets ne sont pas générés** : le secret du nœud (`garage/rpc.env`) et la clé d'accès des services
-  (`garage/s3.env` : `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) sont tirés au hasard une fois par stack par
-  `sb-app`, écrits en `0600` dans le dossier de la stack, et jamais réécrits. Ils ne sont ni dans le projet ni dans
-  « Fichiers générés ». `garage/s3.env` passe **après** le fichier d'environnement du projet : dans la stack, c'est la
-  clé de ce Garage qui compte.
-- **`garage/init.sh`**, lancé après `compose up` à chaque démarrage (et à la main : `sh garage/init.sh`), passe par la
-  ligne de commande de Garage dans son conteneur : layout du nœud, import de la clé, création des buckets, droits de
-  lecture et d'écriture. Chaque étape regarde avant d'agir, il est donc relançable. Les services n'attendent pas
-  Garage : rien n'est demandé au stockage à leur démarrage.
+  (`garage/s3.env` : `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) sont tirés au hasard une fois par `export_infra`,
+  écrits en `0600` dans le dossier d'export, et jamais réécrits. Ils ne sont ni dans le projet ni dans la liste de
+  fichiers. `garage/s3.env` passe **après** le fichier d'environnement du projet : dans la stack, c'est la clé de ce
+  Garage qui compte.
+- **`garage/init.sh`**, à lancer après `docker compose up -d` (et relançable : chaque étape regarde avant d'agir), passe
+  par la ligne de commande de Garage dans son conteneur : layout du nœud, import de la clé, création des buckets, droits de
+  lecture et d'écriture. Les services n'attendent pas Garage : rien n'est demandé au stockage à leur démarrage.
 - **Les URL signées** portent l'hôte : `S3_PUBLIC_ENDPOINT` est l'adresse que le navigateur atteint. Avec Traefik,
   l'hôte `s3.` (réglable) mène à Garage, sans authentification (la signature en est une, et `Authorization` appartient
   à S3) et avec le CORS des frontends, nécessaire à un `PUT` signé depuis une page. Sans Traefik, le port S3 est publié
   sur `127.0.0.1` (le premier libre après ceux des interfaces) si les ports sont publiés ; sinon la variable n'est pas
   posée et les URL signées gardent l'adresse interne.
 - `pods.garage` à `false` : ni conteneur ni variables, le stockage est celui que désigne le fichier d'environnement.
-- Supprimer les volumes (`sb down --volumes`) vide le stockage ; la clé de `garage/s3.env` est réimportée au démarrage
-  suivant.
 
-Vérifié sur Docker avec le vrai Garage : `init.sh` deux fois de suite, puis un `PUT` et un `GET` signés avec la clé
-tirée (200), une requête non signée (403). Non vérifié : le parcours complet d'un service généré jusqu'à ce Garage, la
-route Traefik avec un navigateur, et Podman.
+Vérifié : `docker compose config` sur l'export de l'exemple complet avec Traefik (fusion des deux fichiers valide), et, à
+l'époque de l'ancienne page, un vrai Garage (`init.sh` deux fois de suite, un `PUT` et un `GET` signés avec la clé tirée,
+une requête non signée refusée). Non vérifié : le parcours complet d'un service généré jusqu'à ce Garage, la route
+Traefik avec un navigateur, et Podman.
 
-La stack continue de tourner quand l'application se ferme. Deux projets de même nom partagent la même stack.
+### Stockage des projets (S3) et versions
 
-### Mise à jour automatique
+Les projets ne vivent plus seulement dans un fichier choisi à la main : ils sont gardés dans un bucket S3 (Garage), chaque
+enregistrement en est une **version**, et l'application rouvre toute seule le dernier projet ouvert. Deux modules de
+`sb-app`, sans fenêtre, testés contre un faux serveur S3 et vérifiés contre un vrai Garage :
 
-`crates/sb-egui/src/updater.rs` interroge `releases/latest` de l'API GitHub et compare le tag à la version du binaire.
-Une release n'est installable que si elle porte un `.AppImage` **et** son `.AppImage.minisig` ; le téléchargement est
-vérifié avec la clé publique minisign du fichier (`PUBLIC_KEY`, la même que celle des builds précédents) avant de
-remplacer `$APPIMAGE` (écriture à côté puis `rename`, donc atomique) et de relancer. Hors AppImage (`.deb`,
-`cargo run`), l'application propose seulement d'ouvrir la page de la release. La recherche tourne hors du fil
-graphique (`App::spawn`), la progression revient par le même canal que l'analyse.
+- **`s3.rs`** : un client S3 minimal (`put`, `get`, `list` paginé, `check`) en chemin (`<adresse>/<bucket>/<clé>`), requêtes
+  signées en AWS Signature V4 (`sha2`, `hmac`, `ureq` ; pas de SDK, qui amènerait tokio). La signature est testée contre
+  l'exemple publié dans la documentation d'AWS. Un 404 est une réponse (`None`), pas une erreur ; les autres statuts
+  remontent avec le message du serveur.
+- **`store.rs`** : où tout est rangé, et la logique des versions.
 
-La version est écrite dans `Cargo.toml` et suivie par `Cargo.lock` : `scripts/release.mjs` les change ensemble. Le job `bump` de la CI
-s'exécute sur le sommet de `main` et non sur le commit testé (une release précédente a pu le déplacer) ; le job
-`publish` repart du tag, donc « Re-run failed jobs » relance la construction sans réincrémenter.
+```text
+bucket                                         cette machine
+<id>/meta.json     nom, version, sha256        <id>/versions/000001.json …                    ~/.local/share/service-builder/state.json   derniers projets, dernier ouvert
+                                               ~/.local/share/service-builder/projects/<id>.sb.json   copie de travail
+                                               ~/.local/share/service-builder/garage/   le nœud Garage (données, secrets, journal)
+```
+
+- **L'identité** d'un projet est `<id>` : son nom en minuscules, chiffres et tirets, au moment où la machine l'a vu la
+  première fois. Renommer le projet ne change pas son `<id>` (l'entrée de `state.json` retient le chemin du fichier) ;
+  deux projets de même nom sont le même projet.
+- **La copie de travail** est ce que lisent et écrivent l'éditeur, le serveur MCP et `sb` ; le bucket garde l'historique.
+  Ouvrir un projet n'a pas besoin du réseau. Un fichier ouvert depuis ailleurs (Ctrl+O) garde son chemin ; un projet neuf
+  ou la première sauvegarde d'un exemple en crée une dans `projects/`.
+- **Une version** est créée par `Remote::push` quand le sha256 du fichier diffère de celui de `meta.json` : un fichier
+  inchangé n'en fait pas. Les numéros ne font que monter, même si `meta.json` manque ou est en retard (on prend le plus
+  grand entre lui et la liste des versions). La version est écrite avant `meta.json` : une panne entre les deux laisse au
+  pire un doublon à la sauvegarde suivante, jamais une version perdue.
+- **Ce que la machine sait du bucket** : `state.json` retient, par projet, le sha256 et le numéro de la dernière version
+  écrite. `Store::unsynced` compare le fichier à lui : c'est ce qui allume « S3 · à enregistrer » dans la barre.
+- **Restaurer** une ancienne version la met dans l'éditeur comme une modification non enregistrée : l'enregistrer en fait
+  une nouvelle version, l'historique n'est jamais réécrit. Ce qui n'avait jamais été envoyé est envoyé avant, pour que la
+  restauration ne le perde pas. `Store::pull` refuse d'écraser une copie qui a des changements que le bucket n'a pas,
+  sauf `discard_local`.
+- **Le Garage est interne** (`garage.rs`) : pas de réglage, pas de variable, pas d'adresse à donner. Son binaire statique
+  voyage dans l'AppImage (`$APPDIR/usr/bin/garage`, mis là par `scripts/fetch-garage.sh` et `appimage.sh` ; `SB_GARAGE_BIN`
+  le remplace pour le développement). `garage::ensure`, appelé par `Store::remote` (donc par l'application, le serveur MCP et
+  `sb`), le démarre s'il ne répond pas (processus à part, groupe de processus propre : il survit à la fenêtre) et le prépare
+  une fois : layout du nœud, clé importée avec des identifiants tirés au hasard (`secrets.json`, 0600), bucket, droits.
+  Chaque étape regarde avant d'agir, un verrou (`ensure.lock`) empêche deux processus d'en lancer deux, et un fichier `ready`
+  rend les appels suivants quasi gratuits (une connexion TCP). Ports `127.0.0.1:39000` (S3) et `39001` (RPC), jamais ouverts
+  au réseau. `Store::configured` ne démarre rien : il dit seulement qu'il y a un Garage à démarrer, ce qui permet à
+  l'application de rester utilisable sans lui.
+
+**Dans la fenêtre.** Un enregistrement écrit la copie de travail, puis envoie une version sur un fil (`App::push`) ; un
+échec réseau n'empêche pas d'enregistrer, il passe la pastille en « S3 · échec » et le fichier reste « à enregistrer ». Au
+lancement, `App::with_context` rouvre `state.last` (sauf `SB_NO_RESTORE`) ; une copie qui a changé pendant que
+l'application était fermée est envoyée aussitôt. Quand un agent modifie le fichier, l'application le recharge et l'envoie
+une fois qu'il n'a plus écrit depuis 20 secondes : une rafale de patchs fait une version. Quand un agent charge un autre
+projet (`load_project`), `state.last` change et la fenêtre l'ouvre à son tour, sauf s'il y a des modifications non
+enregistrées. L'onglet **Projets** (`pages/projects.rs`, sans réglage : il dit seulement si le stockage est prêt) montre les versions du projet ouvert (Restaurer), les derniers
+projets ouverts et ceux du bucket (Ouvrir).
+
+**Pour les agents** (`mcp.rs`). Le serveur peut démarrer **sans projet** (`service-builder mcp`) : il prend alors le dernier
+ouvert, ou attend. `search_projects` cherche dans le bucket et sur la machine (id, nom, dernière version, où), `load_project`
+choisit un projet par id, nom exact ou texte que lui seul contient (et une `version`), `list_versions` et `save_version`
+lisent et écrivent l'historique du projet courant. Les autres outils sont inchangés ; sans projet chargé ils répondent par
+une erreur qui dit quoi faire. La session (`Session`) porte le fichier courant, que `load_project` change.
+
+### Un export porte son JSON
+
+`export_project` écrit, à côté du code, `<id>.sb.json` : le projet dont il vient, que `Ouvrir` relit tel quel. Sa version de
+format (`schemaVersion`, migrée à l'ouverture) est celle du modèle ; l'historique des enregistrements, lui, est dans le
+bucket.
+
+### Installer l'application
+
+La CI ne construit plus l'application. `scripts/install-local.sh` compile en release, fabrique l'AppImage
+(`scripts/appimage.sh`, qui y met aussi le binaire Garage) et remplace `~/Applications/Service.Builder.AppImage` (écriture à côté puis `mv` : jamais un
+fichier à moitié écrit sous le vrai nom). La version est dans `Cargo.toml` et suivie par `Cargo.lock` :
+`scripts/release.mjs` les change ensemble, à la main (`bump <minor|normal|major>`) : la CI ne fait que tester. Il n'y a plus de mise à jour automatique dans l'application : une
+installation à jour est celle que ce script vient de poser.
 
 ## Feuille de route (idées, par ordre d'intérêt)
 
-1. **Exécuter pour de bon** : bouton « Lancer » (compose + `cargo run` des services) avec logs, et un test d'intégration
-   du code généré contre un broker.
+1. **Exécuter pour de bon** : un test d'intégration du code généré contre un broker.
 2. Modèles prêts à l'emploi : saga avec compensation, CQRS, inbox (déduplication côté consumer), entités et requêtes métier.
 3. Évolution de schéma : détecter les changements incompatibles par rapport à une version publiée.
 4. Autres cibles de sérialisation (Avro/JSON + schema registry), persistance (SQL), observabilité (OpenTelemetry).

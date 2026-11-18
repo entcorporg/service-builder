@@ -1,8 +1,8 @@
-//! How the project runs in containers, from the Pods page: the resources each container gets, the admin interfaces
+//! How the project runs in containers, from the Infra page: the resources each container gets, the admin interfaces
 //! that come with the stack, and the reverse proxy (Traefik) in front of it.
 //!
 //! Nothing here changes the generated Rust: it only shapes the compose file and the Traefik configuration that the
-//! Pods page writes next to the workspace before it starts the stack.
+//! "Exporter l'infra" button writes (`docker-compose.override.yml`, Traefik, Garage).
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

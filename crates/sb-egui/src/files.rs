@@ -1,9 +1,19 @@
-//! File actions: open, save as, export, new project, rename.
+//! File actions: open, save as, export (the code, the infrastructure), new project, rename.
 
+use sb_app::store::slug;
 use sb_model::Project;
 
-use crate::app::{App, stamp_of};
+use crate::app::App;
 use crate::form::{Input, Kind, Value, ask};
+
+/// Opens a page of the project in the browser; any other address is refused.
+pub fn open_url(app: &mut App, url: &str) {
+    if !url.starts_with("https://github.com/entcorporg/service-builder/") {
+        app.fail("adresse refusée");
+        return;
+    }
+    app.ctx.open_url(eframe::egui::OpenUrl::new_tab(url));
+}
 
 fn project_dialog(title: &str) -> rfd::FileDialog {
     rfd::FileDialog::new()
@@ -31,12 +41,7 @@ pub fn save_as(app: &mut App) {
         return;
     };
     match sb_app::save_project(&path, &app.state.project) {
-        Ok(()) => {
-            app.state.stamp = stamp_of(&path);
-            app.state.path = Some(path.clone());
-            app.state.dirty = false;
-            app.say(&format!("Enregistré dans {}", path.display()));
-        }
+        Ok(()) => app.saved(path),
         Err(e) => app.fail(&e),
     }
 }
@@ -54,8 +59,36 @@ pub fn export_code(app: &mut App) {
         move || sb_app::export_project(&project, &dir),
         |app, done| match done {
             Ok(report) => app.say(&format!(
-                "{} fichiers écrits dans {}",
-                report.files, report.dir
+                "{} fichiers écrits dans {} (le projet : {})",
+                report.files,
+                report.dir,
+                std::path::Path::new(&report.project_file)
+                    .file_name()
+                    .map_or(String::new(), |n| n.to_string_lossy().into_owned())
+            )),
+            Err(e) => app.fail(&e),
+        },
+    );
+}
+
+/// Writes everything that runs the services in containers (the two compose files, Traefik, Garage, the image) into a
+/// folder: the one of the code export, so that the image can be built from it.
+pub fn export_infra(app: &mut App) {
+    let Some(dir) = rfd::FileDialog::new()
+        .set_title("Dossier de destination de l'infrastructure (celui du code exporté)")
+        .pick_folder()
+    else {
+        return;
+    };
+    let project = app.state.project.clone();
+    app.say("Export de l'infrastructure en cours…");
+    app.spawn(
+        move || sb_app::infra::export_infra(&project, &dir),
+        |app, done| match done {
+            Ok(report) => app.say(&format!(
+                "{} fichiers d'infrastructure écrits dans {}",
+                report.files.len(),
+                report.dir
             )),
             Err(e) => app.fail(&e),
         },
@@ -76,7 +109,17 @@ pub fn ask_new_project(app: &mut App) {
             if name.is_empty() {
                 return Err("Le nom ne peut pas être vide.".into());
             }
-            app.set_project(Project::new(name), None);
+            // A project belongs to the store from its first moment: its working copy is made right away.
+            let id = slug(&name);
+            let path = app.store.local.working_copy(&id);
+            if path.exists() || app.store.local.state().find(&id).is_some() {
+                return Err(format!(
+                    "Un projet « {id} » existe déjà : choisissez un autre nom."
+                ));
+            }
+            let project = Project::new(name);
+            sb_app::save_project(&path, &project)?;
+            app.set_project(project, Some(path));
             Ok(())
         },
     );

@@ -92,7 +92,7 @@ pub fn select(app: &mut App, sel: Option<Sel>) {
 
 pub fn page(app: &mut App, ui: &mut Ui) {
     egui::Panel::left("palette")
-        .exact_size(228.0)
+        .exact_size(crate::theme::side(ui, 228.0, 188.0))
         .resizable(false)
         .frame(
             egui::Frame::new()
@@ -109,7 +109,7 @@ pub fn page(app: &mut App, ui: &mut Ui) {
                 });
         });
     egui::Panel::right("inspector")
-        .exact_size(410.0)
+        .exact_size(crate::theme::side(ui, 410.0, 350.0))
         .resizable(false)
         .frame(
             egui::Frame::new()

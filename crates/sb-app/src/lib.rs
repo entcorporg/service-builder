@@ -2,16 +2,20 @@
 //! Free of any UI type so it can be unit-tested without a window.
 
 pub mod feedback;
+pub mod garage;
+pub mod infra;
 pub mod mcp;
-pub mod pods;
 pub mod rename;
+pub mod s3;
 pub mod scope;
 pub mod stepform;
+pub mod store;
 
 use std::fs;
 use std::path::Path;
 
-use sb_codegen::{CodegenError, GeneratedFile};
+use sb_codegen::CodegenError;
+pub use sb_codegen::GeneratedFile;
 use sb_model::{Diagnostic, Project, SCHEMA_VERSION, Severity, has_errors};
 use serde::Serialize;
 
@@ -78,9 +82,14 @@ pub fn load_project(path: &Path) -> Result<Project, String> {
     Ok(project)
 }
 
-/// Writes through a temporary file so a crash never leaves a truncated project behind.
+/// Writes through a temporary file so a crash never leaves a truncated project behind. The folder is made if need be
+/// (the first save of a project lands in the folder of the application's working copies).
 pub fn save_project(path: &Path, project: &Project) -> Result<(), String> {
     let json = serde_json::to_string_pretty(project).map_err(|e| e.to_string())?;
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    }
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, json + "\n").map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
     fs::rename(&tmp, path).map_err(|e| format!("cannot write {}: {e}", path.display()))
@@ -90,7 +99,10 @@ pub fn save_project(path: &Path, project: &Project) -> Result<(), String> {
 #[serde(rename_all = "camelCase")]
 pub struct ExportReport {
     pub dir: String,
+    /// The files written, the project file included.
     pub files: usize,
+    /// The project itself, written next to the code: what the export was made from, to open again in the editor.
+    pub project_file: String,
 }
 
 /// Generates the workspace into `dir`. Refuses to touch a directory that holds a Cargo
@@ -120,9 +132,13 @@ pub fn export_project(project: &Project, dir: &Path) -> Result<ExportReport, Str
     remove_legacy_layout(project, dir);
     sb_codegen::write_to_dir(&analysis.files, dir)
         .map_err(|e| format!("cannot write to {}: {e}", dir.display()))?;
+    // The JSON travels with the code.
+    let project_file = dir.join(format!("{}.sb.json", store::slug(&project.name)));
+    save_project(&project_file, project)?;
     Ok(ExportReport {
         dir: dir.display().to_string(),
-        files: analysis.files.len(),
+        files: analysis.files.len() + 1,
+        project_file: project_file.display().to_string(),
     })
 }
 
@@ -173,6 +189,15 @@ mod tests {
         let project = sample::orders();
         save_project(&path, &project).unwrap();
         assert_eq!(load_project(&path).unwrap(), project);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn saving_makes_the_folder_of_the_file() {
+        let dir = temp("mkdir");
+        let path = dir.join("a/b/p.sb.json");
+        save_project(&path, &sample::orders()).unwrap();
+        assert_eq!(load_project(&path).unwrap(), sample::orders());
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -274,6 +299,11 @@ mod tests {
         let report = export_project(&sample::orders(), &dir).unwrap();
         assert!(report.files > 10);
         assert!(dir.join("services/orders/src/main.rs").exists());
+        // The project goes with its code, and opens again as it was.
+        let project_file = std::path::PathBuf::from(&report.project_file);
+        assert_eq!(project_file.parent().unwrap(), dir);
+        assert!(project_file.to_string_lossy().ends_with(".sb.json"));
+        assert_eq!(load_project(&project_file).unwrap(), sample::orders());
         // Re-exporting over our own output is fine.
         export_project(&sample::orders(), &dir).unwrap();
 

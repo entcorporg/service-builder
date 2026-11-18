@@ -19,7 +19,7 @@ Application de bureau Linux : **egui** (eframe, rendu GPU par wgpu).
 | Panneau de réglages | Inspecteur : RPC, consumers, mappings champ à champ typés |
 | Aperçu en direct | Onglet « Code généré » : Rust, `.proto`, `Cargo.toml`, `docker-compose.yml` |
 | Publier | « Exporter le code » : un workspace Cargo prêt à `cargo run` |
-| Prévisualiser | Onglet « Pods » : les services lancés dans des conteneurs, sans exporter |
+| Hébergement | Onglet « Projets » : les projets gardés dans S3 (Garage), une version par enregistrement ; onglet « Infra » : les fichiers `docker-compose` et de configuration qui lancent les services |
 
 ![Code généré](docs/screenshots/generated-code.png)
 
@@ -69,36 +69,20 @@ Pour compiler : un toolchain C/C++, `cmake`, `pkg-config` et les en-têtes OpenS
 Garanties de livraison : les consumers sont **at-least-once** (l'offset est validé après le handler). Un
 message qui échoue 3 fois, ou qui n'est pas décodable, est écrit sur `<topic>.dlq`. Écrivez des handlers idempotents.
 
-## Mises à jour et versions
+## Installer, versions
 
-**Dans l'application.** Au lancement, Service Builder interroge les releases GitHub
-(`releases/latest/download/latest.json`). Si une version plus récente existe, le bouton **Mettre à jour**, à côté de
-*Exporter le code*, affiche son numéro ; un clic télécharge le paquet, vérifie sa signature, l'installe et relance
-l'application (une confirmation prévient si le projet a des modifications non enregistrées). Sans nouvelle version,
-le bouton lance une recherche à la demande. Une recherche impossible (hors ligne, aucune release) est silencieuse au
-lancement et signalée quand on clique. Sous Linux, seul l'AppImage se met à jour seul ; le `.deb` se réinstalle.
+**Sur votre machine.** La CI ne construit plus l'application : `scripts/install-local.sh` compile en release, fabrique
+l'AppImage (avec le binaire Garage, `scripts/fetch-garage.sh`) et remplace `~/Applications/Service.Builder.AppImage` (`SB_APPLICATIONS=<dossier>` pour la poser ailleurs).
+Relancez l'application pour utiliser la nouvelle version. Il n'y a plus de mise à jour automatique dans l'application.
 
-**Dans la CI** (`.github/workflows/ci.yml`). Deux règles :
-
-1. **Chaque changement annonce son type de mise à jour**, par une mention dans le titre de la PR ou la première
-   ligne d'un message de commit (le reste du message n'est pas lu, pour pouvoir parler des mentions sans déclencher de release) : `[minor]` (0.0.**X**), `[normal]` (0.**X**.0) ou `[major]` (**X**.0.0). Une PR sans
-   mention échoue ; si plusieurs mentions coexistent, la plus forte l'emporte.
-2. **Un push sur `main` avec mention incrémente la version**, une fois tous les tests passés : `0.1.0` + `[normal]`
-   donne `0.2.0` (les nombres à droite repartent à zéro). La CI écrit la nouvelle version dans `Cargo.toml`,
-   `Cargo.lock`, commite `chore(release): vX.Y.Z [skip ci]`, pose le
-   tag `vX.Y.Z`, puis construit l'AppImage (`scripts/appimage.sh`), la signe (minisign) et publie la release GitHub que lit l'application.
-   Sans mention, rien n'est publié.
-
-Réglage unique, à faire une fois : ajouter la clé privée de signature aux secrets du dépôt
-(`gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/service-builder.key`, nom conservé pour garder la même clé). La clé publique correspondante est dans
-`crates/sb-egui/src/updater.rs` ; sans la clé privée, les mises à jour ne peuvent pas être signées. Si `main` est protégée,
-autorisez `github-actions[bot]` à y pousser le commit de version.
+**Dans la CI** (`.github/workflows/ci.yml`). Elle ne fait que **tester** : formatage, clippy, tests, et compilation du code
+généré. Rien n'est construit ni publié, et la version (`Cargo.toml`, `Cargo.lock`) ne change plus toute seule :
+`node scripts/release.mjs bump <minor|normal|major>` l'incrémente à la main si besoin.
 
 ### Où tourne la CI
 
 Les contrôles (formatage, clippy, tests, code généré) tournent sur un **runner auto-hébergé** (libellé
-`service-builder`) : plus rapide, et sans minutes GitHub. Seule la release (`bump`, `publish`) reste sur un runner
-GitHub, pour être construite dans un environnement propre et parce que c'est là que vit la clé de signature. Une PR
+`service-builder`) : plus rapide, et sans minutes GitHub.  Une PR
 venue d'un **fork** ne touche jamais le runner local : elle retombe sur un runner GitHub. Chaque commit d'une PR n'est
 testé qu'une fois (pas de double exécution push + PR), et seul `main` est testé à chaque push.
 
@@ -113,11 +97,13 @@ désenregistrer le runner et remettre `ubuntu-24.04` dans `runs-on` suffit pour 
 ## Piloter le projet depuis une IA (MCP)
 
 L'onglet **MCP** active un serveur [MCP](https://modelcontextprotocol.io) sur stdio : un client comme Claude Code lance
-`service-builder mcp <projet.sb.json>` (ou `sb mcp <projet.sb.json>`) et peut lire, modifier, valider et exporter le
-projet. Le bouton **Activer** ajoute l'entrée `service-builder-<projet>` au `.mcp.json` du dossier du projet, sans
+`service-builder mcp [projet.sb.json]` (ou `sb mcp [projet.sb.json]`) et peut chercher, charger, lire, modifier, valider, versionner et exporter
+les projets. Sans fichier, le serveur travaille sur le dernier projet ouvert dans l'application, ou attend que l'agent en charge un. Le bouton **Activer** ajoute l'entrée `service-builder-<projet>` au `.mcp.json` du dossier du projet, sans
 toucher aux autres entrées ; l'onglet affiche aussi la commande, la ligne `claude mcp add` et la configuration JSON des
 autres clients. Outils : `describe_project`, `get_project`, `get_example_project`, `patch_project` (RFC 6902, tout ou
-rien), `set_project`, `validate`, `list_generated_files`, `read_generated_file`, `export_code`.
+rien), `set_project`, `validate`, `list_generated_files`, `read_generated_file`, `export_code`, et pour les projets du
+stockage : `search_projects` (cherche dans S3 et sur la machine), `load_project` (un agent charge un projet de lui-même, par
+id ou par nom, éventuellement une ancienne `version`), `list_versions` et `save_version`.
 
 **Suggestions des agents.** Tous les 50 appels d'outil, le serveur demande à l'agent, dans le résultat même de l'appel,
 un rapport sur ce qui lui a manqué (par exemple un bloc de logique qui exécute un traitement bloquant comme le hachage
@@ -132,22 +118,41 @@ recharge quand sa fenêtre reprend le focus, sauf s'il y a des modifications non
 l'enregistrement écrasera celles du client). Le projet n'est pas protégé contre deux éditeurs simultanés : le dernier
 qui enregistre l'emporte.
 
-## Lancer sans exporter (onglet Pods)
+## Où sont gardés les projets (onglet Projets)
 
-L'onglet **Pods** compile les services et les démarre dans des conteneurs, avec Kafka et PostgreSQL. Un formulaire,
-enregistré dans le projet, règle :
+Les projets sont gardés dans un stockage S3 **interne** : un Garage livré dans l'AppImage, que l'application démarre et
+prépare toute seule (nœud sur `127.0.0.1:39000`, bucket, clé tirée au hasard, le tout dans
+`~/.local/share/service-builder/garage/`). Rien à installer, rien à régler, et aucun champ pour y toucher : l'onglet
+**Projets** dit seulement s'il est prêt. Il continue de tourner quand la fenêtre se ferme, pour que le serveur MCP et `sb`
+le trouvent.
 
-- les **ressources** : CPU (`cpuset`), politique de redémarrage, mémoire d'un service, de Kafka et de PostgreSQL ;
-- les **interfaces** : Adminer (PostgreSQL) et Kafka UI, à activer ou non ;
-- le **stockage objet** : si un service a une étape objet, **Garage** (compatible S3) rejoint la stack, avec ses buckets
-  et la clé d'accès des services, créés au démarrage. Désactivé, le stockage est celui que désigne le fichier `.env` ;
-- **Traefik**, à ajouter ou retirer : domaine et Let's Encrypt (ou HTTP sur `*.localhost` sans domaine), un hôte par
-  interface, les frontends (serveurs de développement sur l'hôte ; un service qui lit l'en-tête `X-Frontend-ID` le reçoit),
-  CORS, limite de débit. Le `traefik.yml` et les `dynamic/*.yaml` sont générés, et visibles dans l'onglet.
+- **Chaque enregistrement (Ctrl+S) est une version** : un fichier inchangé n'en fait pas, l'historique n'est jamais
+  réécrit. L'onglet liste les versions du projet ouvert ; *Restaurer* en remet une dans l'éditeur, et l'enregistrer en fait
+  une nouvelle.
+- **Le dernier projet ouvert se rouvre tout seul** au lancement ; l'onglet liste aussi les derniers projets ouverts et
+  ceux du bucket. Si le stockage ne répond pas, tout reste en local : les projets sont des fichiers dans
+  `~/.local/share/service-builder/projects/` et la barre d'outils signale « S3 · à enregistrer » ou « S3 · échec ».
+- **Exporter le code** écrit aussi le JSON du projet (`<nom>.sb.json`) à côté du code.
+- Un agent qui modifie le fichier (MCP) voit ses changements envoyés une fois qu'il a fini d'écrire.
 
-Il faut Podman avec `podman-compose` (la stack tourne alors dans un store privé, à l'écart de vos conteneurs) ou
-Docker avec `docker compose`. Le premier lancement compile tout (plusieurs minutes) ; les suivants ne recompilent et ne
-redémarrent que ce qui a changé. Détails dans [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#pods--lancer-sans-exporter).
+## Les fichiers qui lancent les services (onglet Infra)
+
+Service Builder ne démarre rien lui-même. L'onglet **Infra** règle l'infrastructure, dans un formulaire enregistré dans
+le projet, et le bouton **Exporter l'infra** (aussi dans le menu ⋮ de la barre d'outils) écrit tout ce qu'il faut pour la lancer :
+
+- `docker-compose.yml` : Kafka, PostgreSQL, et Mailpit ou DragonflyDB selon les services (le même que celui de l'export du code) ;
+- `docker-compose.override.yml`, que `docker compose` fusionne par-dessus : limites de ressources, Adminer, Kafka UI,
+  Garage, Traefik et les services eux-mêmes ;
+- `traefik/` (`traefik.yml`, `dynamic/*.yaml`), `garage/` (`garage.toml`, `init.sh`), `Dockerfile`, `build.sh`.
+
+Les réglages : les **ressources** (CPU, redémarrage, mémoire d'un service, de Kafka et de PostgreSQL), les **interfaces**
+(Adminer, Kafka UI), le **stockage objet** (si un service a une étape objet, **Garage** rejoint la stack avec ses buckets
+et la clé d'accès des services), et **Traefik** (domaine et Let's Encrypt, ou HTTP sur `*.localhost`, un hôte par
+interface, les frontends, CORS, limite de débit).
+
+Exportez dans le dossier du code exporté (l'image se construit depuis lui) ; l'en-tête de `docker-compose.override.yml`
+donne les commandes : construire les images, compiler les services dans le conteneur de build, puis `docker compose up -d`.
+Détails dans [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#infra--les-fichiers-qui-lancent-les-services).
 
 ## En ligne de commande
 
@@ -157,16 +162,17 @@ Le binaire `sb` utilise exactement le même code que l'application (pratique en 
 cargo run -p sb-app --bin sb -- sample > projet.sb.json   # projet d'exemple
 cargo run -p sb-app --bin sb -- validate projet.sb.json   # code de sortie 1 s'il y a des erreurs
 cargo run -p sb-app --bin sb -- generate projet.sb.json ./out
-cargo run -p sb-app --bin sb -- pods projet.sb.json ./out # le workspace + Dockerfile, compose et Traefik de l'onglet Pods
-cargo run -p sb-app --bin sb -- up projet.sb.json         # compile et démarre la stack en conteneurs
-cargo run -p sb-app --bin sb -- down projet.sb.json       # l'arrête (--volumes : supprime aussi ses données)
-cargo run -p sb-app --bin sb -- mcp projet.sb.json        # serveur MCP sur stdio
+cargo run -p sb-app --bin sb -- infra projet.sb.json ./out # docker-compose.yml, l'override, Traefik, Garage, Dockerfile
+cargo run -p sb-app --bin sb -- projects [texte]          # les projets de S3 et de cette machine
+cargo run -p sb-app --bin sb -- pull <id> [version]       # met un projet de S3 dans sa copie de travail
+cargo run -p sb-app --bin sb -- push projet.sb.json       # en enregistre une version dans S3
+cargo run -p sb-app --bin sb -- mcp [projet.sb.json]      # serveur MCP sur stdio
 ```
 
 ## Tests
 
 ```sh
-cargo test --workspace                 # modèle, validation, générateur, logique applicative (formulaires d'étapes, renommages, portée des variables), mise à jour
+cargo test --workspace                 # modèle, validation, générateur, logique applicative (formulaires d'étapes, renommages, portée des variables, client S3, versions)
 node --test scripts/release.test.mjs   # détection du type de mise à jour et incrément de version
 ```
 
@@ -217,8 +223,8 @@ La CI le fait.
   expressions s'écrivent `a.b`, `"texte"`, `42`, `now` ou `rust: code`, et les variables disponibles sont listées.
   Renommer un service, un message, un topic, un RPC ou une table met à jour toutes ses références
   (`sb_app::rename`) ; les noms de colonnes et de contraintes ne se changent pas après création.
-- Les dialogues, le glisser à la souris, l'AppImage et la mise à jour automatique n'ont pas été exercés de bout en
-  bout (seule la logique pure est testée : `updater.rs`, `stepform.rs`, `rename.rs`, `scope.rs`, le graphe et
+- Les dialogues, le glisser à la souris, l'AppImage n'a pas été exercé de bout en
+  bout (seule la logique pure est testée : `stepform.rs`, `rename.rs`, `scope.rs`, le graphe et
   l'adressage des étapes). `SB_SCREENSHOT=<dossier>` permet de vérifier le rendu de chaque onglet.
 
 La conception et la feuille de route sont dans [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

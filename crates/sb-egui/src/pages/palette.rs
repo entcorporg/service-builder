@@ -168,6 +168,13 @@ fn empty(ui: &mut Ui, text: &str) {
 fn tile(ui: &mut Ui, topic: bool, icon_name: &str, title: &str, hint: &str) -> bool {
     let accent = if topic { TOPIC } else { SERVICE };
     let width = ui.available_width();
+    // The description does not fit in a narrow window (the tile keeps it in its tooltip).
+    let full_hint = hint;
+    let hint = if theme::room(ui) == theme::Room::Narrow {
+        ""
+    } else {
+        hint
+    };
     // 1 px border, 8 px of padding; grip, badge, then the text, then the plus.
     let text_w = width - 2.0 - 16.0 - (14.0 + 8.0 + 34.0 + 8.0) - 21.0;
     let t = wrapped(ui, title, theme::bold(BASE), TEXT, text_w);
@@ -176,7 +183,7 @@ fn tile(ui: &mut Ui, topic: bool, icon_name: &str, title: &str, hint: &str) -> b
     let height = (text_h.max(34.0) + 18.0 + 2.0).ceil();
     let (rect, r) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
     let r = r
-        .on_hover_text(format!("Ajouter : {title}"))
+        .on_hover_text(format!("Ajouter : {title}. {full_hint}"))
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     let radius = CornerRadius::same(10);
     let hov = r.hovered();

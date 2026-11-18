@@ -5,13 +5,12 @@
 //! ```
 //!
 //! * `SB_SHOTS`: the folder of the PNGs (default `target/shots`).
-//! * `SB_PAGES`: the pages to render, comma separated, among `architecture,endpoint,mail,tables,mcp,pods,code`
+//! * `SB_PAGES`: the pages to render, comma separated, among `architecture,endpoint,mail,tables,mcp,infra,projects,code`
 //!   (default: all).
 //! * `SB_SAMPLE=showcase`: the complete sample instead of the orders one. `SB_PROJECT=<file>`: a project file.
 //! * `SB_SELECT=<service>`, `<topic.name>` or `msg:<Message>`: selected on the canvas (inspector shown).
 //! * `SB_ROUTE=<Service>/<route>`: the route open on the API page.
 //! * `SB_MAIL=<Service>/<topic>`: the mail open on the Mail page (default: the first mail of the first mail service).
-//! * `SB_PODS_VIEW=journal` or `fichiers`: what the Pods page shows instead of the containers.
 //! * `SB_OPEN_ALL=1`: every card open. `SB_SIZE=1480x920`: the window size.
 
 use std::path::PathBuf;
@@ -25,7 +24,13 @@ use sb_egui::pages::canvas::{Sel, select};
 #[ignore]
 fn screens() {
     // SAFETY: set before any thread of the app starts.
-    unsafe { std::env::set_var("SB_NO_UPDATE", "1") };
+    unsafe {
+        // Neither the projects nor the settings of the person who runs it.
+        std::env::set_var("SB_NO_RESTORE", "1");
+        let home = std::env::temp_dir().join(format!("sb-screens-{}", std::process::id()));
+        std::env::set_var("XDG_CONFIG_HOME", home.join("config"));
+        std::env::set_var("XDG_DATA_HOME", home.join("data"));
+    }
     let dir = std::env::var("SB_SHOTS")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/shots"));
@@ -38,7 +43,7 @@ fn screens() {
         })
         .unwrap_or((1480.0, 920.0));
     let pages = std::env::var("SB_PAGES")
-        .unwrap_or("architecture,endpoint,mail,tables,mcp,pods,code".into());
+        .unwrap_or("architecture,endpoint,mail,tables,mcp,infra,projects,code".into());
 
     for name in pages.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let page = match name {
@@ -47,7 +52,8 @@ fn screens() {
             "mail" => Page::Mail,
             "tables" => Page::Tables,
             "mcp" => Page::Mcp,
-            "pods" => Page::Pods,
+            "infra" => Page::Infra,
+            "projects" => Page::Projects,
             "code" => Page::Code,
             other => panic!("unknown page {other}"),
         };
@@ -78,9 +84,6 @@ fn screens() {
                     && let Some((svc, r)) = route.split_once('/')
                 {
                     sb_egui::pages::endpoint::open(&mut app, svc, r);
-                }
-                if let Ok(view) = std::env::var("SB_PODS_VIEW") {
-                    sb_egui::pages::pods::open_view(&mut app, &view);
                 }
                 if page == Page::Mail {
                     let p = app.project();

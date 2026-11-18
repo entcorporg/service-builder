@@ -169,7 +169,7 @@ pub fn page(app: &mut App, ui: &mut Ui) {
     let mut action = None;
 
     egui::Panel::left("mail-list")
-        .exact_size(250.0)
+        .exact_size(crate::theme::side(ui, 250.0, 190.0))
         .resizable(false)
         .frame(
             Frame::new()
@@ -196,7 +196,7 @@ pub fn page(app: &mut App, ui: &mut Ui) {
         .show(ui, |ui| header(ui, &p, &ed, &issues, &mut action));
 
     egui::Panel::right("mail-props")
-        .exact_size(360.0)
+        .exact_size(crate::theme::side(ui, 360.0, 280.0))
         .resizable(false)
         .frame(
             Frame::new()

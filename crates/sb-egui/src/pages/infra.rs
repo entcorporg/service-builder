@@ -1,16 +1,13 @@
-//! The Pods page: runs the generated services in containers without an export. On the left, the form (resources,
-//! admin interfaces, Traefik and its frontends), saved in the project; on the right, the stack: its containers, the
-//! output of the build, and the files that were generated for it.
+//! The Infra page: what runs the services in containers. On the left, the form (resources, admin interfaces, Traefik and
+//! its frontends), saved in the project; on the right, the files it produces, and the button that writes them out.
 //!
-//! Everything that talks to the container engine runs on a thread (`sb_app::pods` blocks) and comes back through
-//! `App::spawn`.
+//! Service Builder starts nothing: "Exporter l'infra" hands over `docker-compose.yml`, `docker-compose.override.yml`
+//! and the configuration files (Traefik, Garage, the image), and `docker compose up -d` does the rest.
 
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, CornerRadius, Frame, Margin, RichText, Sense, Stroke, Ui, Vec2};
-use sb_app::pods::{Cancel, Container, Engine, GeneratedFile};
+use sb_app::GeneratedFile;
 use sb_model::pods::RESTART_POLICIES;
 use sb_model::{Frontend, PodsConfig, Project, ServiceKind, Severity};
 
@@ -20,209 +17,14 @@ use crate::pages::common::{self, commit_entry, icon_btn, section, separator};
 use crate::theme::*;
 use crate::widgets;
 
-/// The containers are listed again after this delay while the page is shown.
-const REFRESH: Duration = Duration::from_secs(3);
-/// Lines of output kept: a first build prints thousands.
-const MAX_LINES: usize = 6000;
 const LABEL: f32 = 132.0;
 
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-enum View {
-    #[default]
-    Containers,
-    Output,
-    Files,
-}
-
-struct Busy {
-    what: &'static str,
-    cancel: Cancel,
-}
-
 #[derive(Default)]
-pub struct PodsState {
-    /// The engine found on this machine, or why there is none. `None` until it was looked for.
-    engine: Option<Result<Engine, String>>,
-    detecting: bool,
-    /// A start or a stop is running.
-    busy: Option<Busy>,
-    /// What the build and compose printed, shared with the thread that runs them.
-    output: Arc<Mutex<Vec<String>>>,
-    containers: Vec<Container>,
-    listed: Option<Instant>,
-    listing: bool,
-    list_error: Option<String>,
-    /// The service whose logs are shown.
-    selected: Option<String>,
-    logs: String,
-    view: View,
+pub struct InfraState {
     /// The generated file that is shown.
     file: Option<String>,
-    /// The files of the stack, for the generation of the project they were made from.
+    /// The files, for the generation of the project they were made from.
     files: Option<(u64, Rc<Vec<GeneratedFile>>)>,
-}
-
-/// Shows the containers, the output (`journal`) or the generated files (`fichiers`): for the screenshots.
-pub fn open_view(app: &mut App, name: &str) {
-    app.pods.view = match name {
-        "journal" => View::Output,
-        "fichiers" => View::Files,
-        _ => View::Containers,
-    };
-}
-
-/// Tests and screenshots do not talk to an engine.
-fn engine_off() -> bool {
-    std::env::var_os("SB_NO_ENGINE").is_some()
-}
-
-fn push(output: &Arc<Mutex<Vec<String>>>, line: &str) {
-    let mut lines = output.lock().unwrap_or_else(|e| e.into_inner());
-    if lines.len() >= MAX_LINES {
-        lines.drain(..MAX_LINES / 4);
-    }
-    lines.push(line.to_string());
-}
-
-// ---- the engine ------------------------------------------------------------------------
-
-fn engine(app: &App) -> Option<Engine> {
-    app.pods.engine.as_ref()?.as_ref().ok().cloned()
-}
-
-/// Looks for the engine once, then keeps the list of containers (and the logs that are open) fresh.
-fn poll(app: &mut App) {
-    if engine_off() {
-        return;
-    }
-    if app.pods.engine.is_none() && !app.pods.detecting {
-        app.pods.detecting = true;
-        app.spawn(Engine::detect, |app, found| {
-            app.pods.detecting = false;
-            app.pods.engine = Some(found);
-        });
-    }
-    let Some(engine) = engine(app) else {
-        return;
-    };
-    let due = app.pods.listed.is_none_or(|at| at.elapsed() >= REFRESH);
-    if due && !app.pods.listing {
-        app.pods.listing = true;
-        let stack = sb_app::pods::stack_name(&app.state.project);
-        // The logs of the selected service come with the list: one thread, one repaint.
-        let selected = app.pods.selected.clone();
-        app.spawn(
-            move || {
-                let list = sb_app::pods::ps(&engine, &stack);
-                let logs = list.as_ref().ok().and_then(|list| {
-                    let c = list
-                        .iter()
-                        .find(|c| Some(&c.service) == selected.as_ref())?;
-                    Some(sb_app::pods::logs(&engine, &c.id, 400).unwrap_or_else(|e| e))
-                });
-                (list, logs)
-            },
-            |app, (list, logs)| {
-                app.pods.listing = false;
-                app.pods.listed = Some(Instant::now());
-                match list {
-                    Ok(list) => {
-                        app.pods.containers = list;
-                        app.pods.list_error = None;
-                    }
-                    Err(e) => app.pods.list_error = Some(e),
-                }
-                if let Some(logs) = logs {
-                    app.pods.logs = logs;
-                }
-            },
-        );
-    }
-    app.ctx.request_repaint_after(REFRESH);
-}
-
-fn start(app: &mut App) {
-    let Some(engine) = engine(app) else {
-        return;
-    };
-    let project = app.state.project.clone();
-    let dir = sb_app::pods::stack_dir(&project);
-    let cancel = Cancel::default();
-    app.pods.busy = Some(Busy {
-        what: "Démarrage",
-        cancel: cancel.clone(),
-    });
-    app.pods.view = View::Output;
-    let output = app.pods.output.clone();
-    output.lock().unwrap_or_else(|e| e.into_inner()).clear();
-    let (_, ctx) = app.sender();
-    app.spawn(
-        move || {
-            let log = |line: &str| {
-                push(&output, line);
-                ctx.request_repaint();
-            };
-            sb_app::pods::up(&engine, &project, &dir, &log, &cancel)
-        },
-        |app, done| finished(app, done, "La stack est démarrée."),
-    );
-}
-
-fn stop(app: &mut App, volumes: bool) {
-    let Some(engine) = engine(app) else {
-        return;
-    };
-    let project = app.state.project.clone();
-    let dir = sb_app::pods::stack_dir(&project);
-    let cancel = Cancel::default();
-    app.pods.busy = Some(Busy {
-        what: "Arrêt",
-        cancel: cancel.clone(),
-    });
-    app.pods.view = View::Output;
-    let output = app.pods.output.clone();
-    let (_, ctx) = app.sender();
-    app.spawn(
-        move || {
-            let log = |line: &str| {
-                push(&output, line);
-                ctx.request_repaint();
-            };
-            sb_app::pods::down(&engine, &project, &dir, volumes, &log, &cancel)
-        },
-        |app, done| finished(app, done, "La stack est arrêtée."),
-    );
-}
-
-fn finished(app: &mut App, done: Result<(), String>, ok: &str) {
-    app.pods.busy = None;
-    // The list is read again right away.
-    app.pods.listed = None;
-    match done {
-        Ok(()) => {
-            app.pods.view = View::Containers;
-            app.say(ok);
-        }
-        Err(e) => {
-            push(&app.pods.output, &format!("✗ {e}"));
-            app.say(&format!("Pods : {e}"));
-        }
-    }
-}
-
-fn act(app: &mut App, verb: &'static str, id: String) {
-    let Some(engine) = engine(app) else {
-        return;
-    };
-    app.spawn(
-        move || sb_app::pods::container(&engine, verb, &id),
-        |app, done| {
-            app.pods.listed = None;
-            if let Err(e) = done {
-                app.say(&format!("Pods : {e}"));
-            }
-        },
-    );
 }
 
 // ---- the form --------------------------------------------------------------------------
@@ -753,161 +555,6 @@ fn frontend(app: &mut App, ui: &mut Ui, i: usize, f: &Frontend, at: &str) {
 
 // ---- the stack -------------------------------------------------------------------------
 
-fn state_color(c: &Container) -> Color32 {
-    match c.state.as_str() {
-        "running" if c.status.contains("unhealthy") => ERR,
-        "running" if c.status.contains("starting") => WARN,
-        "running" => OK,
-        "created" | "paused" | "restarting" | "configured" => WARN,
-        "exited" | "stopped" | "dead" => ERR,
-        _ => FAINT,
-    }
-}
-
-fn pill(ui: &mut Ui, text: &str, color: Color32) {
-    Frame::new()
-        .fill(alpha(color, 28))
-        .corner_radius(CornerRadius::same(99))
-        .inner_margin(Margin::symmetric(9, 2))
-        .show(ui, |ui| {
-            ui.label(RichText::new(text).font(semibold(SM)).color(color));
-        });
-}
-
-/// The title, the engine, and the actions on the whole stack.
-fn head(app: &mut App, ui: &mut Ui) {
-    let errors = app
-        .analysis()
-        .diagnostics
-        .iter()
-        .any(|d| d.severity == Severity::Error);
-    let busy = app.pods.busy.as_ref().map(|b| b.what);
-    let ready = engine(app).is_some() && busy.is_none();
-    let running = app
-        .pods
-        .containers
-        .iter()
-        .filter(|c| c.state == "running")
-        .count();
-    let total = app.pods.containers.len();
-
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 10.0;
-        ui.label(RichText::new("Pods").size(XL).bold());
-        match &app.pods.engine {
-            Some(Ok(engine)) => pill(ui, engine.label(), SERVICE),
-            Some(Err(_)) => pill(ui, "Aucun moteur", ERR),
-            None => pill(ui, "Recherche du moteur…", FAINT),
-        }
-        if total > 0 {
-            let color = if running == total { OK } else { WARN };
-            pill(ui, &format!("{running}/{total} en marche"), color);
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            if let Some(what) = busy {
-                if widgets::button(ui, "x", "Interrompre").clicked()
-                    && let Some(b) = &app.pods.busy
-                {
-                    b.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-                ui.label(widgets::muted(format!("{what}…")));
-                ui.spinner();
-                return;
-            }
-            let label = if total > 0 { "Relancer" } else { "Lancer" };
-            let start_it = widgets::primary(ui, "play", label, ready && !errors).on_hover_text(
-                if errors {
-                    "Corrigez les erreurs du projet avant de le lancer"
-                } else {
-                    "Compile les services et démarre la stack ; un service déjà lancé n'est redémarré que si son binaire a changé"
-                },
-            );
-            if start_it.clicked() {
-                start(app);
-            }
-            if total > 0 && ready {
-                if widgets::button(ui, "stop", "Arrêter").clicked() {
-                    stop(app, false);
-                }
-                if icon_btn(ui, "trash", "Arrêter et supprimer les données (bases, certificats)", true)
-                    .clicked()
-                {
-                    app.confirm(
-                        "Supprimer les données de la stack ?",
-                        "Les conteneurs sont arrêtés et leurs volumes supprimés : les bases de données des services \
-                         repartent de zéro au prochain lancement.",
-                        vec![
-                            ("Annuler".into(), false, None),
-                            (
-                                "Supprimer".into(),
-                                true,
-                                Some(Box::new(|app: &mut App| stop(app, true))),
-                            ),
-                        ],
-                    );
-                }
-            }
-        });
-    });
-    ui.add_space(4.0);
-    ui.label(
-        widgets::muted(
-            "Lance les services générés dans des conteneurs, avec Kafka et PostgreSQL, sans exporter le code. \
-             Le formulaire est enregistré dans le projet.",
-        )
-        .size(SM),
-    );
-    if let Some(Err(e)) = &app.pods.engine {
-        ui.add_space(4.0);
-        ui.label(RichText::new(e).color(ERR).size(SM));
-    }
-    if let Some(e) = &app.pods.list_error {
-        ui.add_space(4.0);
-        ui.label(RichText::new(e).color(ERR).size(SM));
-    }
-
-    // What a browser can open, once something runs.
-    if running > 0 {
-        ui.add_space(8.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-            for link in sb_app::pods::links(&app.project()) {
-                let r = widgets::chip(ui, &format!("{}  ↗", link.label), SERVICE)
-                    .interact(Sense::click())
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text(&link.url);
-                if r.clicked() {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab(&link.url));
-                }
-            }
-        });
-    }
-}
-
-fn views(app: &mut App, ui: &mut Ui) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
-        for (view, label) in [
-            (View::Containers, "Conteneurs"),
-            (View::Output, "Journal"),
-            (View::Files, "Fichiers générés"),
-        ] {
-            let on = app.pods.view == view;
-            let text = RichText::new(label)
-                .font(if on { semibold(BASE) } else { prop(BASE) })
-                .color(if on { TEXT } else { MUTED });
-            let b = egui::Button::new(text)
-                .fill(if on { RAISED } else { Color32::TRANSPARENT })
-                .stroke(Stroke::NONE)
-                .corner_radius(CornerRadius::same(7));
-            if ui.add(b).clicked() {
-                app.pods.view = view;
-            }
-        }
-    });
-}
-
 /// Monospaced lines in a dark box, scrolled both ways; `follow` keeps the end in view.
 fn lines_box(ui: &mut Ui, id: &str, lines: &[&str], follow: bool) {
     Frame::new()
@@ -946,149 +593,27 @@ fn lines_box(ui: &mut Ui, id: &str, lines: &[&str], follow: bool) {
         });
 }
 
-fn containers(app: &mut App, ui: &mut Ui) {
-    if app.pods.containers.is_empty() {
-        common::empty(
-            ui,
-            if engine_off() || engine(app).is_none() {
-                "Aucun conteneur."
-            } else {
-                "Aucun conteneur : la stack n'est pas lancée. « Lancer » compile les services et démarre tout."
-            },
-        );
-        return;
-    }
-    let list = app.pods.containers.clone();
-    let selected = app.pods.selected.clone();
-    // The list takes what it needs, up to half of the height when logs are open under it.
-    let max = if selected.is_some() {
-        (ui.available_height() * 0.45).max(120.0)
-    } else {
-        ui.available_height()
-    };
-    egui::ScrollArea::vertical()
-        .id_salt("pods-containers")
-        .max_height(max)
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 6.0;
-            for c in &list {
-                let on = selected.as_deref() == Some(c.service.as_str());
-                let color = state_color(c);
-                Frame::new()
-                    .fill(PANEL2)
-                    .stroke(Stroke::new(1.0, if on { BORDER_STRONG } else { BORDER }))
-                    .corner_radius(CornerRadius::same(10))
-                    .inner_margin(Margin::symmetric(12, 7))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 10.0;
-                            let (dot, _) =
-                                ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-                            ui.painter().circle_filled(dot.center(), 4.5, color);
-                            ui.vertical(|ui| {
-                                ui.spacing_mut().item_spacing.y = 1.0;
-                                ui.label(RichText::new(&c.service).font(mono_bold(BASE)));
-                                ui.label(
-                                    RichText::new(format!("{}  ·  {}", c.status, c.image))
-                                        .size(SM)
-                                        .color(MUTED),
-                                );
-                            });
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.spacing_mut().item_spacing.x = 2.0;
-                                    if icon_btn(ui, "restart", "Redémarrer", false).clicked() {
-                                        act(app, "restart", c.id.clone());
-                                    }
-                                    if c.state == "running" {
-                                        if icon_btn(ui, "stop", "Arrêter", false).clicked() {
-                                            act(app, "stop", c.id.clone());
-                                        }
-                                    } else if icon_btn(ui, "play", "Démarrer", false).clicked() {
-                                        act(app, "start", c.id.clone());
-                                    }
-                                    if icon_btn(ui, "log", "Voir les logs", false).clicked() {
-                                        if on {
-                                            app.pods.selected = None;
-                                        } else {
-                                            app.pods.selected = Some(c.service.clone());
-                                            app.pods.logs.clear();
-                                            // Read with the next listing, now.
-                                            app.pods.listed = None;
-                                        }
-                                    }
-                                },
-                            );
-                        });
-                    });
-            }
-        });
-
-    if let Some(service) = selected {
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!("logs · {service}"))
-                    .font(mono(SM))
-                    .color(MUTED),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if widgets::ghost(ui, "x", "", "Fermer les logs").clicked() {
-                    app.pods.selected = None;
-                }
-                if widgets::ghost(ui, "copy", "", "Copier").clicked() {
-                    ui.ctx().copy_text(app.pods.logs.clone());
-                    app.say("Copié");
-                }
-            });
-        });
-        let lines: Vec<&str> = app.pods.logs.lines().collect();
-        lines_box(ui, "pods-logs", &lines, true);
-    }
-}
-
-fn output(app: &mut App, ui: &mut Ui) {
-    let lines = app
-        .pods
-        .output
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    if lines.is_empty() {
-        common::empty(
-            ui,
-            "Le journal du prochain lancement s'affichera ici : compilation, puis démarrage.",
-        );
-        return;
-    }
-    let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
-    lines_box(ui, "pods-output", &lines, true);
-}
-
-/// The files written for the stack, for the project as it is now.
+/// The files of the stack, for the project as it is now.
 fn stack_files(app: &mut App) -> Rc<Vec<GeneratedFile>> {
     let generation = app.state.generation;
-    if let Some((at, files)) = &app.pods.files
+    if let Some((at, files)) = &app.infra.files
         && *at == generation
     {
         return files.clone();
     }
-    let files = Rc::new(sb_app::pods::stack_files(&app.state.project));
-    app.pods.files = Some((generation, files.clone()));
+    let files = Rc::new(sb_app::infra::stack_files(&app.state.project));
+    app.infra.files = Some((generation, files.clone()));
     files
 }
 
 fn files(app: &mut App, ui: &mut Ui) {
     let files = stack_files(app);
     let current = app
-        .pods
+        .infra
         .file
         .as_ref()
         .and_then(|path| files.iter().position(|f| &f.path == path))
-        .or_else(|| files.iter().position(|f| f.path.ends_with(".yml")))
+        .or_else(|| files.iter().position(|f| f.path.ends_with("override.yml")))
         .unwrap_or(0);
     let Some(file) = files.get(current) else {
         return;
@@ -1105,7 +630,7 @@ fn files(app: &mut App, ui: &mut Ui) {
                 .stroke(Stroke::new(1.0, if on { BORDER_STRONG } else { BORDER }))
                 .corner_radius(CornerRadius::same(7));
             if ui.add(b).clicked() {
-                app.pods.file = Some(f.path.clone());
+                app.infra.file = Some(f.path.clone());
             }
         }
         if widgets::ghost(ui, "copy", "Copier", "").clicked() {
@@ -1113,28 +638,71 @@ fn files(app: &mut App, ui: &mut Ui) {
             app.say("Copié");
         }
     });
-    ui.add_space(6.0);
-    let dir = sb_app::pods::stack_dir(&app.state.project);
-    ui.label(
-        RichText::new(format!("Écrits au lancement dans {}", dir.display()))
-            .font(mono(XS + 0.5))
-            .color(FAINT),
-    );
     ui.add_space(4.0);
     let lines: Vec<&str> = file.content.lines().collect();
-    lines_box(ui, "pods-file", &lines, false);
+    lines_box(ui, "infra-file", &lines, false);
+}
+
+/// The title, the export button, and what the stack gives access to once it runs.
+fn head(app: &mut App, ui: &mut Ui) {
+    let errors = app
+        .analysis()
+        .diagnostics
+        .iter()
+        .any(|d| d.severity == Severity::Error);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        ui.label(RichText::new("Infra").size(XL).bold());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let export = widgets::primary(ui, "export", "Exporter l'infra", !errors).on_hover_text(
+                if errors {
+                    "Corrigez les erreurs du projet avant d'exporter"
+                } else {
+                    "Écrit ces fichiers dans le dossier de votre choix"
+                },
+            );
+            if export.clicked() {
+                crate::files::export_infra(app);
+            }
+        });
+    });
+    ui.add_space(4.0);
+    ui.label(
+        widgets::muted(
+            "Les fichiers qui lancent les services : l'infrastructure (Kafka, PostgreSQL…) dans docker-compose.yml, \
+             les limites, les interfaces d'administration et les services eux-mêmes dans docker-compose.override.yml, \
+             et la configuration de Traefik et de Garage. Exportez-les dans le dossier du code exporté, puis \
+             `docker compose up -d`. Le formulaire est enregistré dans le projet (le bouton est aussi dans le menu ⋮).",
+        )
+        .size(SM),
+    );
+    let links = sb_app::infra::links(&app.project());
+    if !links.is_empty() {
+        ui.add_space(8.0);
+        ui.label(widgets::faint("Une fois la stack lancée :").size(SM));
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+            for link in links {
+                let r = widgets::chip(ui, &format!("{}  ↗", link.label), SERVICE)
+                    .interact(Sense::click())
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(&link.url);
+                if r.clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(&link.url));
+                }
+            }
+        });
+    }
 }
 
 pub fn page(app: &mut App, ui: &mut Ui) {
-    poll(app);
-
-    egui::Panel::left("pods-form")
-        .exact_size(452.0)
+    egui::Panel::left("infra-form")
+        .exact_size(crate::theme::side(ui, 452.0, 330.0))
         .resizable(false)
         .frame(Frame::new().fill(PANEL).inner_margin(Margin::ZERO))
         .show(ui, |ui| {
             egui::ScrollArea::vertical()
-                .id_salt("pods-form-scroll")
+                .id_salt("infra-form-scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     Frame::new()
@@ -1156,13 +724,7 @@ pub fn page(app: &mut App, ui: &mut Ui) {
                 ui.set_min_size(ui.available_size());
                 head(app, ui);
                 ui.add_space(14.0);
-                views(app, ui);
-                ui.add_space(10.0);
-                match app.pods.view {
-                    View::Containers => containers(app, ui),
-                    View::Output => output(app, ui),
-                    View::Files => files(app, ui),
-                }
+                files(app, ui);
             });
     });
 }

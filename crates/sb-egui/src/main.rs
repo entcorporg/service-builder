@@ -3,11 +3,14 @@
 fn main() -> std::process::ExitCode {
     // `service-builder mcp <project>` is the MCP server an AI client starts over stdio: no window.
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if let [mode, project] = args.as_slice()
+    // Without a project it works on the one the app opened last, or waits for `load_project`.
+    if let Some((mode, rest)) = args.split_first()
         && mode == "mcp"
+        && rest.len() <= 1
     {
         let stdio = (std::io::stdin().lock(), std::io::stdout().lock());
-        return match sb_app::mcp::serve(std::path::Path::new(project), stdio.0, stdio.1) {
+        let project = rest.first().map(std::path::Path::new);
+        return match sb_app::mcp::serve(project, stdio.0, stdio.1) {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("error: {e}");

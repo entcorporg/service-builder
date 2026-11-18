@@ -4,11 +4,12 @@
 //! sb sample                          print the demo project as JSON
 //! sb validate <project.json>         print diagnostics, exit 1 if there are errors
 //! sb generate <project.json> <dir>   write the generated Cargo workspace into <dir>
-//! sb pods <project.json> <dir>       write the workspace with what runs it in containers (Dockerfile, compose, Traefik)
-//! sb up <project.json>             compile the services and start them in containers, with their infrastructure
-//! sb down <project.json> [--volumes] stop that stack (and delete its data)
+//! sb infra <project.json> <dir>      write what runs the services in containers: docker-compose.yml, the override, Traefik, Garage
+//! sb projects [query]                list the projects of the S3 store (and the ones opened on this machine)
+//! sb pull <id> [version]             fetch a project of the store into its working file, print the path
+//! sb push <project.json>             store the file as a new version (nothing if it did not change)
 //! sb analyze                         project JSON on stdin -> analysis JSON on stdout
-//! sb mcp <project.json>              MCP server on stdio, to let an AI client edit the project
+//! sb mcp [project.json]              MCP server on stdio, to let an AI client edit the project
 //! ```
 
 use std::io::Read;
@@ -21,11 +22,12 @@ const USAGE: &str = "usage:
   sb sample
   sb validate <project.json>
   sb generate <project.json> <dir>
-  sb pods <project.json> <dir>
-  sb up <project.json>
-  sb down <project.json> [--volumes]
+  sb infra <project.json> <dir>
+  sb projects [query]
+  sb pull <id> [version]
+  sb push <project.json>
   sb analyze            (project JSON on stdin)
-  sb mcp <project.json> (MCP server on stdio)";
+  sb mcp [project.json] (MCP server on stdio)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -67,47 +69,37 @@ fn run(args: &[&str]) -> Result<ExitCode, String> {
             println!("wrote {} files to {}", report.files, report.dir);
             Ok(ExitCode::SUCCESS)
         }
-        ["pods", file, dir] => {
+        ["infra", file, dir] => {
             let project = sb_app::load_project(Path::new(file))?;
             print_diagnostics(&sb_codegen::diagnose(&project));
-            let files = sb_app::pods::prepare(&project, Path::new(dir))?;
-            println!("wrote {files} files to {dir}");
-            println!("start it from that folder with:");
+            let report = sb_app::infra::export_infra(&project, Path::new(dir))?;
+            for f in &report.files {
+                println!("{}/{f}", report.dir);
+            }
+            println!("start it from the folder of the code export with:");
             for command in sb_codegen::pods::manual_commands(&project, "docker") {
                 println!("  {command}");
             }
             Ok(ExitCode::SUCCESS)
         }
-        ["up", file] => {
-            let project = sb_app::load_project(Path::new(file))?;
-            let engine = sb_app::pods::Engine::detect()?;
-            println!("engine: {}", engine.label());
-            let dir = sb_app::pods::stack_dir(&project);
-            sb_app::pods::up(
-                &engine,
-                &project,
-                &dir,
-                &|l| println!("{l}"),
-                &Default::default(),
-            )?;
-            for link in sb_codegen::pods::links(&project) {
-                println!("{}: {}", link.label, link.url);
+        ["projects"] => projects(""),
+        ["projects", query] => projects(query),
+        ["pull", id] => pull(id, None),
+        ["pull", id, version] => pull(
+            id,
+            Some(
+                version
+                    .parse()
+                    .map_err(|_| format!("{version} is not a version number"))?,
+            ),
+        ),
+        ["push", file] => {
+            let pushed = sb_app::store::push_file(Path::new(file))?;
+            if pushed.created {
+                println!("version {} stored", pushed.version);
+            } else {
+                println!("unchanged: version {}", pushed.version);
             }
-            Ok(ExitCode::SUCCESS)
-        }
-        ["down", file, rest @ ..] if matches!(rest, [] | ["--volumes"]) => {
-            let project = sb_app::load_project(Path::new(file))?;
-            let engine = sb_app::pods::Engine::detect()?;
-            let dir = sb_app::pods::stack_dir(&project);
-            let log = |l: &str| println!("{l}");
-            sb_app::pods::down(
-                &engine,
-                &project,
-                &dir,
-                !rest.is_empty(),
-                &log,
-                &Default::default(),
-            )?;
             Ok(ExitCode::SUCCESS)
         }
         ["analyze"] => {
@@ -122,15 +114,17 @@ fn run(args: &[&str]) -> Result<ExitCode, String> {
             println!("{json}");
             Ok(ExitCode::SUCCESS)
         }
-        ["mcp", file] => {
+        ["mcp", rest @ ..] if rest.len() <= 1 => {
             // stdout belongs to the protocol: anything else goes to stderr.
-            eprintln!("service-builder MCP server on {file}");
-            sb_app::mcp::serve(
-                Path::new(file),
-                std::io::stdin().lock(),
-                std::io::stdout().lock(),
-            )
-            .map_err(|e| e.to_string())?;
+            let project = rest.first().map(Path::new);
+            match project {
+                Some(file) => eprintln!("service-builder MCP server on {}", file.display()),
+                None => eprintln!(
+                    "service-builder MCP server, no project loaded: search_projects, then load_project"
+                ),
+            }
+            sb_app::mcp::serve(project, std::io::stdin().lock(), std::io::stdout().lock())
+                .map_err(|e| e.to_string())?;
             Ok(ExitCode::SUCCESS)
         }
         _ => Err(USAGE.to_string()),
@@ -153,4 +147,24 @@ fn exit_code(diagnostics: &[sb_model::Diagnostic]) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+fn projects(query: &str) -> Result<ExitCode, String> {
+    for p in sb_app::store::search(query)? {
+        println!(
+            "{}\t{}\tv{}\t{}\t{}",
+            p.id,
+            p.name,
+            p.version.map_or("-".into(), |v| v.to_string()),
+            p.updated_at,
+            p.source
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn pull(id: &str, version: Option<u32>) -> Result<ExitCode, String> {
+    let pulled = sb_app::store::pull(id, version, false)?;
+    println!("{}", pulled.path.display());
+    Ok(ExitCode::SUCCESS)
 }

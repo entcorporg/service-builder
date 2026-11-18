@@ -1,6 +1,7 @@
 name: CI
 
-# A branch is tested once, through its pull request; main is tested on every push (it releases).
+# A branch is tested once, through its pull request; main is tested on every push. CI only tests: nothing is built or
+# released here (the app is built on the developer's machine, scripts/install-local.sh).
 on:
   push:
     branches: [main]
@@ -18,48 +19,6 @@ concurrency:
 # changing `runs-on` back; the steps below already handle both (`runner.environment`).
 
 jobs:
-  # Rule 1 — every change names its update type: [minor] 0.0.X, [normal] 0.X.0, [major] X.0.0,
-  # in the title of the pull request or in the subject line (first line) of a commit. Only titles
-  # count: a description or commit body that merely talks about the mentions must not release.
-  # A pull request without the mention fails here; a push to main reads it to decide the release.
-  update-type:
-    runs-on: ubuntu-24.04
-    outputs:
-      level: ${{ steps.detect.outputs.level }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          clean: ${{ runner.environment == 'github-hosted' }}
-      - id: detect
-        # Texts reach the script through the environment, never interpolated into the shell.
-        env:
-          EVENT: ${{ github.event_name }}
-          BRANCH: ${{ github.ref_name }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
-          BEFORE: ${{ github.event.before }}
-          SHA: ${{ github.sha }}
-        run: |
-          if [ "$EVENT" = pull_request ]; then
-            text="$PR_TITLE"$'\n'"$(git log --format=%s "$PR_BASE..$PR_HEAD")"
-          elif git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
-            text="$(git log --format=%s "$BEFORE..$SHA")"
-          else
-            text="$(git log -1 --format=%s "$SHA")"
-          fi
-          level="$(printf '%s' "$text" | node scripts/release.mjs detect)"
-          echo "level=$level" >> "$GITHUB_OUTPUT"
-          if [ -n "$level" ]; then
-            echo "Update type: $level"
-          elif [ "$EVENT" = pull_request ]; then
-            echo "::error title=Update type missing::Mention [minor] (0.0.X), [normal] (0.X.0) or [major] (X.0.0) in the PR title or in the first line of a commit."
-            exit 1
-          elif [ "$BRANCH" = main ]; then
-            echo "::notice title=No release::No [minor], [normal] or [major] mention in this push: the version is left as is."
-          fi
-
   scripts:
     runs-on: ubuntu-24.04
     steps:
@@ -217,79 +176,3 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ runner.tool_cache }}/sb-generated-realtime-target
           REALTIME_TEST_DRAGONFLY_URL: redis://localhost:6379
-
-  # Rule 2 — a push to main that carries a mention raises the version (0.1.0 + [normal] = 0.2.0),
-  # commits it and tags it. The commit made with GITHUB_TOKEN does not start another run.
-  bump:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.update-type.outputs.level != ''
-    needs: [update-type, scripts, rust, generated-workspace]
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    # Two pushes in a row must not bump the same version twice.
-    concurrency:
-      group: release
-      cancel-in-progress: false
-    outputs:
-      tag: ${{ steps.bump.outputs.tag }}
-    steps:
-      # The tip of main, not the tested commit: an earlier release may have moved it since.
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-      - id: bump
-        env:
-          LEVEL: ${{ needs.update-type.outputs.level }}
-        run: |
-          version="$(node scripts/release.mjs bump "$LEVEL")"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "chore(release): v$version [skip ci]"
-          git tag "v$version"
-          git push origin main "v$version"
-          echo "tag=v$version" >> "$GITHUB_OUTPUT"
-
-  # Builds the AppImage, signs it, and publishes the GitHub release the app polls for updates.
-  publish:
-    needs: [update-type, bump]
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.bump.outputs.tag }}
-      - name: AppImage tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libfuse2t64 file desktop-file-utils minisign
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release -p service-builder
-      - name: AppImage
-        run: scripts/appimage.sh "${{ needs.bump.outputs.tag }}"
-      - name: Sign
-        # The key is the one of the earlier releases (a base64 minisign secret key file): the public key in
-        # crates/sb-egui/src/updater.rs is unchanged, so installed builds keep updating.
-        env:
-          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        # minisign reads the password from stdin when there is no terminal (rsign wants /dev/tty, which a runner has
-        # not). Its signatures are prehashed, the only kind the updater accepts.
-        run: |
-          umask 077
-          printf '%s' "$KEY" | base64 -d > "$RUNNER_TEMP/minisign.key"
-          for image in dist/*.AppImage; do
-            printf '%s\n' "$PASSWORD" | minisign -S -s "$RUNNER_TEMP/minisign.key" -m "$image" -x "$image.minisig"
-          done
-          rm -f "$RUNNER_TEMP/minisign.key"
-      - name: Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.bump.outputs.tag }}
-          LEVEL: ${{ needs.update-type.outputs.level }}
-        run: |
-          gh release create "$TAG" dist/*.AppImage dist/*.AppImage.minisig \
-            --title "Service Builder $TAG" \
-            --notes "Mise à jour $LEVEL. Le détail est dans l’historique des commits."

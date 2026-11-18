@@ -305,7 +305,7 @@ fn card(
 
 pub fn page(app: &mut App, ui: &mut Ui) {
     egui::Panel::left("endpoint-tree")
-        .exact_size(228.0)
+        .exact_size(crate::theme::side(ui, 228.0, 180.0))
         .resizable(false)
         .frame(
             Frame::new()

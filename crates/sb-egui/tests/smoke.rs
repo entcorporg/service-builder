@@ -5,22 +5,34 @@ use egui_kittest::Harness;
 use sb_egui::app::{App, Page};
 use sb_egui::pages::canvas::{Sel, select};
 
-const PAGES: [Page; 7] = [
+const PAGES: [Page; 8] = [
     Page::Architecture,
     Page::Endpoint,
     Page::Mail,
     Page::Tables,
     Page::Mcp,
-    Page::Pods,
+    Page::Infra,
+    Page::Projects,
     Page::Code,
 ];
 
 fn harness(sample: &'static str) -> Harness<'static, App> {
     // SAFETY: set before the app starts its threads.
     unsafe {
-        std::env::set_var("SB_NO_UPDATE", "1");
         std::env::set_var("SB_OPEN_ALL", "1");
-        std::env::set_var("SB_NO_ENGINE", "1");
+        // Neither the projects nor the settings of the person who runs the tests.
+        std::env::set_var("SB_NO_RESTORE", "1");
+        let home = std::env::temp_dir().join(format!("sb-smoke-{}", std::process::id()));
+        std::env::set_var("XDG_CONFIG_HOME", home.join("config"));
+        std::env::set_var("XDG_DATA_HOME", home.join("data"));
+        for var in [
+            "SB_S3_ENDPOINT",
+            "SB_S3_BUCKET",
+            "SB_S3_ACCESS_KEY",
+            "SB_S3_SECRET_KEY",
+        ] {
+            std::env::remove_var(var);
+        }
     }
     let mut h = Harness::builder()
         .with_size([1480.0, 920.0])

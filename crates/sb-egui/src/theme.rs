@@ -136,3 +136,33 @@ pub fn apply(ctx: &egui::Context) {
         s.interaction.tooltip_delay = 0.4;
     });
 }
+
+/// The window width the layout was drawn for: wider windows keep the panels at their preferred width.
+const REFERENCE_WIDTH: f32 = 1480.0;
+
+/// The width of a side panel: its `preferred` width on a wide window, shrinking with the window down to `min`.
+pub fn side(ui: &egui::Ui, preferred: f32, min: f32) -> f32 {
+    let width = ui.ctx().content_rect().width();
+    (preferred * width / REFERENCE_WIDTH).clamp(min, preferred)
+}
+
+/// How much room the window leaves the toolbar.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Room {
+    /// The tabs are icons, and the file actions move into the menu.
+    Narrow,
+    /// The tabs are icons.
+    Compact,
+    Full,
+}
+
+pub fn room(ui: &egui::Ui) -> Room {
+    let width = ui.ctx().content_rect().width();
+    if width < 1180.0 {
+        Room::Narrow
+    } else if width < 1500.0 {
+        Room::Compact
+    } else {
+        Room::Full
+    }
+}

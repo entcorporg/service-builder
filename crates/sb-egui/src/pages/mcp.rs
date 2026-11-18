@@ -11,7 +11,6 @@ use sb_app::mcp::{Activation, EntryState};
 use crate::app::App;
 use crate::fonts::Weight;
 use crate::theme::{self, BORDER, MUTED, OK, PANEL, PANEL2, RAISED, WARN};
-use crate::updater;
 use crate::widgets;
 
 /// An AI client may write the files at any time: they are read again after this delay.
@@ -33,7 +32,11 @@ pub struct McpState {
 /// What a client must run to start the MCP server: this program. An AppImage runs from a temporary mount, so its
 /// own path is what `APPIMAGE` holds.
 pub fn program() -> Result<String, String> {
-    if let Some(appimage) = updater::appimage_path() {
+    // The AppImage this process runs from (`APPIMAGE`); any other install (`cargo run`, a binary) is its own path.
+    if let Some(appimage) = std::env::var_os("APPIMAGE")
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+    {
         return Ok(appimage.display().to_string());
     }
     std::env::current_exe()
@@ -417,7 +420,7 @@ pub fn page(app: &mut App, ui: &mut Ui) {
         app.mcp.cache = None;
     }
     if let Some(url) = open {
-        crate::updates::open_url(app, &url);
+        crate::files::open_url(app, &url);
     }
     if let Some(t) = say {
         app.say(&t);

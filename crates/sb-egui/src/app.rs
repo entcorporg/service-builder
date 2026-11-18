@@ -15,6 +15,8 @@
 //!   [`crate::widgets::text_field`] and friends, which return `Some(new value)` once, at commit.
 //! * **Modal forms** (`form::ask`), confirmations (`app.confirm`) and errors (`app.fail`) are queued on the app
 //!   and drawn over the window by the frame loop.
+//! * **Keeping the project**: a save writes the working copy, then stores it as a version in the S3 bucket on a
+//!   thread (`push`). The last project open is remembered and opened again at the next start.
 //! * **Work to do after drawing** (anything that needs `&mut App` from inside a closure given to egui):
 //!   `app.later(|app| …)`.
 //! * Per-page UI state (selection, open cards, scroll targets) lives in the page's own struct, a field of `App`.
@@ -26,11 +28,11 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use eframe::egui;
 use sb_app::Analysis;
+use sb_app::store::Store;
 use sb_model::Project;
 
 use crate::form::Form;
 use crate::pages;
-use crate::updater::Update;
 
 pub const TITLE: &str = "Service Builder";
 const HISTORY: usize = 100;
@@ -45,9 +47,29 @@ pub enum Page {
     Mail,
     Tables,
     Mcp,
-    Pods,
+    Infra,
+    Projects,
     Code,
 }
+
+/// Where the working copy stands relative to the S3 bucket.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub enum SyncState {
+    /// Nothing to say: no S3 settings, or a project that has no file yet.
+    #[default]
+    Off,
+    /// The bucket has exactly this file, as this version.
+    Stored(u32),
+    /// The file holds something the bucket does not have yet.
+    Pending,
+    /// Being stored.
+    Storing,
+    /// The bucket did not take it: why.
+    Failed(String),
+}
+
+/// An edit by an agent is stored once it has been quiet for this long: a burst of patches makes one version.
+const QUIET: Duration = Duration::from_secs(20);
 
 pub struct State {
     pub project: Project,
@@ -57,7 +79,7 @@ pub struct State {
     pub analysis: Rc<Analysis>,
     /// Bumped on every change, so that a slow analysis of an older project is dropped.
     pub generation: u64,
-    pub update: Option<Update>,
+    pub sync: SyncState,
     /// Edited since it was read or saved.
     pub dirty: bool,
     pub undo: Vec<Project>,
@@ -99,8 +121,12 @@ pub struct App {
     last_watch: Instant,
     /// The problems panel at the bottom is open.
     pub problems_open: bool,
-    /// Set while an update downloads: the button is off.
-    pub updating: bool,
+    /// Where the projects are kept, and the settings of the bucket.
+    pub store: Store,
+    /// The working copy is stored once this moment has passed.
+    sync_due: Option<Instant>,
+    /// The project the app last saw in `state.json`: a change means an agent loaded another one.
+    seen_last: Option<String>,
     /// The window may close for real (the user answered the unsaved-changes question).
     closing: bool,
     /// The cards that are open, by id (`common::card`), so that an edit does not close them.
@@ -113,7 +139,8 @@ pub struct App {
     pub tables: pages::tablesview::TablesState,
     pub code: pages::codeview::CodeState,
     pub mcp: pages::mcp::McpState,
-    pub pods: pages::pods::PodsState,
+    pub infra: pages::infra::InfraState,
+    pub projects: pages::projects::ProjectsState,
     /// The mail open on the Mail page, and the working copy of its design.
     pub mail_editor: Option<pages::mailcanvas::MailEditor>,
     /// The group of the last edit and when it was made (`edit_grouped`).
@@ -151,7 +178,7 @@ impl App {
                     files: vec![],
                 }),
                 generation: 0,
-                update: None,
+                sync: SyncState::Off,
                 dirty: false,
                 undo: vec![],
                 redo: vec![],
@@ -165,7 +192,9 @@ impl App {
             rx,
             last_watch: Instant::now(),
             problems_open: false,
-            updating: false,
+            store: Store::system(),
+            sync_due: None,
+            seen_last: None,
             closing: false,
             open: Default::default(),
             canvas: Default::default(),
@@ -174,20 +203,48 @@ impl App {
             tables: Default::default(),
             code: Default::default(),
             mcp: Default::default(),
-            pods: Default::default(),
+            infra: Default::default(),
+            projects: Default::default(),
             mail_editor: None,
             group: None,
         };
-        if let Some(path) = open {
-            match sb_app::load_project(&path) {
+        app.seen_last = app.store.local.state().last;
+        match open {
+            Some(path) => match sb_app::load_project(&path) {
                 Ok(project) => app.set_project(project, Some(path)),
                 Err(e) => app.fail(&e),
+            },
+            // The project that was open when the app closed.
+            None if std::env::var_os("SB_NO_RESTORE").is_none() => {
+                if let Some(recent) = app.store.local.state().last_open().cloned() {
+                    let path = PathBuf::from(&recent.path);
+                    match sb_app::load_project(&path) {
+                        Ok(project) => {
+                            app.set_project(project, Some(path));
+                            // Edits made while the app was closed (by an agent) are stored.
+                            if app.state.sync == SyncState::Pending {
+                                app.sync_due = Some(Instant::now());
+                            }
+                        }
+                        Err(e) => app.say(&format!("Dernier projet non rouvert : {e}")),
+                    }
+                }
             }
+            None => {}
+        }
+        // The store starts now rather than at the first save.
+        if app.store.configured() {
+            let store = app.store.clone();
+            app.spawn(
+                move || store.remote().map(|_| ()),
+                |app, done| {
+                    if let Err(e) = done {
+                        app.projects.remote = Some(Err(e));
+                    }
+                },
+            );
         }
         app.changed();
-        if std::env::var_os("SB_NO_UPDATE").is_none() {
-            crate::updates::check_for_update(&mut app, false);
-        }
         app
     }
 
@@ -277,7 +334,104 @@ impl App {
         s.dirty = false;
         s.undo.clear();
         s.redo.clear();
+        self.sync_due = None;
+        self.remember();
         self.changed();
+    }
+
+    /// Notes the project in the list of the last ones opened, and reads where it stands relative to the bucket.
+    fn remember(&mut self) {
+        let Some(path) = self.state.path.clone() else {
+            self.state.sync = SyncState::Off;
+            return;
+        };
+        if let Ok(id) = self.store.opened(&path, &self.state.project.name) {
+            self.seen_last = Some(id);
+        }
+        self.read_sync();
+        self.projects.stale = true;
+    }
+
+    /// Reads from the file and the state whether the bucket has what the working copy holds.
+    pub fn read_sync(&mut self) {
+        self.state.sync = match &self.state.path {
+            Some(path) if self.store.configured() => {
+                if self.store.unsynced(path) {
+                    SyncState::Pending
+                } else {
+                    let version = self
+                        .store
+                        .local
+                        .state()
+                        .find_path(path)
+                        .and_then(|r| r.synced_version);
+                    SyncState::Stored(version.unwrap_or(0))
+                }
+            }
+            _ => SyncState::Off,
+        };
+    }
+
+    /// Stores the working copy as a version in the bucket, on a thread. `announce`: say how it went.
+    pub fn push(&mut self, announce: bool) {
+        let Some(path) = self.state.path.clone() else {
+            return;
+        };
+        if !self.store.configured() || self.state.sync == SyncState::Storing {
+            return;
+        }
+        self.state.sync = SyncState::Storing;
+        let store = self.store.clone();
+        let target = path.clone();
+        self.spawn(
+            move || store.push_file(&target),
+            move |app, done| {
+                // The project may have changed while it travelled.
+                let current = app.state.path.as_ref() == Some(&path);
+                match done {
+                    Ok(pushed) => {
+                        if current {
+                            // Saved again while it travelled: what is in the file now is stored next.
+                            app.read_sync();
+                            if app.state.sync == SyncState::Pending {
+                                app.sync_due = Some(Instant::now());
+                            }
+                        }
+                        if announce {
+                            app.say(&if pushed.created {
+                                format!("Enregistré · version {} dans S3", pushed.version)
+                            } else {
+                                format!("Enregistré · S3 a déjà la version {}", pushed.version)
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        if current {
+                            app.state.sync = SyncState::Failed(e.clone());
+                        }
+                        app.say(&format!("Enregistré en local, pas dans S3 : {e}"));
+                    }
+                }
+                app.projects.stale = true;
+            },
+        );
+    }
+
+    /// The project was written to `path`: it is its working copy from now on, and the bucket gets a version.
+    pub fn saved(&mut self, path: PathBuf) {
+        self.state.stamp = stamp_of(&path);
+        self.state.path = Some(path.clone());
+        self.state.dirty = false;
+        self.sync_due = None;
+        self.remember();
+        if self.store.configured() {
+            self.push(true);
+        } else {
+            self.say(&format!(
+                "Enregistré dans {} (stockage S3 non configuré : page Projets)",
+                path.display()
+            ));
+        }
     }
 
     /// The project changed: the next frame draws it, and it is validated and generated in the background.
@@ -306,17 +460,15 @@ impl App {
         self.set_project(project, None);
     }
 
-    /// Saves in place; a project that has no file yet asks for one.
+    /// Saves in place; a project that has no file yet gets its working copy, named after it.
     pub fn save(&mut self) {
-        let Some(path) = self.state.path.clone() else {
-            return crate::files::save_as(self);
-        };
+        let path = self.state.path.clone().unwrap_or_else(|| {
+            self.store
+                .local
+                .working_copy(&sb_app::store::slug(&self.state.project.name))
+        });
         match sb_app::save_project(&path, &self.state.project) {
-            Ok(()) => {
-                self.state.stamp = stamp_of(&path);
-                self.state.dirty = false;
-                self.say(&format!("Enregistré dans {}", path.display()));
-            }
+            Ok(()) => self.saved(path),
             Err(e) => self.fail(&e),
         }
     }
@@ -350,7 +502,6 @@ impl App {
                     true,
                     Some(Box::new(move |app: &mut App| {
                         app.save();
-                        // A project without a file opens the file dialog: the user retries once it is saved.
                         if !app.state.dirty {
                             run(app, &other)
                         }
@@ -431,6 +582,13 @@ impl App {
         if self.last_watch.elapsed() >= Duration::from_secs(2) {
             self.last_watch = Instant::now();
             self.watch_file();
+            self.watch_last();
+        }
+        if let Some(due) = self.sync_due
+            && Instant::now() >= due
+        {
+            self.sync_due = None;
+            self.push(false);
         }
         self.ctx.request_repaint_after(Duration::from_secs(2));
         if let Some((_, at)) = &self.toast {
@@ -456,6 +614,32 @@ impl App {
         if let Ok(project) = sb_app::load_project(&path) {
             self.set_project(project, Some(path));
             self.say("Le projet a été modifié par un autre programme : rechargé.");
+            // Stored once the other program has stopped writing.
+            if self.state.sync == SyncState::Pending {
+                self.sync_due = Some(Instant::now() + QUIET);
+            }
+        }
+    }
+
+    /// An agent loaded another project (`load_project` of the MCP server): the window shows it, unless there are
+    /// unsaved edits here.
+    fn watch_last(&mut self) {
+        let last = self.store.local.state().last;
+        if last == self.seen_last || self.state.dirty {
+            return;
+        }
+        self.seen_last = last.clone();
+        let state = self.store.local.state();
+        let Some(recent) = last.as_deref().and_then(|id| state.find(id)).cloned() else {
+            return;
+        };
+        let path = PathBuf::from(&recent.path);
+        if Some(&path) == self.state.path.as_ref() {
+            return;
+        }
+        if let Ok(project) = sb_app::load_project(&path) {
+            self.set_project(project, Some(path));
+            self.say(&format!("Projet « {} » ouvert par un agent.", recent.name));
         }
     }
 
@@ -517,7 +701,8 @@ impl App {
                 Page::Mail => pages::mailcanvas::page(self, ui),
                 Page::Tables => pages::tablesview::page(self, ui),
                 Page::Mcp => pages::mcp::page(self, ui),
-                Page::Pods => pages::pods::page(self, ui),
+                Page::Infra => pages::infra::page(self, ui),
+                Page::Projects => pages::projects::page(self, ui),
                 Page::Code => pages::codeview::page(self, ui),
             });
 

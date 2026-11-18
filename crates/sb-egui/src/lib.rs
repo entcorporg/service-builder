@@ -9,8 +9,6 @@ pub mod icons;
 pub mod pages;
 pub mod problems;
 pub mod theme;
-pub mod updater;
-pub mod updates;
 pub mod widgets;
 
 pub use app::App;

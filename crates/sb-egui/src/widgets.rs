@@ -418,7 +418,13 @@ pub fn choice(
 /// A checkbox; returns the new value when clicked.
 pub fn check(ui: &mut Ui, current: bool, label: impl Into<WidgetText>) -> Option<bool> {
     let mut v = current;
-    ui.checkbox(&mut v, label).changed().then_some(v)
+    // The label wraps in a narrow panel rather than running out of it.
+    ui.scope(|ui| {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+        ui.checkbox(&mut v, label).changed()
+    })
+    .inner
+    .then_some(v)
 }
 
 /// A switch (the toggles of the MCP page and of the options).

@@ -36,7 +36,7 @@ pub struct Project {
     pub topics: Vec<Topic>,
     #[serde(default)]
     pub services: Vec<Service>,
-    /// How the project runs in containers from the Pods page: resources, admin interfaces, reverse proxy.
+    /// How the project runs in containers from the Infra page: resources, admin interfaces, reverse proxy.
     #[serde(default, skip_serializing_if = "crate::pods::PodsConfig::is_default")]
     pub pods: crate::pods::PodsConfig,
     /// Whether the services answer with their own OpenAPI document, and where.
@@ -2662,7 +2662,7 @@ impl Project {
             .any(|s| s.kind == ServiceKind::Realtime || s.uses_shared_limit())
     }
 
-    /// Whether the stack of the Pods page holds Garage: it is asked for, and a service has an object step.
+    /// Whether the exported stack holds Garage: it is asked for, and a service has an object step.
     pub fn uses_garage(&self) -> bool {
         self.pods.garage && self.services.iter().any(|s| !s.bucket_envs().is_empty())
     }
