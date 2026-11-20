@@ -810,7 +810,7 @@ fn outline(project: &Project) -> Value {
             "tables": names(s.tables.iter().map(table_outline).collect()),
             "kind": s.kind,
             "consumers": names(s.consumers.iter().map(|c| match &c.mail {
-                Some(m) => format!("{} <- {} mails {}{}", c.name, c.topic, m.recipient, m.reply_to.as_ref().map(|r| format!(" (replies to {r})")).unwrap_or_default()),
+                Some(m) => format!("{} <- {} mails {}{}", c.name, c.topic, m.recipient, format!("{}{}", m.reply_to.as_ref().map(|r| format!(" (replies to {r})")).unwrap_or_default(), m.sender.as_ref().map(|s| format!(" (from sender {s})")).unwrap_or_default())),
                 None => format!("{} <- {}{} [{}]", c.name, c.topic, c.idempotent_on.as_ref().map(|f| format!(" (idempotent on {f})")).unwrap_or_default(), step_ids(&c.steps)),
             }).collect()),
             "mails": names(s.templates.iter().map(|t| format!("{}: {}", t.event_type, t.subject)).collect()),
