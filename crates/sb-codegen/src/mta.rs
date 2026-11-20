@@ -139,7 +139,9 @@ pub fn generate(project: &Project, service: &Service) -> Result<Vec<GeneratedFil
                 .replace("::SERVER_PORT::", &http_port.to_string())
                 .replace("::DATABASE_ENV::", &db_env)
                 .replace("::DATABASE_DEFAULT::", &db_default),
-            "src/mta_rules.rs" => content.replace("::EVENT_RULES::", &event_rules(service)),
+            "src/mta_rules.rs" => content
+                .replace("::SENDERS::", &senders(service))
+                .replace("::EVENT_RULES::", &event_rules(service)),
             "src/core/consumer.rs" => content
                 .replace("::TOPICS::", &topics_const(project, service))
                 .replace("::SPAWN::", &spawn_consumers(project, service))
@@ -282,9 +284,31 @@ fn event_rules(service: &Service) -> String {
             Some(field) => format!("Some({field:?})"),
             None => "None".to_string(),
         };
+        let sender_id = match &rule.sender {
+            Some(id) => format!("Some({id:?})"),
+            None => "None".to_string(),
+        };
         out.push_str(&format!(
-            "    EventRule {{\n        topic: {:?},\n        recipient_field: {:?},\n        optional_recipient: {},\n        dedup_field: {:?},\n        dedup_fallback: DedupFallback::{fallback},\n        sender: {sender},\n        reply_to_field: {reply_to},\n    }},\n",
+            "    EventRule {{\n        topic: {:?},\n        recipient_field: {:?},\n        optional_recipient: {},\n        dedup_field: {:?},\n        dedup_fallback: DedupFallback::{fallback},\n        sender: {sender},\n        reply_to_field: {reply_to},\n        sender_id: {sender_id},\n    }},\n",
             c.topic, rule.recipient, rule.optional_recipient, rule.dedup_field
+        ));
+    }
+    out.push_str("];");
+    out
+}
+
+fn senders(service: &Service) -> String {
+    let mut out = String::from(
+        "/// Les expéditeurs du projet (hors adresse du service).\npub const SENDERS: &[SenderDecl] = &[\n",
+    );
+    for s in &service.senders {
+        let name = match &s.name {
+            Some(n) => format!("Some({n:?})"),
+            None => "None".to_string(),
+        };
+        out.push_str(&format!(
+            "    SenderDecl {{\n        id: {:?},\n        email: {:?},\n        name: {name},\n        dkim_selector: {:?},\n        dkim_domain: {:?},\n    }},\n",
+            s.id, s.email, s.dkim_selector, s.dkim_domain
         ));
     }
     out.push_str("];");

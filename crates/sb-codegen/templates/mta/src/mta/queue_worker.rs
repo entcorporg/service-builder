@@ -166,7 +166,12 @@ async fn tick(state: Arc<WorkerState>, batch_size: u32, concurrency: usize) -> R
             }
             Err(e) => {
                 tracing::warn!(%id, error = %e, "Échec de livraison");
-                match reschedule_or_fail(&state.db, id).await {
+                let next = if is_permanent(&e) {
+                    fail_now(&state.db, id, &e.to_string()).await
+                } else {
+                    reschedule_or_fail(&state.db, id).await
+                };
+                match next {
                     Ok(Retry::Scheduled) => {
                         DELIVERIES
                             .with_label_values(&[event_type.as_str(), "retry"])
@@ -206,12 +211,14 @@ async fn process_job(
 
     // 5. Construire le nom d'affichage du destinataire depuis le payload
     let display_name = build_display_name(&vars);
-    let sender_name = event.sender_name(&vars, &state.config.smtp_from_name);
+    // L'expéditeur est fixé par la règle de l'événement (jamais par le payload) ; inconnu = échec définitif.
+    let identity = state.config.identity(event.sender_id())?;
+    let sender_name = event.sender_name(&vars, &identity.name);
     let reply_to = event.reply_to(&vars);
 
     // 6. Construire le message MIME
     let msg = message::build(
-        &state.config.smtp_from_email,
+        &identity.email,
         &sender_name,
         recipient,
         display_name.as_deref(),
@@ -219,15 +226,15 @@ async fn process_job(
         &rendered.subject,
         &rendered.html,
         &rendered.text,
-        &state.config.dkim_domain,
+        &identity.dkim_domain,
     )?;
 
-    // 7. Signer avec DKIM
+    // 7. Signer avec DKIM (la clé de l'expéditeur)
     let signed = dkim::sign(
         &msg.raw,
-        &state.config.dkim_private_key_pem,
-        &state.config.dkim_domain,
-        &state.config.dkim_selector,
+        &identity.dkim_private_key_pem,
+        &identity.dkim_domain,
+        &identity.dkim_selector,
     )?;
 
     // 8. Déterminer la liste des hôtes SMTP cibles
@@ -284,6 +291,22 @@ enum Retry {
     Scheduled,
     /// Abandon : `max_attempts` atteint, job passé en `failed`.
     GaveUp,
+}
+
+/// Un échec qu'une nouvelle tentative ne changera pas (expéditeur inconnu) : pas de backoff.
+pub(crate) fn is_permanent(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<crate::core::config::UnknownSender>()
+        .is_some()
+}
+
+async fn fail_now(db: &PgPool, id: Uuid, reason: &str) -> Result<Retry> {
+    sqlx::query("UPDATE mail_queue SET status = 'failed', error = $2 WHERE id = $1")
+        .bind(id)
+        .bind(reason)
+        .execute(db)
+        .await?;
+    tracing::warn!(%id, reason, "Job marqué failed (échec définitif)");
+    Ok(Retry::GaveUp)
 }
 
 async fn reschedule_or_fail(db: &PgPool, id: Uuid) -> Result<Retry> {

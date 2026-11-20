@@ -46,6 +46,18 @@ pub struct EventRule {
     pub sender: SenderName,
     /// Champ qui porte l'adresse `Reply-To`.
     pub reply_to_field: Option<&'static str>,
+    /// Expéditeur (`SENDERS`) sous lequel part le mail ; `None` = l'adresse du service.
+    pub sender_id: Option<&'static str>,
+}
+
+/// Un expéditeur déclaré par le projet. La clé DKIM privée n'y est pas : elle vient de l'environnement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderDecl {
+    pub id: &'static str,
+    pub email: &'static str,
+    pub name: Option<&'static str>,
+    pub dkim_selector: &'static str,
+    pub dkim_domain: &'static str,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -113,6 +125,8 @@ pub fn rule_for(topic: &str) -> Option<&'static EventRule> {
 
 // ─── Règles du projet ─────────────────────────────────────────────────────────
 
+::SENDERS::
+
 ::EVENT_RULES::
 
 #[cfg(test)]
@@ -133,6 +147,7 @@ mod tests {
             dedup_fallback,
             sender: SenderName::Default,
             reply_to_field: None,
+            sender_id: None,
         }
     }
 

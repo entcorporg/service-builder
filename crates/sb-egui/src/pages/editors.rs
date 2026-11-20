@@ -201,6 +201,7 @@ fn new_service(name: &str, port: u16, http_port: Option<u16>, n: f64) -> Service
         },
         kind: ServiceKind::Standard,
         templates: vec![],
+        senders: vec![],
         realtime: None,
         challenge: None,
         compression: false,

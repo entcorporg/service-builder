@@ -66,6 +66,7 @@ pub fn add_service(app: &mut App, kind: ServiceKind) {
             position: at,
             kind,
             templates: vec![],
+            senders: vec![],
             realtime: None,
             challenge: None,
             compression: false,

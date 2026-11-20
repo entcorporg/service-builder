@@ -935,7 +935,7 @@ impl<'a> Checker<'a> {
                     continue; // already reported on the topic
                 }
                 if s.kind == ServiceKind::Mta {
-                    self.mail_rule(c, &cp, &topic.message);
+                    self.mail_rule(c, &cp, &topic.message, &s.senders);
                     continue;
                 }
                 if c.mail.is_some() {
@@ -1430,7 +1430,75 @@ impl<'a> Checker<'a> {
                     format!("`{}` is not a mail service: mail templates belong to a service of kind `mta`", s.name),
                 );
             }
+            if !s.senders.is_empty() {
+                self.error(
+                    "E_SENDER_OUTSIDE_MTA",
+                    format!("{base}/senders"),
+                    format!(
+                        "`{}` is not a mail service: senders belong to a service of kind `mta`",
+                        s.name
+                    ),
+                );
+            }
             return;
+        }
+        let mut sender_ids = HashSet::new();
+        for (j, sd) in s.senders.iter().enumerate() {
+            let sp = format!("{base}/senders/{j}");
+            let id_ok = sd.id.starts_with(|c: char| c.is_ascii_lowercase())
+                && sd
+                    .id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+            if !id_ok {
+                self.error(
+                    "E_SENDER_ID",
+                    format!("{sp}/id"),
+                    format!("`{}` is not a sender id (`[a-z][a-z0-9_]*`)", sd.id),
+                );
+            } else if !sender_ids.insert(sd.id.as_str()) {
+                self.error(
+                    "E_SENDER_DUPLICATE",
+                    format!("{sp}/id"),
+                    format!("sender `{}` is declared twice", sd.id),
+                );
+            }
+            let domain = sd
+                .email
+                .rsplit_once('@')
+                .map(|(_, d)| d.to_ascii_lowercase());
+            let email_ok = domain.as_deref().is_some_and(|d| d.contains('.'))
+                && !sd.email.contains(char::is_whitespace)
+                && sd.email.matches('@').count() == 1
+                && !sd.email.starts_with('@');
+            if !email_ok {
+                self.error(
+                    "E_SENDER_EMAIL",
+                    format!("{sp}/email"),
+                    format!("`{}` is not an email address", sd.email),
+                );
+            } else if sd.dkim_domain.to_ascii_lowercase() != domain.unwrap_or_default() {
+                self.error(
+                    "E_SENDER_DKIM_DOMAIN",
+                    format!("{sp}/dkimDomain"),
+                    format!(
+                        "`{}` is not the domain of `{}`: the signature would not be aligned with the From (DMARC)",
+                        sd.dkim_domain, sd.email
+                    ),
+                );
+            }
+            if sd.dkim_selector.is_empty()
+                || !sd
+                    .dkim_selector
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                self.error(
+                    "E_SENDER_DKIM_SELECTOR",
+                    format!("{sp}/dkimSelector"),
+                    format!("`{}` is not a DKIM selector", sd.dkim_selector),
+                );
+            }
         }
         for (what, empty) in [
             ("RPCs", s.rpcs.is_empty()),
@@ -1661,7 +1729,7 @@ impl<'a> Checker<'a> {
 
     /// The mail an event sends: where to read the address, the identity and the sender from, in a schema the JSON of
     /// which the mails are rendered from.
-    fn mail_rule(&mut self, c: &Consumer, cp: &str, message: &str) {
+    fn mail_rule(&mut self, c: &Consumer, cp: &str, message: &str, senders: &[MailSender]) {
         if !c.steps.is_empty() {
             self.error(
                 "E_MTA_STEPS",
@@ -1729,6 +1797,15 @@ impl<'a> Checker<'a> {
                 format!("{cp}/mail/replyTo"),
                 "the Reply-To address",
                 self,
+            );
+        }
+        if let Some(id) = &rule.sender
+            && !senders.iter().any(|s| &s.id == id)
+        {
+            self.error(
+                "E_SENDER_UNKNOWN",
+                format!("{cp}/mail/sender"),
+                format!("no sender `{id}` in the `senders` of the mail service: an unknown sender is never replaced by the default address"),
             );
         }
         // The event is rendered from its JSON: a timestamp has none yet.
@@ -9951,6 +10028,24 @@ mod tests {
         p.services.iter_mut().find(|s| s.name == "Mailer").unwrap()
     }
 
+    fn sender(id: &str) -> MailSender {
+        MailSender {
+            id: id.into(),
+            email: "achats@mon-entreprise.fr".into(),
+            name: None,
+            dkim_selector: "mail".into(),
+            dkim_domain: "mon-entreprise.fr".into(),
+        }
+    }
+
+    #[test]
+    fn a_rule_can_use_a_declared_sender() {
+        let mut p = with_mailer();
+        mailer(&mut p).senders = vec![sender("achats")];
+        mailer(&mut p).consumers[0].mail.as_mut().unwrap().sender = Some("achats".into());
+        assert!(!has_errors(&validate(&p)), "{:?}", validate(&p));
+    }
+
     use crate::maildesign::{MailBlock, MailDesign};
 
     fn with_mail_design() -> Project {
@@ -10155,7 +10250,7 @@ mod tests {
     #[test]
     fn what_a_mail_service_is_made_of_is_checked() {
         type Case<'a> = (&'a str, &'a dyn Fn(&mut Project));
-        let cases: [Case; 17] = [
+        let cases: [Case; 24] = [
             // Fixed code: nothing of its own to draw.
             ("E_MTA_CONTENT", &|p| {
                 mailer(p).jobs.push(Job {
@@ -10191,6 +10286,37 @@ mod tests {
             }),
             ("E_MTA_FIELD", &|p| {
                 mailer(p).consumers[0].mail.as_mut().unwrap().reply_to = Some("nope".into())
+            }),
+            ("E_SENDER_UNKNOWN", &|p| {
+                mailer(p).consumers[0].mail.as_mut().unwrap().sender = Some("ghost".into())
+            }),
+            ("E_SENDER_ID", &|p| {
+                mailer(p).senders = vec![sender("Achats")]
+            }),
+            ("E_SENDER_DUPLICATE", &|p| {
+                mailer(p).senders = vec![sender("achats"), sender("achats")]
+            }),
+            ("E_SENDER_EMAIL", &|p| {
+                let mut s = sender("achats");
+                s.email = "achats".into();
+                mailer(p).senders = vec![s]
+            }),
+            ("E_SENDER_DKIM_DOMAIN", &|p| {
+                let mut s = sender("achats");
+                s.dkim_domain = "autre.fr".into();
+                mailer(p).senders = vec![s]
+            }),
+            ("E_SENDER_DKIM_SELECTOR", &|p| {
+                let mut s = sender("achats");
+                s.dkim_selector = "a b".into();
+                mailer(p).senders = vec![s]
+            }),
+            ("E_SENDER_OUTSIDE_MTA", &|p| {
+                p.services
+                    .iter_mut()
+                    .find(|s| s.kind != ServiceKind::Mta)
+                    .unwrap()
+                    .senders = vec![sender("achats")]
             }),
             ("E_MTA_FIELD_TYPE", &|p| {
                 p.messages

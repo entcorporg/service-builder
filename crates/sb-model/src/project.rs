@@ -400,6 +400,9 @@ pub struct Service {
     /// afterwards (the worker reads them on every cycle).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub templates: Vec<MailTemplate>,
+    /// The extra addresses a `mta` can send from (a rule picks one with `mail.sender`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub senders: Vec<MailSender>,
     /// The settings of a `realtime` service: the channel its events come on, the path of the stream and how the access
     /// token is read. Required for that kind, refused for the others.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -564,6 +567,28 @@ pub struct MailRule {
     /// A text field with the address replies go to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<String>,
+    /// The `id` of one of the service's `senders`: the mail leaves from that address and is signed with its key. Without
+    /// it, the service's own address (`SMTP_FROM_EMAIL`) is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender: Option<String>,
+}
+
+/// An address a `mta` can send from besides its own, with its own DKIM identity. The private key is not in the project:
+/// it is read from `SENDER_<ID>_DKIM_PRIVATE_KEY_PATH` (or `..._PEM`) when the service starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MailSender {
+    /// Name a rule refers to (`[a-z][a-z0-9_]*`).
+    pub id: String,
+    /// The `From` address, e.g. `achats@mon-entreprise.fr`.
+    pub email: String,
+    /// The display name (the service's `SMTP_FROM_NAME` when empty).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// DKIM selector published in the DNS of `dkimDomain`.
+    pub dkim_selector: String,
+    /// DKIM signing domain: the domain of `email`, for the mail to be aligned (DMARC).
+    pub dkim_domain: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -2537,6 +2537,43 @@ mod tests {
     }
 
     #[test]
+    fn a_rule_can_send_from_a_declared_sender_with_its_own_dkim_identity() {
+        let mut p = with_mailer();
+        let mailer = p.services.iter_mut().find(|s| s.name == "Mailer").unwrap();
+        mailer.senders = vec![sb_model::MailSender {
+            id: "achats".into(),
+            email: "achats@mon-entreprise.fr".into(),
+            name: Some("Achats".into()),
+            dkim_selector: "achats".into(),
+            dkim_domain: "mon-entreprise.fr".into(),
+        }];
+        mailer.consumers[0].mail.as_mut().unwrap().sender = Some("achats".into());
+        let files = generate(&p).unwrap();
+        let rules = file(&files, "services/mailer/src/mta_rules.rs");
+        assert!(rules.contains("sender_id: Some(\"achats\")"), "{rules}");
+        assert!(
+            rules.contains("email: \"achats@mon-entreprise.fr\"")
+                && rules.contains("dkim_selector: \"achats\"")
+                && rules.contains("dkim_domain: \"mon-entreprise.fr\""),
+            "{rules}"
+        );
+        assert!(!rules.contains("::SENDERS::"));
+        // The key is not in the project: the config reads it from the environment, per sender.
+        let config = file(&files, "services/mailer/src/core/config.rs");
+        assert!(config.contains("SENDER_{}_DKIM_PRIVATE_KEY"));
+        // Same project, same files.
+        assert_eq!(files, generate(&p).unwrap());
+    }
+
+    #[test]
+    fn a_mail_service_without_senders_keeps_the_service_address() {
+        let files = generate(&with_mailer()).unwrap();
+        let rules = file(&files, "services/mailer/src/mta_rules.rs");
+        assert!(rules.contains("sender_id: None"));
+        assert!(rules.contains("pub const SENDERS: &[SenderDecl] = &[\n];"));
+    }
+
+    #[test]
     fn a_mail_service_comes_with_a_mail_catcher_and_its_instructions() {
         let files = generate(&with_mailer()).unwrap();
         let compose = file(&files, "docker-compose.yml");

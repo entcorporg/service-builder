@@ -442,6 +442,23 @@ fn mta_doc(svc: &Service) -> String {
     for c in &svc.consumers {
         s.push_str(&format!("- mails `{}`\n", c.topic));
     }
+    if !svc.senders.is_empty() {
+        s.push_str("\n### Senders\n\nA mail rule with `sender` leaves from that address and is signed with its own DKIM key; the sender is fixed by the event's rule, never by the payload. A rule naming a sender that is not loaded fails for good (no fallback to `SMTP_FROM_EMAIL`).\n\n");
+        for sd in &svc.senders {
+            let var = format!("SENDER_{}_DKIM_PRIVATE_KEY", sd.id.to_uppercase());
+            s.push_str(&format!(
+                "- `{id}` — `{email}`. Key: `{var}_PATH` or `{var}_PEM` (required at start-up). DNS of `{domain}`: \
+                 DKIM TXT `{sel}._domainkey.{domain}` (public key), SPF TXT allowing the IP that sends (`v=spf1 ip4:<ip> -all`), \
+                 DMARC TXT `_dmarc.{domain}` (`v=DMARC1; p=none; rua=mailto:<address>`, then tighten). The envelope sender stays \
+                 `SMTP_FROM_EMAIL` so bounces come back to this service; DMARC passes on the DKIM alignment.\n",
+                id = sd.id,
+                email = sd.email,
+                domain = sd.dkim_domain,
+                sel = sd.dkim_selector,
+            ));
+        }
+        s.push('\n');
+    }
     s.push_str(&format!(
         "\nThe mails are templates ([Tera](https://keats.github.io/tera/)) rendered with the fields of the event; they are \
          copied into the `mail_templates` table at start-up if they are not there yet, and **editable there** afterwards \

@@ -29,6 +29,11 @@ impl EmailEvent {
         self.0.sender_name(vars, default_name)
     }
 
+    /// L'expéditeur que la règle désigne (`None` = l'adresse du service).
+    pub fn sender_id(&self) -> Option<&'static str> {
+        self.0.sender_id
+    }
+
     /// Adresse `Reply-To`, si la règle en désigne une et qu'elle est renseignée.
     pub fn reply_to<'v>(&self, vars: &'v HashMap<String, Value>) -> Option<&'v str> {
         self.0.reply_to(vars)

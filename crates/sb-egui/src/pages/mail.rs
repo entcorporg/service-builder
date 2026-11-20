@@ -59,6 +59,7 @@ pub fn default_rule(p: &Project, topic: &str) -> MailRule {
         dedup_fallback: DedupFallback::TopicAndRecipient,
         sender_company_via: None,
         reply_to: None,
+        sender: None,
     }
 }
 
