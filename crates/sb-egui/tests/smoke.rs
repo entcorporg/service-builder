@@ -200,6 +200,45 @@ fn the_mail_page_opens_draws_derives_and_closes() {
     assert!(!html.contains("Bonjour {{ name }}</h1>"));
 }
 
+/// The inspector of the mail service declares senders inline, and the mail editor's rule picks one; both draw and the
+/// project stays valid, the choice following an undo.
+#[test]
+fn the_mail_service_declares_senders_and_a_rule_picks_one() {
+    let mut h = harness("showcase");
+    let si = h
+        .state()
+        .project()
+        .services
+        .iter()
+        .position(|s| s.name == "Mailer")
+        .unwrap();
+    select(h.state_mut(), Some(Sel::Service("Mailer".into())));
+    h.state_mut()
+        .edit(|p| sb_egui::pages::mail::add_sender(p, si));
+    h.run_steps(3);
+    assert_eq!(h.state().project().services[si].senders.len(), 1);
+    h.state_mut().edit(|p| {
+        p.services[si].consumers[0].mail.as_mut().unwrap().sender = Some("expediteur".into());
+    });
+    sb_egui::pages::mailcanvas::open(h.state_mut(), si, "accounts.registered");
+    h.run_steps(3);
+    assert!(
+        sb_model::validate(&h.state().project())
+            .iter()
+            .all(|d| d.severity != sb_model::Severity::Error)
+    );
+    h.state_mut().undo();
+    h.run_steps(3);
+    assert!(
+        h.state().project().services[si].consumers[0]
+            .mail
+            .as_ref()
+            .unwrap()
+            .sender
+            .is_none()
+    );
+}
+
 /// Edits made in the editor in quick succession are one entry of the history.
 #[test]
 fn grouped_edits_are_one_undo() {

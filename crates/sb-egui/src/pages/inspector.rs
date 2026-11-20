@@ -238,6 +238,8 @@ fn service(app: &mut App, ui: &mut Ui, name: &str) {
         ServiceKind::Mta => {
             separator(ui);
             super::mail::mails_section(app, ui, &project, si);
+            separator(ui);
+            super::mail::senders_section(app, ui, &project, si);
         }
         ServiceKind::Realtime => super::mail::realtime_section(app, ui, &project, si),
         ServiceKind::Standard => {}

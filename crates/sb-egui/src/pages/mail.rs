@@ -264,6 +264,140 @@ pub fn mails_section(app: &mut App, ui: &mut Ui, p: &Project, si: usize) {
     );
 }
 
+/// A sender id not yet taken by the service (`expediteur`, `expediteur2`, …).
+pub fn sender_id(svc: &sb_model::Service) -> String {
+    let mut id = "expediteur".to_string();
+    let mut i = 2;
+    while svc.senders.iter().any(|s| s.id == id) {
+        id = format!("expediteur{i}");
+        i += 1;
+    }
+    id
+}
+
+/// Declares a sender; the DKIM domain starts as the domain of its address, as DMARC wants.
+pub fn add_sender(p: &mut Project, si: usize) {
+    let id = sender_id(&p.services[si]);
+    p.services[si].senders.push(sb_model::MailSender {
+        email: format!("{id}@exemple.fr"),
+        id,
+        name: None,
+        dkim_selector: "default".into(),
+        dkim_domain: "exemple.fr".into(),
+    });
+}
+
+/// Removes sender `i`; the rules that sent from it fall back to the service address.
+pub fn delete_sender(p: &mut Project, si: usize, i: usize) {
+    let svc = &mut p.services[si];
+    if i >= svc.senders.len() {
+        return;
+    }
+    let gone = svc.senders.remove(i).id;
+    for r in svc.consumers.iter_mut().filter_map(|c| c.mail.as_mut()) {
+        if r.sender.as_deref() == Some(gone.as_str()) {
+            r.sender = None;
+        }
+    }
+}
+
+/// Renames sender `i`, the rules that use it following.
+pub fn rename_sender(p: &mut Project, si: usize, i: usize, new: &str) {
+    let svc = &mut p.services[si];
+    let Some(s) = svc.senders.get_mut(i) else {
+        return;
+    };
+    let old = std::mem::replace(&mut s.id, new.to_string());
+    for r in svc.consumers.iter_mut().filter_map(|c| c.mail.as_mut()) {
+        if r.sender.as_deref() == Some(old.as_str()) {
+            r.sender = Some(new.to_string());
+        }
+    }
+}
+
+/// The senders of a mail service in the inspector: one block per sender (address, name, DKIM), edited in place.
+pub fn senders_section(app: &mut App, ui: &mut Ui, p: &Project, si: usize) {
+    let svc = &p.services[si];
+    section(
+        ui,
+        "Expéditeurs",
+        "publish",
+        |_| {},
+        |ui| {
+            if svc.senders.is_empty() {
+                empty(
+                    ui,
+                    "Les mails partent de l’adresse du service. Déclarez un expéditeur pour envoyer sous une autre identité (achat@mon-entreprise.fr), signée par sa propre clé DKIM.",
+                );
+            }
+            for (i, s) in svc.senders.iter().enumerate() {
+                Frame::new()
+                    .fill(PANEL2)
+                    .stroke(Stroke::new(1.0, BORDER))
+                    .corner_radius(8)
+                    .inner_margin(Margin::symmetric(10, 7))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&s.id).font(mono(SM)).color(MUTED));
+                            if icon_btn(ui, "trash", &format!("Supprimer {}", s.id), true).clicked()
+                            {
+                                app.edit(|p| delete_sender(p, si, i));
+                            }
+                        });
+                        let name = s.name.clone().unwrap_or_default();
+                        let rows: [(&str, &str, &str, bool); 5] = [
+                            ("Nom", "Identifiant utilisé par les mails.", &s.id, true),
+                            (
+                                "Adresse",
+                                "L’adresse From, ex. achat@mon-entreprise.fr.",
+                                &s.email,
+                                true,
+                            ),
+                            (
+                                "Affichage",
+                                "Nom affiché ; vide : celui du service.",
+                                &name,
+                                false,
+                            ),
+                            (
+                                "Sélecteur",
+                                "Sélecteur DKIM publié dans le DNS.",
+                                &s.dkim_selector,
+                                true,
+                            ),
+                            (
+                                "Domaine",
+                                "Domaine DKIM : celui de l’adresse (DMARC).",
+                                &s.dkim_domain,
+                                true,
+                            ),
+                        ];
+                        for (k, (label, hint, value, required)) in rows.into_iter().enumerate() {
+                            let Some(v) = field(ui, label, hint, |ui| {
+                                commit_entry(ui, ("sender", si, i, k), value, true, "", !required)
+                            }) else {
+                                continue;
+                            };
+                            app.edit(|p| match k {
+                                0 => rename_sender(p, si, i, &v),
+                                1 => p.services[si].senders[i].email = v,
+                                2 => {
+                                    p.services[si].senders[i].name =
+                                        Some(v).filter(|v| !v.is_empty())
+                                }
+                                3 => p.services[si].senders[i].dkim_selector = v,
+                                _ => p.services[si].senders[i].dkim_domain = v,
+                            });
+                        }
+                    });
+            }
+            if ui.button("+ Ajouter un expéditeur").clicked() {
+                app.edit(|p| add_sender(p, si));
+            }
+        },
+    );
+}
+
 /// The sending settings of the mail of consumer `ci` (address, identity, sender, subject), applied when left.
 pub fn rule_settings(app: &mut App, ui: &mut Ui, p: &Project, si: usize, ci: usize) {
     let Some(c) = p.services[si].consumers.get(ci) else {
@@ -379,6 +513,22 @@ pub fn rule_settings(app: &mut App, ui: &mut Ui, p: &Project, si: usize, ci: usi
             });
         }
     }
+    let senders = &p.services[si].senders;
+    if !senders.is_empty() || rule.sender.is_some() {
+        let none = "(adresse du service)".to_string();
+        let mut options = vec![none.clone()];
+        options.extend(senders.iter().map(|s| s.id.clone()));
+        let selected = rule.sender.clone().unwrap_or_else(|| none.clone());
+        if let Some(v) = field(
+            ui,
+            "Expéditeur",
+            "L’expéditeur déclaré dont ce mail porte l’adresse et la signature DKIM.",
+            |ui| choice(ui, ("mail-sender", si, &topic), &options, &selected),
+        ) {
+            let v = Some(v).filter(|v| *v != none);
+            set_rule(app, &|r| r.sender = v.clone());
+        }
+    }
 }
 
 /// The section of a real-time service in the inspector: the five names it uses, applied when left.
@@ -440,5 +590,43 @@ pub fn realtime_section(app: &mut App, ui: &mut Ui, p: &Project, si: usize) {
         };
         *slot = v;
         app.edit(|p| p.services[si].realtime = Some(new));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mailer() -> (Project, usize) {
+        let p = sb_model::sample::showcase();
+        let si = p.services.iter().position(|s| s.name == "Mailer").unwrap();
+        (p, si)
+    }
+
+    #[test]
+    fn senders_are_added_renamed_and_removed_with_their_rules() {
+        let (mut p, si) = mailer();
+        add_sender(&mut p, si);
+        add_sender(&mut p, si);
+        let ids: Vec<_> = p.services[si]
+            .senders
+            .iter()
+            .map(|s| s.id.clone())
+            .collect();
+        assert_eq!(ids, ["expediteur", "expediteur2"]);
+        p.services[si].consumers[0].mail.as_mut().unwrap().sender = Some("expediteur".into());
+        rename_sender(&mut p, si, 0, "achats");
+        let sender = |p: &Project| {
+            p.services[si].consumers[0]
+                .mail
+                .as_ref()
+                .unwrap()
+                .sender
+                .clone()
+        };
+        assert_eq!(sender(&p).as_deref(), Some("achats"));
+        delete_sender(&mut p, si, 0);
+        assert_eq!(sender(&p), None);
+        assert_eq!(p.services[si].senders.len(), 1);
     }
 }
