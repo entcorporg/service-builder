@@ -2724,6 +2724,49 @@ mod tests {
     }
 
     #[test]
+    fn a_token_signed_from_the_claims_of_a_verified_one_reads_the_bound_name() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        // whoami: verifyJwt (bind = claims) then a signJwt whose `sub` reads `claims.sub`.
+        let route = p.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == "whoami")
+            .unwrap();
+        route.steps.insert(
+            1,
+            sb_model::Step::SignJwt {
+                id: "k9".into(),
+                key_env: "JWT_SIGNING_KEY".into(),
+                issuer: "orders".into(),
+                ttl_secs: 300,
+                claims: vec![sb_model::Assignment {
+                    field: "sub".into(),
+                    value: sb_model::Expr::Path {
+                        path: "claims.sub".into(),
+                    },
+                }],
+                bind: "renewed".into(),
+            },
+        );
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&p)),
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        assert!(api.contains("let claims: pb::AccessClaims ="), "{api}");
+        assert!(
+            api.contains(
+                "__claims.insert(\"sub\".to_string(), eda_runtime::jwt::json!(claims.sub.clone()));"
+            ),
+            "{api}"
+        );
+        assert!(!api.contains("let mut claims"), "{api}");
+    }
+
+    #[test]
     fn a_remote_jwks_and_a_bearer_header_are_read_from_the_environment() {
         let mut p = sample::orders();
         sample::add_jwt(&mut p);
