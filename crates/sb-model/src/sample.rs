@@ -1256,6 +1256,7 @@ pub fn add_jwt(p: &mut Project) {
                 issuer: "orders".into(),
                 schema: "AccessClaims".into(),
                 bind: "claims".into(),
+                other_issuer: None,
             },
             Step::Respond {
                 id: "k2".into(),
@@ -1316,6 +1317,7 @@ pub fn add_jwt(p: &mut Project) {
                 issuer: "orders".into(),
                 schema: "AccessClaims".into(),
                 bind: "claims".into(),
+                other_issuer: None,
             },
             Step::Respond {
                 id: "k6".into(),
@@ -1577,6 +1579,7 @@ pub fn add_passkeys(p: &mut Project) {
         issuer: "orders".into(),
         schema: "AccessClaims".into(),
         bind: "claims".into(),
+        other_issuer: None,
     };
     let route = |name: &str, route: &str, request: &str, response: &str, steps| Route {
         response_format: Default::default(),
@@ -1769,6 +1772,7 @@ pub fn add_avatars(p: &mut Project) {
         issuer: "orders".into(),
         schema: "AccessClaims".into(),
         bind: "claims".into(),
+        other_issuer: None,
     };
     let route = |name: &str, method, request: &str, response: &str, steps| Route {
         response_format: Default::default(),
@@ -1956,6 +1960,7 @@ pub fn add_api_keys(p: &mut Project) {
         issuer: "orders".into(),
         schema: "AccessClaims".into(),
         bind: "claims".into(),
+        other_issuer: None,
     };
     let routes = &mut p.services[0].routes;
     routes.push(Route {
@@ -2176,6 +2181,7 @@ pub fn add_audit(p: &mut Project) {
         issuer: "orders".into(),
         schema: "AccessClaims".into(),
         bind: "claims".into(),
+        other_issuer: None,
     };
     let routes = &mut p.services[0].routes;
     routes.push(Route {
@@ -2289,6 +2295,7 @@ pub fn add_flags(p: &mut Project) {
                 issuer: "orders".into(),
                 schema: "AccessClaims".into(),
                 bind: "claims".into(),
+                other_issuer: None,
             },
             Step::Flag {
                 id: "f2".into(),
@@ -2354,6 +2361,7 @@ pub fn add_invoices(p: &mut Project) {
                 issuer: "orders".into(),
                 schema: "AccessClaims".into(),
                 bind: "claims".into(),
+                other_issuer: None,
             },
             Step::Let {
                 id: "v2".into(),
@@ -2431,6 +2439,7 @@ pub fn add_usage(p: &mut Project) {
                 issuer: "orders".into(),
                 schema: "AccessClaims".into(),
                 bind: "claims".into(),
+                other_issuer: None,
             },
             Step::CheckQuota {
                 id: "u2".into(),
@@ -2516,6 +2525,7 @@ pub fn add_notes(p: &mut Project) {
                 issuer: "orders".into(),
                 schema: "AccessClaims".into(),
                 bind: "claims".into(),
+                other_issuer: None,
             },
             Step::Branch {
                 id: branch.into(),
@@ -2816,6 +2826,7 @@ pub fn add_sql_reads(p: &mut Project) {
             issuer: "orders".into(),
             schema: "AccessClaims".into(),
             bind: "claims".into(),
+            other_issuer: None,
         },
         Step::Branch {
             id: "q2".into(),

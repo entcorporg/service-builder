@@ -770,7 +770,9 @@ workspace généré (avec ses propres tests : `cargo test -p eda-runtime`), et v
   - `verifyJwt` (routes seulement) lit le jeton d'une expression, souvent un champ lu de l'en-tête `Authorization`
     (`bearer` en retire alors le mot `Bearer`) ou d'un cookie (voir *En-têtes et cookies*). Il
     **impose l'algorithme** : ni `none`, ni HS256 signé avec la clé publique. Émetteur, expiration (5 s de tolérance) et `sub`
-    sont vérifiés ; la clé est choisie par le `kid` du jeton. Tout refus est le même `401 invalid token`. Les claims sont lus
+    sont vérifiés ; la clé est choisie par le `kid` du jeton. Tout refus est le même `401 invalid token`, sauf si
+    `otherIssuer: {issuer, status, message, code?}` est posé : un jeton valide (signature, expiration, `sub`) d'**cet autre
+    émetteur** (jeton restreint, ex. changement de mot de passe) répond alors `status` + `{code, message, error}`. Les claims sont lus
     comme un **schéma API** que l'auteur déclare (`AccessClaims` : `sub`, `roles`…) : ils sont ensuite typés dans les étapes
     suivantes (`claims.roles`). Un claim absent prend la valeur par défaut de son champ ; un claim d'un autre type est un 401.
   - Les clés viennent soit **des graines de ce service** (il vérifie ce qu'il signe), soit du **JWKS du service qui signe**,

@@ -2845,6 +2845,34 @@ mod tests {
     }
 
     #[test]
+    fn a_token_of_another_issuer_gets_its_own_status_and_code() {
+        let mut p = sample::orders();
+        sample::add_jwt(&mut p);
+        if let sb_model::Step::VerifyJwt { other_issuer, .. } =
+            &mut p.services[0].routes[2].steps[0]
+        {
+            *other_issuer = Some(sb_model::OtherIssuer {
+                issuer: "orders-chpwd".into(),
+                status: 403,
+                message: "password change required".into(),
+                code: Some("MDP_CHANGEMENT_REQUIS".into()),
+            });
+        }
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&p)),
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        assert!(
+            api.contains("Some(eda_runtime::jwt::Other { issuer: \"orders-chpwd\", status: 403, message: \"password change required\", code: Some(\"MDP_CHANGEMENT_REQUIS\") })"),
+            "{api}"
+        );
+        assert!(file(&files, "runtime/src/jwt.rs").contains("pub async fn verify_or"));
+    }
+
+    #[test]
     fn a_remote_jwks_and_a_bearer_header_are_read_from_the_environment() {
         let mut p = sample::orders();
         sample::add_jwt(&mut p);

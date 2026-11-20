@@ -3155,10 +3155,27 @@ fn steps(
                 issuer,
                 schema,
                 bind,
+                other_issuer,
                 ..
             } => {
                 let text = TypeRef::scalar(FieldType::String);
                 let token = lower(project, scope, token, &text)?;
+                // Without another issuer the code stays what it always was: `verify(source, issuer, token)`.
+                let (call, other) = match other_issuer {
+                    Some(o) => (
+                        "verify_or",
+                        format!(
+                            "Some(eda_runtime::jwt::Other {{ issuer: {:?}, status: {}, message: {:?}, code: {} }}), ",
+                            o.issuer,
+                            o.status,
+                            o.message,
+                            o.code
+                                .as_ref()
+                                .map_or("None".to_string(), |c| format!("Some({c:?})"))
+                        ),
+                    ),
+                    None => ("verify", String::new()),
+                };
                 let source = match source {
                     sb_model::JwksSource::Keys { key_envs } => {
                         let list: Vec<String> = key_envs.iter().map(|k| format!("{k:?}")).collect();
@@ -3174,7 +3191,7 @@ fn steps(
                     c.line("let token = eda_runtime::jwt::bearer(&token);");
                 }
                 c.line(format!(
-                    "eda_runtime::jwt::claims_into(eda_runtime::jwt::verify({source}, {issuer:?}, {}).await?)?",
+                    "eda_runtime::jwt::claims_into(eda_runtime::jwt::{call}({source}, {issuer:?}, {other}{}).await?)?",
                     if *bearer { "token" } else { "&token" }
                 ));
                 c.close_with(";");

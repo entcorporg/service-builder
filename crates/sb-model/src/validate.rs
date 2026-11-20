@@ -3814,6 +3814,7 @@ impl<'a> Checker<'a> {
                 issuer,
                 schema,
                 bind,
+                other_issuer,
                 ..
             } => {
                 if !matches!(env.handler, Handler::Route { .. }) {
@@ -3825,6 +3826,31 @@ impl<'a> Checker<'a> {
                 }
                 self.check_var_name(bind, &format!("{path}/bind"));
                 self.jwt_issuer(&format!("{path}/issuer"), issuer);
+                if let Some(o) = other_issuer {
+                    self.jwt_issuer(&format!("{path}/otherIssuer/issuer"), &o.issuer);
+                    self.check_error_code(o.code.as_deref(), &format!("{path}/otherIssuer/code"));
+                    if o.issuer == *issuer {
+                        self.error(
+                            "E_JWT_OTHER_ISSUER",
+                            format!("{path}/otherIssuer/issuer"),
+                            "the other issuer must differ from `issuer`: the token would be accepted, never refused",
+                        );
+                    }
+                    if !(400..=599).contains(&o.status) {
+                        self.error(
+                            "E_FAIL_STATUS",
+                            format!("{path}/otherIssuer/status"),
+                            format!("`{}` is not an error status (400 to 599)", o.status),
+                        );
+                    }
+                    if o.message.trim().is_empty() {
+                        self.error(
+                            "E_FAIL_MESSAGE",
+                            format!("{path}/otherIssuer/message"),
+                            "say what the client is told",
+                        );
+                    }
+                }
                 let text = TypeRef::scalar(FieldType::String);
                 self.check_expr(scope, token, Some(&text), &format!("{path}/token"));
                 match source {
@@ -10760,7 +10786,22 @@ mod tests {
     #[test]
     fn verifying_a_token_and_publishing_keys_are_checked() {
         type Case<'a> = (&'a str, usize, &'a dyn Fn(&mut Step));
-        let cases: [Case; 8] = [
+        let cases: [Case; 9] = [
+            ("E_JWT_OTHER_ISSUER", 2, &|s| {
+                if let Step::VerifyJwt {
+                    issuer,
+                    other_issuer,
+                    ..
+                } = s
+                {
+                    *other_issuer = Some(OtherIssuer {
+                        issuer: issuer.clone(),
+                        status: 403,
+                        message: "no".into(),
+                        code: None,
+                    })
+                }
+            }),
             ("E_JWT_SCHEMA", 2, &|s| {
                 if let Step::VerifyJwt { schema, .. } = s {
                     *schema = "Nope".into()

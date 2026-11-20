@@ -154,6 +154,14 @@ impl JwksVerifier {
             .is_some_and(|kid| self.keys.contains_key(&kid))
     }
 
+    /// The first of `issuers` the token is valid for (its index and its claims), or `None`.
+    fn verify_any(&self, token: &str, issuers: &[&str]) -> Option<(usize, Map<String, Value>)> {
+        issuers
+            .iter()
+            .enumerate()
+            .find_map(|(i, issuer)| self.verify(token, issuer).map(|claims| (i, claims)))
+    }
+
     /// Checks the signature, the algorithm (EdDSA only), the issuer and the expiry. Whatever the reason of a
     /// refusal, `None`: the client is told nothing more than "invalid token".
     pub fn verify(&self, token: &str, issuer: &str) -> Option<Map<String, Value>> {
@@ -209,14 +217,40 @@ pub enum Source<'a> {
 
 /// The step `verifyJwt`: the claims of a valid token, or a 401 that says nothing about why.
 pub async fn verify(source: Source<'_>, issuer: &str, token: &str) -> Result<Map<String, Value>> {
-    let claims = match source {
+    verify_or(source, issuer, None, token).await
+}
+
+/// What a valid token of another issuer is answered: a status, a message and a machine code.
+pub struct Other<'a> {
+    pub issuer: &'a str,
+    pub status: u16,
+    pub message: &'a str,
+    pub code: Option<&'a str>,
+}
+
+/// Like [`verify`], but a token that is valid for `other.issuer` (same keys, signature and expiry checked) is
+/// answered with the error `other` describes instead of the generic 401.
+pub async fn verify_or(source: Source<'_>, issuer: &str, other: Option<Other<'_>>, token: &str) -> Result<Map<String, Value>> {
+    let issuers: Vec<&str> = std::iter::once(issuer).chain(other.as_ref().map(|o| o.issuer)).collect();
+    let found = match source {
         Source::Keys(envs) => {
             let jwks = jwks_json(&public_keys(envs)?);
-            JwksVerifier::from_jwks(&jwks)?.verify(token, issuer)
+            JwksVerifier::from_jwks(&jwks)?.verify_any(token, &issuers)
         }
-        Source::Url(env) => remote::verify(env, issuer, token).await?,
+        Source::Url(env) => remote::verify(env, &issuers, token).await?,
     };
-    claims.ok_or_else(|| HttpError::unauthorized("invalid token").into())
+    match (found, other) {
+        (Some((0, claims)), _) => Ok(claims),
+        (Some(_), Some(o)) => {
+            let error = HttpError::new(o.status, o.message);
+            Err(match o.code {
+                Some(code) => error.with_code(code),
+                None => error,
+            }
+            .into())
+        }
+        _ => Err(HttpError::unauthorized("invalid token").into()),
+    }
 }
 
 /// A JWKS fetched over plain HTTP from the service that signs (they talk inside the same network), kept in memory
@@ -239,7 +273,7 @@ mod remote {
 
     pub(super) static CACHE: LazyLock<Mutex<HashMap<String, Cached>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-    pub(super) async fn verify(url_env: &str, issuer: &str, token: &str) -> Result<Option<Map<String, Value>>> {
+    pub(super) async fn verify(url_env: &str, issuers: &[&str], token: &str) -> Result<Option<(usize, Map<String, Value>)>> {
         let url = jwks_url(url_env)?;
         let cached = CACHE
             .lock()
@@ -261,7 +295,7 @@ mod remote {
                 verifier
             }
         };
-        Ok(verifier.verify(token, issuer))
+        Ok(verifier.verify_any(token, issuers))
     }
 
     /// `GET` of a JWKS, `http://host[:port]/path` only.

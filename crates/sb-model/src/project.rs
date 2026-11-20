@@ -1617,6 +1617,11 @@ pub enum Step {
         issuer: String,
         schema: String,
         bind: String,
+        /// A token signed by the same keys for another issuer (a restricted token: password change required) is
+        /// answered with this status, message and machine code instead of the generic 401. Its signature, its
+        /// expiry and its `sub` are still checked: anything else stays the 401.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        other_issuer: Option<OtherIssuer>,
     },
     /// Publishes the public keys of these seeds as a JWKS (RFC 7517), into a variable of the API schema `Jwks`
     /// (`keys`: a list of `Jwk`: `kty`, `crv`, `alg`, `kid`, `x`). The first seed signs: a rotation puts the new one
@@ -1984,6 +1989,18 @@ pub struct SqlMissing {
     pub status: u16,
     pub message: String,
     /// A stable machine code, like the one of `Fail`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+}
+
+/// The answer to a valid token of another issuer (see `VerifyJwt.other_issuer`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OtherIssuer {
+    pub issuer: String,
+    pub status: u16,
+    pub message: String,
+    /// A stable machine code (`MDP_CHANGEMENT_REQUIS`): the body is `{ "code", "message", "error" }`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
 }
