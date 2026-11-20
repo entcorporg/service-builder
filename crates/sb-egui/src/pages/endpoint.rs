@@ -550,6 +550,49 @@ fn header(
                 });
             }
         });
+        // CSV: the problems of the schema (E_CSV_*) come out of the validation, in the band under this header.
+        let formats: Vec<String> = ["JSON", "CSV"].map(String::from).to_vec();
+        let word = |f: sb_model::BodyFormat| match f {
+            sb_model::BodyFormat::Json => "JSON",
+            sb_model::BodyFormat::Csv => "CSV",
+        };
+        let parse = |v: &str| {
+            if v == "CSV" {
+                sb_model::BodyFormat::Csv
+            } else {
+                sb_model::BodyFormat::Json
+            }
+        };
+        labelled_field(ui, "Corps", 80.0, |ui| {
+            if let Some(v) = choice(
+                ui,
+                ("ep-body-format", si, ri),
+                &formats,
+                word(route.body_format),
+            ) {
+                let (s, r, f) = (sname.to_string(), rname.to_string(), parse(&v));
+                app.edit(move |p| {
+                    if let Some(r) = route_mut(p, &s, &r) {
+                        r.body_format = f;
+                    }
+                });
+            }
+        });
+        labelled_field(ui, "Réponse", 80.0, |ui| {
+            if let Some(v) = choice(
+                ui,
+                ("ep-response-format", si, ri),
+                &formats,
+                word(route.response_format),
+            ) {
+                let (s, r, f) = (sname.to_string(), rname.to_string(), parse(&v));
+                app.edit(move |p| {
+                    if let Some(r) = route_mut(p, &s, &r) {
+                        r.response_format = f;
+                    }
+                });
+            }
+        });
         labelled_field(ui, "Nom", 150.0, |ui| {
             if let Some(v) = commit_entry(ui, ("ep-name", si, ri), &route.name, true, "", false) {
                 if !sb_model::names::is_snake_ident(&v) {
