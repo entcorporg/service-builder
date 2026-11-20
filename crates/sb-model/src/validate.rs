@@ -36,6 +36,14 @@ pub struct Diagnostic {
     pub path: String,
 }
 
+/// Why a text is not a machine error code (`E_ERROR_CODE`): letters, digits and `_`, starting with a letter.
+pub fn error_code_problem(code: &str) -> Option<String> {
+    let ok = code.len() <= 64
+        && code.starts_with(|c: char| c.is_ascii_alphabetic())
+        && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    (!ok).then(|| format!("`{code}` is not an error code: letters, digits and `_`, starting with a letter, 64 characters at most (e.g. STOCK_INSUFFISANT)"))
+}
+
 pub fn has_errors(diagnostics: &[Diagnostic]) -> bool {
     diagnostics.iter().any(|d| d.severity == Severity::Error)
 }
@@ -2396,15 +2404,8 @@ impl<'a> Checker<'a> {
     /// The machine code of an error answer: letters, digits and `_`, starting with a letter.
     fn check_error_code(&mut self, code: Option<&str>, path: &str) {
         let Some(code) = code else { return };
-        let ok = code.len() <= 64
-            && code.starts_with(|c: char| c.is_ascii_alphabetic())
-            && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-        if !ok {
-            self.error(
-                "E_ERROR_CODE",
-                path,
-                format!("`{code}` is not an error code: letters, digits and `_`, starting with a letter, 64 characters at most (e.g. STOCK_INSUFFISANT)"),
-            );
+        if let Some(why) = error_code_problem(code) {
+            self.error("E_ERROR_CODE", path, why);
         }
     }
 

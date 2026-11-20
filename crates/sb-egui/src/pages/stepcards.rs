@@ -472,7 +472,12 @@ fn form(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, index: usize) {
             continue;
         }
         let fid = ui.make_persistent_id(("step-field", step.id(), &spec.key));
-        let name = field_name(&spec.key);
+        // `code` is the Rust of a raw step, but the machine code of the answer for a refusal.
+        let name = if is_fail && spec.key == "code" {
+            "Code d’erreur".to_string()
+        } else {
+            field_name(&spec.key)
+        };
         // A structure is edited with widgets (and a schema picked in a list), never typed as JSON. The assignments of a
         // schema keep their own editor.
         let by_schema = matches!(spec.kind, Kind::Assignments)
@@ -580,10 +585,26 @@ fn form(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, index: usize) {
                 "Ce champ se règle par un schéma ou dans le fichier du projet, pas en JSON saisi à la main.",
             ),
             Kind::Number | Kind::Text | Kind::Words => {
+                let hint = if is_fail && spec.key == "code" {
+                    "ex. STOCK_INSUFFISANT"
+                } else {
+                    ""
+                };
                 if let Some(v) =
-                    commit_entry(ui, fid, text, !matches!(spec.kind, Kind::Text), "", true)
+                    commit_entry(ui, fid, text, !matches!(spec.kind, Kind::Text), hint, true)
                 {
                     pending = Some((i, v));
+                }
+                if is_fail
+                    && spec.key == "code"
+                    && let Some(why) = sb_model::error_code_problem(text)
+                    && !text.is_empty()
+                {
+                    ui.label(
+                        RichText::new(format!("E_ERROR_CODE : {why}"))
+                            .size(11.0)
+                            .color(Color32::from_rgb(0xe8, 0x6a, 0x6a)),
+                    );
                 }
             }
             Kind::Bool | Kind::Condition => {}

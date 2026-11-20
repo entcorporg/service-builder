@@ -853,6 +853,34 @@ mod tests {
     }
 
     #[test]
+    fn the_error_code_of_a_fail_survives_its_form() {
+        let step = Step::Fail {
+            id: "f1".into(),
+            status: 409,
+            message: "plus de stock".into(),
+            code: Some("STOCK_INSUFFISANT".into()),
+            retry_after: None,
+        };
+        let mut texts: Vec<String> = to_texts(&step).into_iter().map(|(_, t)| t).collect();
+        assert_eq!(from_texts(&step, &texts).unwrap(), step);
+        // Edited from the form: the code is replaced, then emptied.
+        let at = to_texts(&step)
+            .iter()
+            .position(|(s, _)| s.key == "code")
+            .expect("a fail shows its code");
+        texts[at] = "STOCK_EPUISE".into();
+        let Step::Fail { code, .. } = from_texts(&step, &texts).unwrap() else {
+            panic!("still a fail")
+        };
+        assert_eq!(code.as_deref(), Some("STOCK_EPUISE"));
+        texts[at] = String::new();
+        let Step::Fail { code, .. } = from_texts(&step, &texts).unwrap() else {
+            panic!("still a fail")
+        };
+        assert_eq!(code, None);
+    }
+
+    #[test]
     fn every_kind_has_a_blank_step() {
         let all = kinds();
         assert!(all.len() > 30);

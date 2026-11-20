@@ -4,7 +4,7 @@
 //! (Used by `stepcards`.) Every editor returns the new text of the field, in the form the step understands, when the
 //! user changed something.
 
-use eframe::egui::{self, Align, Frame, Layout, Margin, RichText, Stroke, Ui, Vec2};
+use eframe::egui::{self, Align, Color32, Frame, Layout, Margin, RichText, Stroke, Ui, Vec2};
 use sb_app::scope::Var;
 use sb_app::stepform::{self, Kind};
 use sb_model::{
@@ -565,6 +565,29 @@ fn missing(ui: &mut Ui, id: egui::Id, text: &str) -> Option<String> {
                 })));
             }
         });
+        ui.label(RichText::new("Code d’erreur").size(11.0).color(FAINT));
+        let code = m.code.clone().unwrap_or_default();
+        if let Some(v) = commit_entry(
+            ui,
+            id.with("code"),
+            &code,
+            true,
+            "ex. COMPTE_INTROUVABLE (facultatif)",
+            true,
+        ) {
+            let v = v.trim().to_string();
+            out = Some(push(&Some(SqlMissing {
+                code: (!v.is_empty()).then_some(v),
+                ..m.clone()
+            })));
+        }
+        if let Some(why) = sb_model::error_code_problem(&code).filter(|_| !code.is_empty()) {
+            ui.label(
+                RichText::new(format!("E_ERROR_CODE : {why}"))
+                    .size(11.0)
+                    .color(Color32::from_rgb(0xe8, 0x6a, 0x6a)),
+            );
+        }
     }
     out
 }

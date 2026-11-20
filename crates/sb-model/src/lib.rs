@@ -20,4 +20,4 @@ pub use maildesign::{
 };
 pub use pods::{Frontend, PodsConfig, TraefikConfig, TraefikHosts};
 pub use project::*;
-pub use validate::{Diagnostic, Severity, has_errors, validate};
+pub use validate::{Diagnostic, Severity, error_code_problem, has_errors, validate};
