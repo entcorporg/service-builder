@@ -17,8 +17,8 @@ use sb_model::names::route_params;
 use sb_model::names::{shouty, snake, topic_const};
 use sb_model::typing::{Scope, TypeRef};
 use sb_model::{
-    BodyFormat, CSV_MAX_BODY_BYTES, Column, ColumnType, DEFAULT_HTTP_PORT, Expr, FieldType,
-    HttpMethod, Message, Project, RequestSource, Rule, Service, SqlOp, Step, csv_list,
+    BodyFormat, CSV_MAX_BODY_BYTES, Column, ColumnType, CsvMode, DEFAULT_HTTP_PORT, Expr,
+    FieldType, HttpMethod, Message, Project, RequestSource, Rule, Service, SqlOp, Step, csv_list,
     sql_row_name,
 };
 
@@ -1275,6 +1275,7 @@ fn http_rs(project: &Project, service: &Service) -> String {
         let needs = needs_presence_check(project, r, &params);
         // A body is read as a `Value` first when some of its fields must be there: presence cannot be seen on the struct.
         let csv_in = r.body_format == BodyFormat::Csv && r.method.has_body();
+        let partial = csv_in && r.csv_mode == CsvMode::Partial;
         let checked = r.method.has_body() && needs && hmac_of(r).is_none() && !csv_in;
         let query_checked = !r.method.has_body() && !required.is_empty();
         let m = if params.is_empty() && sourced.is_empty() {
@@ -1354,7 +1355,9 @@ fn http_rs(project: &Project, service: &Service) -> String {
                 .and_then(|m| csv_list(project, m, &params).ok())
                 .expect("a CSV body has a list: checked by the validation");
             c.line(format!(
-                "let rows = eda_runtime::csv::items(&body, &{}).map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, format!(\"csv: {{}}\", e.join(\"; \"))))?;",
+                "let {} = eda_runtime::csv::{}(&body, &{}).map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, format!(\"csv: {{}}\", e.join(\"; \"))))?;",
+                if partial { "(rows, rejected)" } else { "rows" },
+                if partial { "items_partial" } else { "items" },
                 csv_columns(item)
             ));
             c.line(format!(
@@ -1461,7 +1464,14 @@ fn http_rs(project: &Project, service: &Service) -> String {
                 ));
                 c.line("        let mut response = (status, [(axum::http::header::CONTENT_TYPE, \"text/csv; charset=utf-8\")], text).into_response();");
             } else {
-                c.line("        let mut response = if status == StatusCode::NO_CONTENT { status.into_response() } else { (status, Json(reply.body)).into_response() };");
+                if partial {
+                    // The lines refused when the file was read are the runtime's to report, not the flow's.
+                    c.line("        let mut json = serde_json::to_value(&reply.body).map_err(|e| { tracing::error!(error = %e, \"the answer could not be built\"); ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, \"internal error\") })?;");
+                    c.line("        if let Some(object) = json.as_object_mut() { object.insert(\"rejected\".to_string(), serde_json::Value::Array(rejected.iter().map(eda_runtime::csv::Rejected::json).collect())); }");
+                    c.line("        let mut response = (status, Json(json)).into_response();");
+                } else {
+                    c.line("        let mut response = if status == StatusCode::NO_CONTENT { status.into_response() } else { (status, Json(reply.body)).into_response() };");
+                }
             }
             c.line("        for (name, value) in &reply.headers {");
             c.line("            // A name or value the flow computed that is not a valid header is a flaw of the flow, not of the client.");
@@ -2165,7 +2175,8 @@ fn csv_columns(item: &Message) -> String {
 /// Whether a route answers with a status or cookies of its own: its flow then returns a `Reply`.
 /// A CSV answer is one too: the handler writes the list itself.
 fn needs_reply(route: &sb_model::Route) -> bool {
-    let mut extras = route.response_format == BodyFormat::Csv;
+    let mut extras = route.response_format == BodyFormat::Csv
+        || (route.body_format == BodyFormat::Csv && route.csv_mode == CsvMode::Partial);
     for step in &route.steps {
         step.walk(&mut |s| {
             extras |= matches!(s, Step::Respond { status, cookies, headers, .. } if status.is_some() || !cookies.is_empty() || !headers.is_empty())

@@ -1257,6 +1257,47 @@ mod tests {
     }
 
     #[test]
+    fn a_partial_csv_import_keeps_the_valid_lines_and_reports_the_refused_ones() {
+        let mut p = sample::orders();
+        sample::add_basket_lines(&mut p);
+        sample::add_csv_lines(&mut p);
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&p)),
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        let files = generate(&p).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        let handler = &http[http.find("async fn handle_import_lines_partial(").unwrap()..];
+        let handler = &handler[..handler.find("\nasync fn ").unwrap_or(handler.len())];
+        assert!(
+            handler.contains("let (rows, rejected) = eda_runtime::csv::items_partial(&body,"),
+            "{handler}"
+        );
+        assert!(
+            handler.contains("\"rejected\".to_string()")
+                && handler.contains("eda_runtime::csv::Rejected::json"),
+            "{handler}"
+        );
+        assert!(!handler.contains("Json(reply.body)"), "{handler}");
+        // The all-or-nothing import next to it is as it was.
+        let strict = &http[http.find("async fn handle_import_lines(").unwrap()..];
+        let strict = &strict[..strict.find("\nasync fn ").unwrap_or(strict.len())];
+        assert!(
+            strict.contains("eda_runtime::csv::items(&body,"),
+            "{strict}"
+        );
+        assert!(!strict.contains("rejected"), "{strict}");
+        assert!(
+            file(&files, "runtime/src/csv.rs").contains("pub fn items_partial("),
+            "the runtime carries the partial read"
+        );
+        // Its flow returns a `Reply`: the handler completes the answer.
+        let flows = file(&files, "services/orders/src/flows/api.rs");
+        assert!(flows.contains("pub async fn import_lines_partial("));
+    }
+
+    #[test]
     fn a_signed_webhook_reads_the_raw_body_and_verifies_it_before_parsing() {
         let mut p = sample::orders();
         sample::add_stripe_webhook(&mut p);

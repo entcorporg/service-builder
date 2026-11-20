@@ -958,8 +958,26 @@ pub struct Route {
     /// of messages (`text/csv`, first line = header, one item per following line).
     #[serde(default, skip_serializing_if = "is_default_format")]
     pub body_format: BodyFormat,
+    /// What a CSV body does with a line that is refused when it is read (wrong cell count, a cell that is not of its
+    /// column's type): `allOrNothing` (default) refuses the whole file with a 400; `partial` keeps the valid lines and
+    /// fills the `rejected` list of the response (`{ line, column, message }`) with the others.
+    #[serde(default, skip_serializing_if = "is_default_csv_mode")]
+    pub csv_mode: CsvMode,
     #[serde(default)]
     pub steps: Vec<Step>,
+}
+
+/// How a CSV body treats the lines that are refused when it is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum CsvMode {
+    #[default]
+    AllOrNothing,
+    Partial,
+}
+
+fn is_default_csv_mode(m: &CsvMode) -> bool {
+    *m == CsvMode::AllOrNothing
 }
 
 /// The format of an HTTP body.

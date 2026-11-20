@@ -1310,6 +1310,59 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        if r.csv_mode == CsvMode::Partial {
+            let at = format!("{rp}/csvMode");
+            if r.body_format != BodyFormat::Csv {
+                self.error(
+                    "E_CSV_MODE",
+                    &at,
+                    "`partial` applies to a CSV body: set `bodyFormat` to `csv`",
+                );
+            }
+            if r.response_format == BodyFormat::Csv {
+                self.error(
+                    "E_CSV_MODE",
+                    &at,
+                    "`partial` reports the refused lines in the JSON answer: it cannot answer as CSV",
+                );
+            }
+            if r.status == 204 {
+                self.error(
+                    "E_CSV_MODE",
+                    &at,
+                    "`partial` reports the refused lines in the answer: the status cannot be 204",
+                );
+            }
+            if let Some(response) = p.message(&r.response) {
+                // The runtime fills `rejected`; the items it holds say what a refusal is made of.
+                let item = response
+                    .field("rejected")
+                    .filter(|f| f.repeated)
+                    .and_then(|f| match &f.ty {
+                        FieldType::Message { name: m } => p.message(m),
+                        _ => None,
+                    });
+                let ok = item.is_some_and(|m| {
+                    let is = |name: &str, want: &[FieldType]| {
+                        m.field(name)
+                            .is_some_and(|f| !f.repeated && want.contains(&f.ty))
+                    };
+                    is("line", &[FieldType::Int32, FieldType::Int64])
+                        && is("column", &[FieldType::String])
+                        && is("message", &[FieldType::String])
+                });
+                if !ok {
+                    self.error(
+                        "E_CSV_MODE",
+                        &at,
+                        format!(
+                            "`{}` must have a list `rejected` of a message with `line` (int32 or int64), `column` and `message` (string): the runtime fills it with the refused lines",
+                            r.response
+                        ),
+                    );
+                }
+            }
+        }
         if r.body_format == BodyFormat::Csv {
             let at = format!("{rp}/bodyFormat");
             if !r.method.has_body() {
@@ -6432,6 +6485,44 @@ mod tests {
         assert_eq!(old.body_format, BodyFormat::Json);
         let json = serde_json::to_string(csv_route(&mut csv_project(), "export_lines")).unwrap();
         assert!(json.contains("\"responseFormat\":\"csv\""));
+    }
+
+    #[test]
+    fn a_partial_csv_import_needs_a_csv_body_and_a_rejected_list_in_the_answer() {
+        let p = csv_project();
+        assert!(errors(&p).is_empty(), "{:?}", validate(&p));
+        // The default is all or nothing, and it is not written: a project saved before the option still reads.
+        let json = serde_json::to_string(csv_route(&mut csv_project(), "import_lines")).unwrap();
+        assert!(!json.contains("csvMode"));
+        let old: Route = serde_json::from_str(&json).unwrap();
+        assert_eq!(old.csv_mode, CsvMode::AllOrNothing);
+        let json =
+            serde_json::to_string(csv_route(&mut csv_project(), "import_lines_partial")).unwrap();
+        assert!(json.contains("\"csvMode\":\"partial\""));
+
+        let mut p = csv_project();
+        csv_route(&mut p, "import_lines_partial").body_format = BodyFormat::Json;
+        assert!(errors(&p).contains(&"E_CSV_MODE".into()), "a JSON body");
+
+        let mut p = csv_project();
+        csv_route(&mut p, "import_lines_partial").response = "AddedLines".into();
+        assert!(
+            errors(&p).contains(&"E_CSV_MODE".into()),
+            "no rejected list"
+        );
+
+        let mut p = csv_project();
+        p.messages
+            .iter_mut()
+            .find(|m| m.name == "CsvRejected")
+            .unwrap()
+            .fields
+            .retain(|f| f.name != "column");
+        assert!(errors(&p).contains(&"E_CSV_MODE".into()), "no column");
+
+        let mut p = csv_project();
+        csv_route(&mut p, "import_lines_partial").status = 204;
+        assert!(errors(&p).contains(&"E_CSV_MODE".into()), "no content");
     }
 
     #[test]

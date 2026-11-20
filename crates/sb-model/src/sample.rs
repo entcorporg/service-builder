@@ -275,6 +275,7 @@ pub fn orders() -> Project {
             Route {
                 response_format: Default::default(),
                 body_format: Default::default(),
+                csv_mode: Default::default(),
                 name: "place_order".into(),
                 method: HttpMethod::Post,
                 path: "/orders".into(),
@@ -374,6 +375,7 @@ pub fn orders() -> Project {
             Route {
                 response_format: Default::default(),
                 body_format: Default::default(),
+                csv_mode: Default::default(),
                 name: "get_order".into(),
                 method: HttpMethod::Get,
                 path: "/orders/{order_id}".into(),
@@ -593,6 +595,7 @@ pub fn add_single_use_token(p: &mut Project) {
     service.routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "verify_email".into(),
         method: HttpMethod::Post,
         path: "/verify-email".into(),
@@ -760,6 +763,7 @@ pub fn add_stripe_webhook(p: &mut Project) {
     p.services[0].routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "stripe_webhook".into(),
         method: HttpMethod::Post,
         path: "/webhook/stripe".into(),
@@ -804,6 +808,7 @@ pub fn add_sealed_text(p: &mut Project) {
     p.services[0].routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "seal_text".into(),
         method: HttpMethod::Post,
         path: "/notes/seal".into(),
@@ -869,6 +874,7 @@ pub fn add_signup(p: &mut Project) {
     p.services[0].routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "signup".into(),
         method: HttpMethod::Post,
         path: "/signup".into(),
@@ -920,6 +926,7 @@ pub fn add_challenge(p: &mut Project) {
     p.services[0].routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "contact".into(),
         method: HttpMethod::Post,
         path: "/contact".into(),
@@ -1079,6 +1086,7 @@ pub fn add_login(p: &mut Project) {
     p.services[0].routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+ csv_mode: Default::default(),
         name: "login".into(),
         method: HttpMethod::Post,
         path: "/login".into(),
@@ -1226,6 +1234,7 @@ pub fn add_jwt(p: &mut Project) {
     p.services[0].routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "whoami".into(),
         method: HttpMethod::Get,
         path: "/whoami".into(),
@@ -1260,6 +1269,7 @@ pub fn add_jwt(p: &mut Project) {
     p.services[0].routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "jwks".into(),
         method: HttpMethod::Get,
         path: "/.well-known/jwks.json".into(),
@@ -1285,6 +1295,7 @@ pub fn add_jwt(p: &mut Project) {
     p.services[0].routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "session".into(),
         method: HttpMethod::Get,
         path: "/session".into(),
@@ -1400,6 +1411,7 @@ pub fn add_totp(p: &mut Project) {
     let route = |name: &str, path: &str, request: &str, response: &str, steps| Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: name.into(),
         method: HttpMethod::Post,
         path: path.into(),
@@ -1566,6 +1578,7 @@ pub fn add_passkeys(p: &mut Project) {
     let route = |name: &str, route: &str, request: &str, response: &str, steps| Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: name.into(),
         method: HttpMethod::Post,
         path: route.into(),
@@ -1757,6 +1770,7 @@ pub fn add_avatars(p: &mut Project) {
     let route = |name: &str, method, request: &str, response: &str, steps| Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: name.into(),
         method,
         path: "/avatar".into(),
@@ -1944,6 +1958,7 @@ pub fn add_api_keys(p: &mut Project) {
     routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "issue_api_key".into(),
         method: HttpMethod::Post,
         path: "/tenant/api-keys".into(),
@@ -1977,6 +1992,7 @@ pub fn add_api_keys(p: &mut Project) {
     routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "revoke_api_key".into(),
         method: HttpMethod::Delete,
         path: "/tenant/api-keys/{key_id}".into(),
@@ -2003,6 +2019,7 @@ pub fn add_api_keys(p: &mut Project) {
     routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "machine_orders".into(),
         method: HttpMethod::Get,
         path: "/machine/orders".into(),
@@ -2051,6 +2068,7 @@ pub fn add_calendar(p: &mut Project) {
     p.services[0].routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "calendar".into(),
         method: HttpMethod::Get,
         path: "/calendar/{zone}".into(),
@@ -2160,6 +2178,7 @@ pub fn add_audit(p: &mut Project) {
     routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "send_invoice".into(),
         method: HttpMethod::Post,
         path: "/tenant/invoices/{invoice_id}/send".into(),
@@ -2191,6 +2210,7 @@ pub fn add_audit(p: &mut Project) {
     routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "audit_journal".into(),
         method: HttpMethod::Get,
         path: "/tenant/audit".into(),
@@ -2248,6 +2268,7 @@ pub fn add_flags(p: &mut Project) {
     p.services[0].routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "checkout_flag".into(),
         method: HttpMethod::Get,
         path: "/checkout/flag".into(),
@@ -2312,6 +2333,7 @@ pub fn add_invoices(p: &mut Project) {
     p.services[0].routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "issue_invoice".into(),
         method: HttpMethod::Post,
         path: "/tenant/invoices".into(),
@@ -2388,6 +2410,7 @@ pub fn add_usage(p: &mut Project) {
     p.services[0].routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "usage_report".into(),
         method: HttpMethod::Get,
         path: "/tenant/usage".into(),
@@ -2564,6 +2587,7 @@ pub fn add_notes(p: &mut Project) {
     let route = |name: &str, method, route: &str, request: &str, response: &str, steps| Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: name.into(),
         method,
         path: route.into(),
@@ -2883,6 +2907,7 @@ pub fn add_sql_reads(p: &mut Project) {
     p.services[0].routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "list_posts".into(),
         method: HttpMethod::Get,
         path: "/tenant/posts".into(),
@@ -3311,6 +3336,7 @@ pub fn add_basket_lines(p: &mut Project) {
     p.services[0].routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "add_lines".into(),
         method: HttpMethod::Post,
         path: "/orders/{order_id}/lines".into(),
@@ -3387,6 +3413,7 @@ pub fn add_basket_lines(p: &mut Project) {
     p.services[0].routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "get_lines".into(),
         method: HttpMethod::Get,
         path: "/orders/{order_id}/lines".into(),
@@ -3425,6 +3452,33 @@ pub fn add_csv_lines(p: &mut Project) {
         name: "import_lines".into(),
         path: "/orders/{order_id}/lines/import".into(),
         body_format: BodyFormat::Csv,
+        ..add.clone()
+    });
+    // The same import that keeps the valid lines: the refused ones come back in `rejected`.
+    let mut rejected = msg_field("rejected", "CsvRejected");
+    rejected.repeated = true;
+    p.messages.push(api(
+        "CsvRejected",
+        vec![
+            field("line", FieldType::Int32),
+            field("column", FieldType::String),
+            field("message", FieldType::String),
+        ],
+    ));
+    p.messages.push(api(
+        "ImportedLines",
+        vec![
+            field("count", FieldType::Int64),
+            field("summary", FieldType::String),
+            rejected,
+        ],
+    ));
+    p.services[0].routes.push(Route {
+        name: "import_lines_partial".into(),
+        path: "/orders/{order_id}/lines/import-partial".into(),
+        response: "ImportedLines".into(),
+        body_format: BodyFormat::Csv,
+        csv_mode: CsvMode::Partial,
         ..add
     });
     p.services[0].routes.push(Route {
@@ -3465,6 +3519,7 @@ pub fn add_receipts(p: &mut Project) {
     p.services[0].routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "put_receipt".into(),
         method: HttpMethod::Put,
         path: "/orders/{order_id}/receipt".into(),
@@ -3543,6 +3598,7 @@ pub fn add_http_calls(p: &mut Project) {
     routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "create_payment_intent".into(),
         method: HttpMethod::Post,
         path: "/payments/intents".into(),
@@ -3595,6 +3651,7 @@ pub fn add_http_calls(p: &mut Project) {
     routes.push(Route {
         response_format: Default::default(),
         body_format: Default::default(),
+        csv_mode: Default::default(),
         name: "send_sms".into(),
         method: HttpMethod::Post,
         path: "/sms".into(),

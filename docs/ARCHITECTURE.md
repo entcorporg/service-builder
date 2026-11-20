@@ -254,11 +254,16 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
     lue passe alors par les mêmes contrôles qu'un corps JSON (champs obligatoires, règles) puis le flux : `forEach` sur la
     liste et `sql insert` dans la transaction de la route, donc **tout ou rien** (une ligne refusée par le flux — *Refuser*
     dans la boucle — annule les autres).
+  - **Import partiel** : `csvMode: "partial"` (défaut `allOrNothing`, omis du JSON : pas de migration). Les lignes refusées à
+    la lecture (nombre de cellules, cellule du mauvais type) ne refusent plus le fichier : les lignes valides passent au flux
+    et les autres sont rendues dans le champ liste `rejected` de la réponse, rempli par le runtime (`{ line, column, message }`,
+    50 au plus ; `column` vide si c'est la ligne entière). Le schéma de réponse doit porter ce champ (`E_CSV_MODE`). Un en-tête
+    faux ou un CSV mal formé (guillemet) refuse toujours le fichier ; les règles du schéma restent celles du corps entier.
   - Validation : `E_CSV_RESPONSE` (204, pas une seule liste, élément pas à plat, autre champ dans la réponse), `E_CSV_BODY`
     (méthode sans corps, pas une seule liste, champ obligatoire hors de la liste, webhook signé). OpenAPI : `text/csv`, avec les colonnes
     dans la description. Le module `runtime/src/csv.rs` porte l'écriture et la lecture, avec ses tests.
   - Limites : le corps est lu en entier en mémoire (pas de flux) ; un fichier avec une ligne refusée est refusé en entier
-    (pas d'import partiel qui rapporte et garde le reste) ; séparateur `,` seulement ; le texte qui commence par `=`, `+`, `-` ou `@`
+    sauf en `csvMode: "partial"` ; séparateur `,` seulement ; le texte qui commence par `=`, `+`, `-` ou `@`
     est écrit tel quel (un tableur peut le lire comme une formule) ; pas d'encodage autre qu'UTF-8.
 - **Spécification OpenAPI** : chaque service qui a des routes écrit `services/<nom>/openapi.json`, un document **OpenAPI 3.1**
   dérivé du même modèle que les handlers (`sb-codegen/src/openapi.rs`), visible dans l'onglet « Code généré » comme les
