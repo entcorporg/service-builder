@@ -578,6 +578,28 @@ fn header(
                 });
             }
         });
+        if route.body_format == sb_model::BodyFormat::Csv {
+            let modes: Vec<String> = ["Tout ou rien", "Partiel"].map(String::from).to_vec();
+            let current = match route.csv_mode {
+                sb_model::CsvMode::AllOrNothing => "Tout ou rien",
+                sb_model::CsvMode::Partial => "Partiel",
+            };
+            labelled_field(ui, "Import CSV", 80.0, |ui| {
+                if let Some(v) = choice(ui, ("ep-csv-mode", si, ri), &modes, current) {
+                    let mode = if v == "Partiel" {
+                        sb_model::CsvMode::Partial
+                    } else {
+                        sb_model::CsvMode::AllOrNothing
+                    };
+                    let (s, r) = (sname.to_string(), rname.to_string());
+                    app.edit(move |p| {
+                        if let Some(r) = route_mut(p, &s, &r) {
+                            r.csv_mode = mode;
+                        }
+                    });
+                }
+            });
+        }
         labelled_field(ui, "Réponse", 80.0, |ui| {
             if let Some(v) = choice(
                 ui,
