@@ -28,6 +28,8 @@ use crate::http::HttpError;
 
 /// How much of a password is judged.
 const JUDGED_CHARS: usize = 100;
+/// The code of a refusal on length when the step names none.
+const DEFAULT_LENGTH_CODE: &str = "MOT_DE_PASSE_INVALIDE";
 const DEFAULT_RANGE_API: &str = "https://api.pwnedpasswords.com";
 const RANGE_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -64,7 +66,36 @@ pub fn judge(password: &str, inputs: &[&str]) -> Judgment {
 /// The step. `Ok(score)` when the password is at least `min_score` (and, with `breached`, not in a known breach); otherwise a
 /// 400 that tells the visitor what to change. The password is not kept, logged or sent anywhere but as the five characters
 /// described at the top of this file.
-pub async fn check(password: &str, inputs: &[&str], min_score: u8, breached: bool) -> Result<u8> {
+pub async fn check(
+    password: &str,
+    inputs: &[&str],
+    min_score: u8,
+    breached: bool,
+    lengths: (Option<u32>, Option<u32>),
+    code: Option<&str>,
+) -> Result<u8> {
+    // The length is counted in characters, as typed (no trim), and comes first: a refusal that costs nothing.
+    let chars = password.chars().count();
+    let (min_length, max_length) = lengths;
+    let refuse = |message: String, default_code: Option<&str>| -> anyhow::Error {
+        let error = HttpError::new(400, message);
+        match code.or(default_code) {
+            Some(code) => error.with_code(code).into(),
+            None => error.into(),
+        }
+    };
+    if let Some(min) = min_length.filter(|min| chars < *min as usize) {
+        return Err(refuse(
+            format!("password: at least {min} characters"),
+            Some(DEFAULT_LENGTH_CODE),
+        ));
+    }
+    if let Some(max) = max_length.filter(|max| chars > *max as usize) {
+        return Err(refuse(
+            format!("password: at most {max} characters"),
+            Some(DEFAULT_LENGTH_CODE),
+        ));
+    }
     let (password_owned, inputs_owned): (String, Vec<String>) =
         (password.to_owned(), inputs.iter().map(|i| (*i).to_owned()).collect());
     let judgment = tokio::task::spawn_blocking(move || {
@@ -77,18 +108,17 @@ pub async fn check(password: &str, inputs: &[&str], min_score: u8, breached: boo
             Some(reason) => format!("password: too easy to guess ({reason})"),
             None => "password: too easy to guess".to_string(),
         };
-        return Err(HttpError::new(400, message).into());
+        return Err(refuse(message, None));
     }
     if breached {
         let base = std::env::var("PWNED_PASSWORDS_URL").unwrap_or_else(|_| DEFAULT_RANGE_API.to_string());
         match breach_count(base.trim_end_matches('/'), password).await {
             Ok(0) => {}
             Ok(_) => {
-                return Err(HttpError::new(
-                    400,
-                    "password: found in a known data breach, choose another one",
-                )
-                .into());
+                return Err(refuse(
+                    "password: found in a known data breach, choose another one".to_string(),
+                    None,
+                ));
             }
             Err(error) => tracing::warn!(%error, "breached passwords: the range API did not answer, the password is let through"),
         }
@@ -199,12 +229,35 @@ mod tests {
 
     #[tokio::test]
     async fn a_weak_password_is_a_400_that_says_why_and_a_good_one_has_its_score_back() {
-        let (status, message) = refused(check("password", &[], 3, false).await.unwrap_err());
+        let (status, message) = refused(check("password", &[], 3, false, (None, None), None).await.unwrap_err());
         assert_eq!(status, 400);
         assert!(message.starts_with("password: too easy to guess"), "{message}");
-        assert_eq!(check("q7#Vf!z9Lm2@xT4w", &[], 3, false).await.unwrap(), 4);
+        assert_eq!(check("q7#Vf!z9Lm2@xT4w", &[], 3, false, (None, None), None).await.unwrap(), 4);
         // The minimum is the service's: a score of 1 is enough for a minimum of 1, and not for 4.
-        assert!(check("password1", &[], 0, false).await.is_ok());
+        assert!(check("password1", &[], 0, false, (None, None), None).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn the_length_is_refused_first_with_a_stable_code() {
+        let strong = "q7#Vf!z9Lm2@xT4w";
+        let bounds = (Some(20), Some(24));
+        let code = |e: anyhow::Error| e.downcast_ref::<HttpError>().unwrap().code.clone();
+        let short = check(strong, &[], 3, false, bounds, None).await.unwrap_err();
+        assert_eq!(refused_status(&short), 400);
+        assert_eq!(code(short), Some("MOT_DE_PASSE_INVALIDE".to_string()));
+        let long = check(&"a".repeat(25), &[], 0, false, bounds, Some("TROP_LONG")).await.unwrap_err();
+        assert_eq!(code(long), Some("TROP_LONG".to_string()));
+        // Characters, not bytes: 20 accents are 20.
+        assert!(check(&"é".repeat(20), &[], 0, false, bounds, None).await.is_ok());
+        // A weakness refusal carries a code only when the step names one.
+        let weak = check("password", &[], 3, false, (None, None), None).await.unwrap_err();
+        assert_eq!(code(weak), None);
+        let weak = check("password", &[], 3, false, (None, None), Some("FAIBLE")).await.unwrap_err();
+        assert_eq!(code(weak), Some("FAIBLE".to_string()));
+    }
+
+    fn refused_status(error: &anyhow::Error) -> u16 {
+        error.downcast_ref::<HttpError>().expect("an HTTP error").status
     }
 
     /// A server that answers one request with the given body, on a local port. Returns its address.

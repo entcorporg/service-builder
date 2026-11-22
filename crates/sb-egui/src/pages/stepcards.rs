@@ -210,6 +210,8 @@ fn field_name(key: &str) -> String {
         "period" => "Période (UTC)",
         "wanted" => "Quantité demandée (1 par défaut)",
         "minScore" => "Score minimum (0 à 4)",
+        "minLength" => "Longueur minimale (caractères)",
+        "maxLength" => "Longueur maximale (caractères)",
         "sequence" => "Suite de numéros (ex. invoices)",
         "targetType" => "Type de la cible (ex. invoice)",
         "subject" => "Sujet (compte, société)",

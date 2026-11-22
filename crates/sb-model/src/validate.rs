@@ -4595,9 +4595,20 @@ impl<'a> Checker<'a> {
                 password,
                 min_score,
                 inputs,
+                min_length,
+                max_length,
                 bind,
                 ..
             } => {
+                if let (Some(min), Some(max)) = (min_length, max_length) {
+                    if min > max {
+                        self.error(
+                            "E_PASSWORD_LENGTH",
+                            format!("{path}/minLength"),
+                            "minLength is above maxLength: no password would pass",
+                        );
+                    }
+                }
                 if !matches!(env.handler, Handler::Route { .. }) {
                     self.error(
                         "E_PASSWORD_OUTSIDE_ROUTE",
@@ -8114,6 +8125,9 @@ mod tests {
             min_score,
             inputs: vec![],
             refuse_breached: false,
+            min_length: None,
+            max_length: None,
+            code: None,
             bind: bind.map(String::from),
         };
         let lit = |v: &str| Expr::Literal { value: v.into() };
@@ -8134,6 +8148,21 @@ mod tests {
         check(strength(0, lit("x"), None), None);
         check(strength(4, lit("x"), None), None);
         check(strength(5, lit("x"), None), Some("E_PASSWORD_SCORE"));
+        let mut bounded = strength(3, lit("x"), None);
+        if let Step::PasswordStrength {
+            min_length,
+            max_length,
+            ..
+        } = &mut bounded
+        {
+            *min_length = Some(12);
+            *max_length = Some(128);
+        }
+        check(bounded.clone(), None);
+        if let Step::PasswordStrength { min_length, .. } = &mut bounded {
+            *min_length = Some(200);
+        }
+        check(bounded, Some("E_PASSWORD_LENGTH"));
         check(
             strength(3, Expr::Literal { value: 5.into() }, None),
             Some("E_TYPE_MISMATCH"),

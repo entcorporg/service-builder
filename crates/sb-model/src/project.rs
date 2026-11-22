@@ -1669,6 +1669,14 @@ pub enum Step {
         /// log says so): a service must not stop signing people up because another one is down.
         #[serde(default)]
         refuse_breached: bool,
+        /// Shortest and longest accepted, in characters as typed (no trim), checked before the score: a 400 with `code`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_length: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_length: Option<u32>,
+        /// The stable machine code of the refusals (`MOT_DE_PASSE_INVALIDE` for a length when unset; none on the others).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
         #[serde(default)]
         bind: Option<String>,
     },

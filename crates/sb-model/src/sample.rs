@@ -942,6 +942,9 @@ pub fn add_signup(p: &mut Project) {
                 min_score: DEFAULT_MIN_PASSWORD_SCORE,
                 inputs: vec![path("input.email")],
                 refuse_breached: true,
+                min_length: None,
+                max_length: None,
+                code: None,
                 bind: None,
             },
             Step::HashPassword {

@@ -349,7 +349,7 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
     accepté. Limites : une preuve de travail ralentit un robot, elle ne l'arrête pas ; elle n'est pas une preuve d'humanité (ni
     reconnaissance de comportement, ni réputation d'adresse) et se règle par `maxNumber` contre le temps passé par un visiteur sur
     un téléphone. Elle s'ajoute à `rateLimit` (par adresse, par compte), elle ne le remplace pas.
-- **Robustesse d'un mot de passe** : l'étape `passwordStrength { password, minScore, inputs, refuseBreached, bind }` juge un
+- **Robustesse d'un mot de passe** : l'étape `passwordStrength { password, minScore, inputs, refuseBreached, minLength, maxLength, code, bind }` (`minLength`/`maxLength` : caractères sans trim, vérifiés avant le score, 400 avec `code`, `MOT_DE_PASSE_INVALIDE` par défaut pour une longueur ; les autres refus n'ont de code que si `code` est posé) juge un
   mot de passe **avant** `hashPassword`. Elle estime la facilité à le deviner avec [zxcvbn](https://github.com/shssoichiro/zxcvbn-rs)
   (MIT) : dictionnaires et mots de passe courants, prénoms, suites de touches, dates, répétitions, substitutions « l33t », et les
   `inputs` du compte (l'e-mail, le nom : chacun compte, ainsi que chacun de ses mots de trois caractères ou plus, car

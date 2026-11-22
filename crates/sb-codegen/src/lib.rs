@@ -1866,7 +1866,7 @@ mod tests {
         let api = file(&files, "services/orders/src/flows/api.rs").replace('\n', " ");
         let api = api.split_whitespace().collect::<Vec<_>>().join(" ");
         let judge = api
-            .find("eda_runtime::password::check(&(input.password.clone()), &[(input.email.clone()).as_str()], 3, true).await?;")
+            .find("eda_runtime::password::check(&(input.password.clone()), &[(input.email.clone()).as_str()], 3, true, (None, None), None).await?;")
             .unwrap_or_else(|| panic!("{api}"));
         let hash = api.find("eda_runtime::crypto::hash_password").unwrap();
         assert!(judge < hash, "the password is judged before it is hashed");

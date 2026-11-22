@@ -3041,6 +3041,9 @@ fn steps(
                 min_score,
                 inputs,
                 refuse_breached,
+                min_length,
+                max_length,
+                code,
                 bind,
                 ..
             } => {
@@ -3053,8 +3056,12 @@ fn steps(
                         lower(project, scope, input, &text)?
                     ));
                 }
+                let code = match code {
+                    Some(code) => format!("Some({code:?})"),
+                    None => "None".to_string(),
+                };
                 let call = format!(
-                    "eda_runtime::password::check(&({password}), &[{}], {min_score}, {refuse_breached}).await?",
+                    "eda_runtime::password::check(&({password}), &[{}], {min_score}, {refuse_breached}, ({min_length:?}, {max_length:?}), {code}).await?",
                     words.join(", ")
                 );
                 match bind {
