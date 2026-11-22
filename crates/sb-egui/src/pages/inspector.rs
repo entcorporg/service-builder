@@ -252,6 +252,7 @@ fn service(app: &mut App, ui: &mut Ui, name: &str) {
     rpcs(app, ui, &project, si);
     routes(app, ui, svc, &sname);
     compression(app, ui, svc, &sname);
+    graphql(app, ui, svc, &sname);
     challenge(app, ui, svc, &sname);
     consumers(app, ui, &project, si);
     jobs(app, ui, svc, si);
@@ -284,6 +285,36 @@ fn compression(app: &mut App, ui: &mut Ui, svc: &Service, sname: &str) {
         app.edit(|p| {
             if let Some(s) = svc_mut(p, &sname) {
                 s.compression = on;
+            }
+        });
+    }
+}
+
+/// Whether the service also serves its tables as a GraphQL API (SDL contract and POST /graphql): shown once it has routes.
+fn graphql(app: &mut App, ui: &mut Ui, svc: &Service, sname: &str) {
+    if svc.routes.is_empty() {
+        return;
+    }
+    let current = svc.graphql;
+    let set = section(
+        ui,
+        "GraphQL",
+        "publish",
+        |_| {},
+        |ui| {
+            field(
+                ui,
+                "Exposer en GraphQL",
+                "Écrit le schéma dans contracts/graphql et sert POST /graphql : lecture des tables (par id et connexions paginées) et mutations qui rejouent les routes d’écriture, avec le même cookie, le même tenant et les mêmes erreurs.",
+                |ui| crate::widgets::check(ui, current, "Le service sert une API GraphQL"),
+            )
+        },
+    );
+    if let Some(on) = set {
+        let sname = sname.to_string();
+        app.edit(|p| {
+            if let Some(s) = svc_mut(p, &sname) {
+                s.graphql = on;
             }
         });
     }
