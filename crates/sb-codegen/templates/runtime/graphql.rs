@@ -158,7 +158,7 @@ fn mutation_field(m: &'static Mutation) -> Field {
         FieldFuture::new(async move {
             let lb = ctx.data::<Loopback>().map_err(|_| refuse("NON_AUTHENTIFIE", "not signed in"))?;
             if !m.roles.is_empty() {
-                let access = ctx.data::<Access>().map_err(internal)?;
+                let access = ctx.data::<Access>().map_err(|_| refuse("NON_AUTHENTIFIE", "not signed in"))?;
                 if !m.roles.iter().any(|r| access.roles.iter().any(|h| h == r)) {
                     return Err(refuse("ACCES_REFUSE", "your role cannot call this mutation"));
                 }
