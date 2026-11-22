@@ -421,8 +421,11 @@ pub struct Service {
     #[serde(default, skip_serializing_if = "is_false")]
     pub compression: bool,
     /// Describe the service's tables as a GraphQL schema (`contracts/graphql/<service>.graphql`): one type per table, read
-    /// queries by key and as paginated connections, and the relations its foreign keys draw. Only the schema is generated for
-    /// now; a frontend can already read it to know what one call will be able to fetch.
+    /// queries by key and as paginated connections, and the relations its foreign keys draw. When the service also has routes
+    /// and a `verifyJwt` step, it serves `POST /graphql` (read only): the cookie `access_token` is checked like that step does,
+    /// the tenant is the claim `tenantId` (or `tenant_id`), errors carry a machine code in `errors[].extensions.code`
+    /// (`NON_AUTHENTIFIE` without a valid cookie), depth and complexity are limited (`GRAPHQL_MAX_DEPTH`,
+    /// `GRAPHQL_MAX_COMPLEXITY`) and `GRAPHQL_INTROSPECTION=off` turns introspection off. Mutations are not served yet.
     #[serde(default, skip_serializing_if = "is_false")]
     pub graphql: bool,
     /// Named sequences of steps, written once and played by an `include` step in any handler of the service.

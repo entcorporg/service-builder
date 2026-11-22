@@ -37,6 +37,7 @@ const RUNTIME_PASSWORD: &str = include_str!("../templates/runtime/password.rs");
 const RUNTIME_USAGE: &str = include_str!("../templates/runtime/usage.rs");
 const RUNTIME_RATE_LIMIT: &str = include_str!("../templates/runtime/rate_limit.rs");
 const CONTRACTS_JSON: &str = include_str!("../templates/contracts/json.rs");
+const RUNTIME_GRAPHQL: &str = include_str!("../templates/runtime/graphql.rs");
 const RUNTIME_CARGO: &str = include_str!("../templates/runtime/Cargo.toml");
 
 pub fn files(project: &Project) -> Vec<GeneratedFile> {
@@ -53,8 +54,8 @@ pub fn files(project: &Project) -> Vec<GeneratedFile> {
             format!("contracts/proto/{proto_name}"),
             proto::generate(project),
         ),
-        GeneratedFile::new("runtime/Cargo.toml", RUNTIME_CARGO),
-        GeneratedFile::new("runtime/src/lib.rs", RUNTIME_LIB),
+        GeneratedFile::new("runtime/Cargo.toml", runtime_cargo(project)),
+        GeneratedFile::new("runtime/src/lib.rs", runtime_lib(project)),
         GeneratedFile::new("runtime/src/outbox.rs", RUNTIME_OUTBOX),
         GeneratedFile::new("runtime/src/db.rs", RUNTIME_DB),
         GeneratedFile::new("runtime/src/crypto.rs", RUNTIME_CRYPTO),
@@ -87,10 +88,46 @@ pub fn files(project: &Project) -> Vec<GeneratedFile> {
     if let Some(doc) = crate::asyncapi::asyncapi_yaml(project) {
         files.push(GeneratedFile::new("asyncapi.yaml", doc));
     }
+    if serves_graphql(project) {
+        files.push(GeneratedFile::new(
+            "runtime/src/graphql.rs",
+            RUNTIME_GRAPHQL,
+        ));
+    }
     if json_adapters(project) {
         files.push(GeneratedFile::new("contracts/src/json.rs", CONTRACTS_JSON));
     }
     files
+}
+
+/// Whether a service of the project serves `POST /graphql`: the engine is only built into the runtime then.
+fn serves_graphql(project: &Project) -> bool {
+    project.services.iter().any(crate::graphql::serves_endpoint)
+}
+
+fn runtime_cargo(project: &Project) -> String {
+    if !serves_graphql(project) {
+        return RUNTIME_CARGO.to_string();
+    }
+    RUNTIME_CARGO
+        .replace(
+            "axum = { workspace = true, optional = true }\n",
+            "axum = { workspace = true, optional = true }\nasync-graphql = { workspace = true, optional = true }\n",
+        )
+        .replace(
+            "[features]\n",
+            "[features]\n# The GraphQL endpoint (`graphql`) brings async-graphql in: only the services that serve it turn this on.\ngraphql = [\"dep:async-graphql\"]\n",
+        )
+}
+
+fn runtime_lib(project: &Project) -> String {
+    if !serves_graphql(project) {
+        return RUNTIME_LIB.to_string();
+    }
+    RUNTIME_LIB.replace(
+        "pub mod validation;\n",
+        "pub mod validation;\n#[cfg(feature = \"graphql\")]\npub mod graphql;\n",
+    )
 }
 
 /// The messages that travel as JSON: the API schemas, and the events a mail service renders its mails from.
@@ -216,10 +253,15 @@ rlimit = "0.10"
 bytes = "1"
 httparse = "1"
 thiserror = "2"
-webauthn-rs = {{ version = "0.5", features = ["danger-allow-state-serialisation", "conditional-ui"] }}
+{graphql}webauthn-rs = {{ version = "0.5", features = ["danger-allow-state-serialisation", "conditional-ui"] }}
 webauthn-authenticator-rs = {{ version = "0.5", default-features = false, features = ["softtoken"] }}
 "#,
-        members.join(", ")
+        members.join(", "),
+        graphql = if serves_graphql(project) {
+            "async-graphql = { version = \"7\", default-features = false, features = [\"dynamic-schema\"] }\n"
+        } else {
+            ""
+        }
     )
 }
 

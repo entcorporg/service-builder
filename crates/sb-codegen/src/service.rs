@@ -79,6 +79,9 @@ pub fn generate(project: &Project, service: &Service) -> Result<Vec<GeneratedFil
     }
     if has_routes {
         transport.push("http");
+        if crate::graphql::serves_endpoint(service) {
+            transport.push("graphql");
+        }
     }
     if has_consumers {
         transport.push("kafka");
@@ -101,6 +104,9 @@ pub fn generate(project: &Project, service: &Service) -> Result<Vec<GeneratedFil
     }
     if has_routes {
         files.push(file("transport/http.rs", http_rs(project, service)));
+        if let Some(code) = crate::graphql::transport_rs(service) {
+            files.push(file("transport/graphql.rs", code));
+        }
         // The document of the routes, next to the crate: read by whoever builds a client, and served when asked for.
         if let Some(doc) = crate::openapi::openapi_json(project, service) {
             files.push(GeneratedFile::new(
@@ -200,6 +206,9 @@ fn cargo_toml(service: &Service) -> String {
     }
     if uses_live(service) {
         features.push("\"live\"");
+    }
+    if crate::graphql::serves_endpoint(service) {
+        features.push("\"graphql\"");
     }
     if service.uses_shared_limit() {
         features.push("\"shared-limit\"");
@@ -1207,6 +1216,9 @@ fn http_rs(project: &Project, service: &Service) -> String {
             "    .route({:?}, get(challenge_document))",
             cfg.path
         ));
+    }
+    if crate::graphql::serves_endpoint(service) {
+        c.line("    .merge(super::graphql::router())");
     }
     c.line("    .layer(cors(config))");
     if service.compression {
