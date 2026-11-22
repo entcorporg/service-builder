@@ -1016,6 +1016,34 @@ fn constraints(app: &mut App, ui: &mut Ui, svc: &Service, table: &Table) {
         );
     });
 
+    // ---- GraphQL access ----
+    if svc.graphql {
+        ui.add_space(8.0);
+        heading(ui, "Accès GraphQL");
+        card_box(ui, |ui| {
+            let current = table.graphql_roles.join(", ");
+            let new = labelled(ui, "Rôles autorisés", |ui| {
+                entry(ui, ("graphql-roles", s, t), &current, 13.0, "tous", true)
+            });
+            if let Some(v) = new {
+                let roles: Vec<String> = v
+                    .split(',')
+                    .map(|r| r.trim().to_string())
+                    .filter(|r| !r.is_empty())
+                    .collect();
+                app.edit(|p| {
+                    if let Some(tb) = table_mut(p, s, t) {
+                        tb.graphql_roles = roles;
+                    }
+                });
+            }
+            muted_small(
+                ui,
+                "Rôles (claims roles ou role du jeton) autorisés à lire cette table par GraphQL, séparés par des virgules. Vide : aucune restriction par rôle. Le contrôle a lieu avant toute lecture ; sinon la réponse est ACCES_REFUSE.",
+            );
+        });
+    }
+
     // ---- unique ----
     if add_row(ui, "Contraintes unique", "+ Ajouter une contrainte", true) {
         app.edit(|p| {
