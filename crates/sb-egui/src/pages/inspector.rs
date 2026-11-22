@@ -9,7 +9,8 @@ use eframe::egui::{self, Frame, Margin, RichText, Sense, Stroke, Ui};
 use sb_app::rename;
 use sb_model::names::{is_pascal_ident, is_snake_ident, is_topic_name};
 use sb_model::{
-    Consumer, FieldType, HttpMethod, Job, MessageKind, Project, Route, Rpc, Service, ServiceKind,
+    BodyFormat, Consumer, FieldType, HttpMethod, Job, MessageKind, Project, Route, Rpc, Service,
+    ServiceKind,
 };
 
 use super::canvas::{Sel, select};
@@ -296,7 +297,7 @@ fn graphql(app: &mut App, ui: &mut Ui, svc: &Service, sname: &str) {
         return;
     }
     let current = svc.graphql;
-    let (set, new_path) = section(
+    let (set, new_path, new_roles) = section(
         ui,
         "GraphQL",
         "publish",
@@ -327,10 +328,48 @@ fn graphql(app: &mut App, ui: &mut Ui, svc: &Service, sname: &str) {
             } else {
                 None
             };
-            (on, path)
+            let mut roles: Vec<(String, Vec<String>)> = Vec::new();
+            if current {
+                for r in svc
+                    .routes
+                    .iter()
+                    .filter(|r| r.method != HttpMethod::Get && r.body_format != BodyFormat::Csv)
+                {
+                    let shown = svc
+                        .graphql_mutation_roles
+                        .get(&r.name)
+                        .map(|v| v.join(", "))
+                        .unwrap_or_default();
+                    let label = format!("Rôles : {}", r.name);
+                    let new = field(
+                        ui,
+                        &label,
+                        "Rôles (claims roles ou role du jeton) autorisés à appeler cette mutation GraphQL, séparés par des virgules. Vide : aucune restriction par rôle. Le contrôle a lieu avant que la route soit jouée ; sinon la réponse est ACCES_REFUSE.",
+                        |ui| {
+                            commit_entry(
+                                ui,
+                                ("graphql-mutation-roles", sname, &r.name),
+                                &shown,
+                                true,
+                                "tous",
+                                true,
+                            )
+                        },
+                    );
+                    if let Some(v) = new {
+                        let list = v
+                            .split(',')
+                            .map(|x| x.trim().to_string())
+                            .filter(|x| !x.is_empty())
+                            .collect();
+                        roles.push((r.name.clone(), list));
+                    }
+                }
+            }
+            (on, path, roles)
         },
     );
-    if set.is_some() || new_path.is_some() {
+    if set.is_some() || new_path.is_some() || !new_roles.is_empty() {
         let sname = sname.to_string();
         app.edit(|p| {
             if let Some(s) = svc_mut(p, &sname) {
@@ -340,6 +379,13 @@ fn graphql(app: &mut App, ui: &mut Ui, svc: &Service, sname: &str) {
                 if let Some(path) = new_path {
                     s.graphql_path =
                         Some(path.trim().to_string()).filter(|v| !v.is_empty() && v != "/graphql");
+                }
+                for (name, list) in new_roles {
+                    if list.is_empty() {
+                        s.graphql_mutation_roles.remove(&name);
+                    } else {
+                        s.graphql_mutation_roles.insert(name, list);
+                    }
                 }
             }
         });
