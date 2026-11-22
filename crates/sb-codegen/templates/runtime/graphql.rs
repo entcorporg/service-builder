@@ -90,11 +90,20 @@ pub struct Loopback {
     pub token: String,
 }
 
+/// The business code a message starts with (`REFERENCE_DUPLIQUEE: text`): capitals, digits and `_`, then a colon.
+fn message_code(message: &str) -> Option<String> {
+    let (head, _) = message.split_once(':')?;
+    let mut chars = head.chars();
+    let valid = chars.next().is_some_and(|c| c.is_ascii_uppercase()) && chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+    valid.then(|| head.to_owned())
+}
+
 /// The `{code, message}` of a route's refusal: the code the flow named, or the one of its status.
 fn route_error(status: u16, body: &[u8]) -> Error {
     let v: Json = serde_json::from_slice(body).unwrap_or(Json::Null);
     let text = |k: &str| v.get(k).and_then(Json::as_str).map(str::to_owned);
-    let code = text("code").unwrap_or_else(|| {
+    let message = text("message").or_else(|| text("error")).unwrap_or_else(|| "the call was refused".to_owned());
+    let code = text("code").or_else(|| message_code(&message)).unwrap_or_else(|| {
         match status {
             400 | 422 => "REQUETE_INVALIDE",
             401 => "NON_AUTHENTIFIE",
@@ -106,7 +115,6 @@ fn route_error(status: u16, body: &[u8]) -> Error {
         }
         .to_owned()
     });
-    let message = text("message").or_else(|| text("error")).unwrap_or_else(|| "the call was refused".to_owned());
     Error::new(message).extend_with(move |_, e| {
         e.set("code", code.clone());
         e.set("status", status);
@@ -609,6 +617,11 @@ mod tests {
     fn a_refusal_of_a_route_keeps_its_code_and_message() {
         let named = route_error(409, br#"{"error":"stock","code":"STOCK_INSUFFISANT","message":"stock"}"#);
         assert_eq!(named.message, "stock");
+        let prefixed = route_error(409, br#"{"error":"REFERENCE_DUPLIQUEE: deja"}"#);
+        assert!(format!("{:?}", prefixed.extensions).contains("REFERENCE_DUPLIQUEE"));
+        assert_eq!(message_code("Not a code: x"), None);
+        assert_eq!(message_code("a: x"), None);
+        assert_eq!(message_code("STOCK_INSUFFISANT: x").as_deref(), Some("STOCK_INSUFFISANT"));
         let plain = route_error(404, br#"{"error":"not found"}"#);
         assert_eq!(plain.message, "not found");
         assert_eq!(format!("{:?}", plain.extensions), format!("{:?}", route_error(404, b"").extensions));
