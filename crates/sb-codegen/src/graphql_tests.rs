@@ -360,3 +360,16 @@ fn the_graphql_path_and_roles_are_checked() {
     assert!(codes.iter().any(|c| c == "E_GRAPHQL_PATH"), "{codes:?}");
     assert!(codes.iter().any(|c| c == "E_GRAPHQL_ROLE"), "{codes:?}");
 }
+
+#[test]
+fn the_tenant_claim_can_be_named() {
+    let files = generate(&served()).unwrap();
+    let code = find(&files, "services/orders/src/transport/graphql.rs").expect("endpoint");
+    assert!(code.contains("[\"tenantId\", \"tenant_id\"]"), "{code}");
+    let mut p = served();
+    p.services[0].graphql_tenant_claim = Some("tid".into());
+    let files = generate(&p).unwrap();
+    let code = find(&files, "services/orders/src/transport/graphql.rs").expect("endpoint");
+    assert!(code.contains("let tenant = [\"tid\"]"), "{code}");
+    assert!(!code.contains("\"tenantId\""), "{code}");
+}

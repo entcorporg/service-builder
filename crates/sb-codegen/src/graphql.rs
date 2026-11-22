@@ -583,8 +583,12 @@ pub fn transport_rs(service: &Service) -> Option<String> {
     c.line("if let Some(role) = claims.get(\"role\").and_then(|v| v.as_str()) {");
     c.line("    roles.push(role.to_owned());");
     c.line("}");
-    c.line("// The tenant is a claim of the token: `tenantId`, or `tenant_id`.");
-    c.line("let tenant = [\"tenantId\", \"tenant_id\"]");
+    let claims_list = match service.graphql_tenant_claim.as_deref() {
+        Some(claim) => format!("[{claim:?}]"),
+        None => "[\"tenantId\", \"tenant_id\"]".to_owned(),
+    };
+    c.line("// The tenant is a claim of the token (`graphqlTenantClaim`, default `tenantId` or `tenant_id`).");
+    c.line(format!("let tenant = {claims_list}"));
     c.line("    .iter()");
     c.line("    .find_map(|k| claims.get(*k).and_then(|v| v.as_str()))");
     c.line("    .map(str::to_owned);");

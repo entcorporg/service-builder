@@ -439,6 +439,10 @@ pub struct Service {
     /// other route of the service on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graphql_path: Option<String>,
+    /// The claim of the token that names the tenant, for the tables with a tenant column (default: `tenantId`, then
+    /// `tenant_id`). Set it when the tokens of the project carry another name (for instance `tid`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphql_tenant_claim: Option<String>,
     /// The roles allowed to call a mutation, by route name (the mutation of a route is named after it). The check runs before
     /// the route is played, and a refusal is `ACCES_REFUSE`; a route that is not listed (or listed empty) is open to any
     /// signed-in caller, the route still doing its own checks.

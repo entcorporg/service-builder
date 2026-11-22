@@ -73,6 +73,7 @@ pub fn add_service(app: &mut App, kind: ServiceKind) {
             graphql: false,
             graphql_sources: Vec::new(),
             graphql_path: None,
+            graphql_tenant_claim: None,
             graphql_mutation_roles: Default::default(),
             fragments: Vec::new(),
         };

@@ -297,7 +297,7 @@ fn graphql(app: &mut App, ui: &mut Ui, svc: &Service, sname: &str) {
         return;
     }
     let current = svc.graphql;
-    let (set, new_path, new_roles) = section(
+    let (set, new_path, new_tenant, new_roles) = section(
         ui,
         "GraphQL",
         "publish",
@@ -321,6 +321,25 @@ fn graphql(app: &mut App, ui: &mut Ui, svc: &Service, sname: &str) {
                             svc.graphql_path.as_deref().unwrap_or("/graphql"),
                             true,
                             "/graphql",
+                            false,
+                        )
+                    },
+                )
+            } else {
+                None
+            };
+            let tenant = if current {
+                field(
+                    ui,
+                    "Claim du tenant",
+                    "Nom du claim du jeton qui porte le tenant, pour les tables à colonne tenant (par défaut tenantId, puis tenant_id). À renseigner si vos jetons l’appellent autrement, par exemple tid.",
+                    |ui| {
+                        commit_entry(
+                            ui,
+                            ("graphql-tenant-claim", sname),
+                            svc.graphql_tenant_claim.as_deref().unwrap_or(""),
+                            true,
+                            "tenantId",
                             false,
                         )
                     },
@@ -366,10 +385,10 @@ fn graphql(app: &mut App, ui: &mut Ui, svc: &Service, sname: &str) {
                     }
                 }
             }
-            (on, path, roles)
+            (on, path, tenant, roles)
         },
     );
-    if set.is_some() || new_path.is_some() || !new_roles.is_empty() {
+    if set.is_some() || new_path.is_some() || new_tenant.is_some() || !new_roles.is_empty() {
         let sname = sname.to_string();
         app.edit(|p| {
             if let Some(s) = svc_mut(p, &sname) {
@@ -379,6 +398,10 @@ fn graphql(app: &mut App, ui: &mut Ui, svc: &Service, sname: &str) {
                 if let Some(path) = new_path {
                     s.graphql_path =
                         Some(path.trim().to_string()).filter(|v| !v.is_empty() && v != "/graphql");
+                }
+                if let Some(claim) = new_tenant {
+                    s.graphql_tenant_claim =
+                        Some(claim.trim().to_string()).filter(|v| !v.is_empty());
                 }
                 for (name, list) in new_roles {
                     if list.is_empty() {

@@ -208,6 +208,7 @@ fn new_service(name: &str, port: u16, http_port: Option<u16>, n: f64) -> Service
         graphql: false,
         graphql_sources: Vec::new(),
         graphql_path: None,
+        graphql_tenant_claim: None,
         graphql_mutation_roles: Default::default(),
         fragments: Vec::new(),
     }

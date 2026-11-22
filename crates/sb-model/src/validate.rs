@@ -5255,6 +5255,15 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        if let Some(claim) = &s.graphql_tenant_claim {
+            if claim.is_empty() || claim.contains(char::is_whitespace) {
+                self.error(
+                    "E_GRAPHQL_TENANT_CLAIM",
+                    format!("{base}/graphqlTenantClaim"),
+                    "the tenant claim is the name of a claim of the token (not empty, no space)",
+                );
+            }
+        }
         for (name, roles) in &s.graphql_mutation_roles {
             let at = format!("{base}/graphqlMutationRoles/{name}");
             if !s
