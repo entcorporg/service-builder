@@ -159,11 +159,11 @@ async fn connection(
     Ok(serde_json::json!({ "edges": edges, "pageInfo": { "hasNextPage": has_next, "endCursor": end } }))
 }
 
-fn type_ref(scalar: &str, nullable: bool) -> TypeRef {
+pub(crate) fn type_ref(scalar: &str, nullable: bool) -> TypeRef {
     if nullable { TypeRef::named(scalar) } else { TypeRef::named_nn(scalar) }
 }
 
-fn parent_json<'a>(ctx: &'a ResolverContext<'_>) -> Result<&'a Json, Error> {
+pub(crate) fn parent_json<'a>(ctx: &'a ResolverContext<'_>) -> Result<&'a Json, Error> {
     ctx.parent_value.try_downcast_ref::<Json>()
 }
 
@@ -199,11 +199,11 @@ fn page_field_args(field: Field) -> Field {
 }
 
 /// The object a JSON value stands for.
-fn object(v: Json) -> FieldValue<'static> {
+pub(crate) fn object(v: Json) -> FieldValue<'static> {
     FieldValue::owned_any(v)
 }
 
-fn prop(parent: &Json, key: &str) -> Option<FieldValue<'static>> {
+pub(crate) fn prop(parent: &Json, key: &str) -> Option<FieldValue<'static>> {
     match parent.get(key) {
         None | Some(Json::Null) => None,
         Some(v) => Value::from_json(v.clone()).ok().map(FieldValue::value),
@@ -381,7 +381,7 @@ pub fn error_body(code: &str, message: &str) -> Json {
 }
 
 /// A refusal of the engine (syntax, depth, complexity...) has no code of ours yet: it gets the closest.
-fn add_codes(out: &mut Json) {
+pub(crate) fn add_codes(out: &mut Json) {
     let Some(errors) = out.get_mut("errors").and_then(Json::as_array_mut) else { return };
     for e in errors {
         let message = e.get("message").and_then(Json::as_str).unwrap_or_default().to_lowercase();

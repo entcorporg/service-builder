@@ -209,6 +209,9 @@ fn cargo_toml(service: &Service) -> String {
     }
     if crate::graphql::serves_endpoint(service) {
         features.push("\"graphql\"");
+        if crate::graphql::is_gateway(service) {
+            features.push("\"graphql-gateway\"");
+        }
     }
     if service.uses_shared_limit() {
         features.push("\"shared-limit\"");

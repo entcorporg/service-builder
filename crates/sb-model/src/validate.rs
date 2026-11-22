@@ -843,13 +843,17 @@ impl<'a> Checker<'a> {
                 );
             }
 
-            if s.graphql && (s.kind != ServiceKind::Standard || s.tables.is_empty()) {
+            if s.graphql
+                && (s.kind != ServiceKind::Standard
+                    || (s.tables.is_empty() && s.graphql_sources.is_empty()))
+            {
                 self.warn(
                     "W_GRAPHQL_UNUSED",
                     format!("{base}/graphql"),
-                    "the GraphQL schema describes the tables of a standard service: with none, nothing is generated",
+                    "the GraphQL schema describes the tables of a standard service, or the `graphqlSources` of a gateway: with none, nothing is generated",
                 );
             }
+            self.graphql_sources(s, &base);
 
             let mut rpc_names = HashSet::new();
             for (j, r) in s.rpcs.iter().enumerate() {
@@ -5225,6 +5229,125 @@ impl<'a> Checker<'a> {
 
     /// The challenge a service hands out: where, with which key, how much work and for how long. Checked wherever it is set,
     /// served or not.
+    /// The sources of a GraphQL gateway: names, fields and the relations between them must be consistent, and a gateway has no
+    /// table of its own.
+    fn graphql_sources(&mut self, s: &Service, base: &str) {
+        if s.graphql_sources.is_empty() {
+            return;
+        }
+        if !s.graphql {
+            self.warn(
+                "W_GRAPHQL_UNUSED",
+                format!("{base}/graphqlSources"),
+                "`graphqlSources` is only used when `graphql` is on",
+            );
+        }
+        if !s.tables.is_empty() {
+            self.error(
+                "E_GRAPHQL_SOURCES_TABLES",
+                format!("{base}/graphqlSources"),
+                "a gateway reads other services: it has no table of its own (use `graphql` on the service that owns them)",
+            );
+        }
+        let mut names = HashSet::new();
+        for (i, src) in s.graphql_sources.iter().enumerate() {
+            let at = format!("{base}/graphqlSources/{i}");
+            if !is_pascal_ident(&src.name) || !names.insert(src.name.as_str()) {
+                self.error(
+                    "E_GRAPHQL_SOURCE_NAME",
+                    format!("{at}/name"),
+                    "a source is named in PascalCase, once",
+                );
+            }
+            if !is_env_name(&src.base_url_env) {
+                self.error(
+                    "E_GRAPHQL_SOURCE_ENV",
+                    format!("{at}/baseUrlEnv"),
+                    "the base URL comes from an environment variable (upper case letters, digits and `_`)",
+                );
+            }
+            if !src.path.starts_with('/')
+                || src.path.contains(['?', '#', ' '])
+                || src.path.contains("..")
+            {
+                self.error(
+                    "E_GRAPHQL_SOURCE_PATH",
+                    format!("{at}/path"),
+                    "the path starts with `/` and holds no query, fragment or `..`",
+                );
+            }
+            let has = |f: &str| src.fields.iter().any(|x| x.name == f);
+            if src.fields.is_empty() {
+                self.error(
+                    "E_GRAPHQL_SOURCE_FIELDS",
+                    format!("{at}/fields"),
+                    "a source exposes at least one field",
+                );
+            }
+            let mut fields = HashSet::new();
+            for (j, f) in src.fields.iter().enumerate() {
+                if !fields.insert(f.name.as_str()) || f.name.is_empty() {
+                    self.error(
+                        "E_GRAPHQL_SOURCE_FIELDS",
+                        format!("{at}/fields/{j}/name"),
+                        "a field is named, once",
+                    );
+                }
+            }
+            if let Some(k) = &src.key
+                && !has(k)
+            {
+                self.error(
+                    "E_GRAPHQL_SOURCE_KEY",
+                    format!("{at}/key"),
+                    "the key is one of the fields",
+                );
+            }
+            for (j, r) in src.relations.iter().enumerate() {
+                let rp = format!("{at}/relations/{j}");
+                if r.field.is_empty() || fields.contains(r.field.as_str()) {
+                    self.error(
+                        "E_GRAPHQL_RELATION",
+                        format!("{rp}/field"),
+                        "a relation has a name that no field of the source already has",
+                    );
+                }
+                if !has(&r.via) {
+                    self.error(
+                        "E_GRAPHQL_RELATION",
+                        format!("{rp}/via"),
+                        "`via` is a field of this source",
+                    );
+                }
+                match s.graphql_sources.iter().find(|t| t.name == r.target) {
+                    None => self.error(
+                        "E_GRAPHQL_RELATION",
+                        format!("{rp}/target"),
+                        "the target is another source of the service",
+                    ),
+                    Some(t) if !t.fields.iter().any(|f| f.name == r.target_field) => self.error(
+                        "E_GRAPHQL_RELATION",
+                        format!("{rp}/targetField"),
+                        "`targetField` is a field of the target",
+                    ),
+                    Some(_) => {}
+                }
+                if let Some(b) = &r.batch_param
+                    && (b.is_empty()
+                        || !b
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-'))
+                {
+                    self.error(
+                        "E_GRAPHQL_RELATION",
+                        format!("{rp}/batchParam"),
+                        "`batchParam` is a query parameter name",
+                    );
+                }
+            }
+        }
+    }
+
     fn challenge_service(&mut self, s: &Service, base: &str) {
         let Some(cfg) = &s.challenge else {
             return;

@@ -206,6 +206,7 @@ pub fn orders() -> Project {
         challenge: None,
         compression: false,
         graphql: false,
+        graphql_sources: Vec::new(),
         fragments: Vec::new(),
         rpcs: vec![
             Rpc {
@@ -453,6 +454,7 @@ pub fn orders() -> Project {
         challenge: None,
         compression: false,
         graphql: false,
+        graphql_sources: Vec::new(),
         fragments: Vec::new(),
         rpcs: vec![],
         http_port: None,
@@ -516,6 +518,7 @@ pub fn orders() -> Project {
         challenge: None,
         compression: false,
         graphql: false,
+        graphql_sources: Vec::new(),
         fragments: Vec::new(),
         rpcs: vec![],
         http_port: None,
@@ -3062,6 +3065,7 @@ pub fn add_mailer(p: &mut Project) {
         challenge: None,
         compression: false,
         graphql: false,
+        graphql_sources: Vec::new(),
         fragments: Vec::new(),
     });
 }
@@ -3128,6 +3132,7 @@ pub fn add_realtime(p: &mut Project) {
         challenge: None,
         compression: false,
         graphql: false,
+        graphql_sources: Vec::new(),
         fragments: Vec::new(),
     });
 }

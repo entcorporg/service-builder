@@ -428,9 +428,68 @@ pub struct Service {
     /// `GRAPHQL_MAX_COMPLEXITY`) and `GRAPHQL_INTROSPECTION=off` turns introspection off. Mutations are not served yet.
     #[serde(default, skip_serializing_if = "is_false")]
     pub graphql: bool,
+    /// The sources of a GraphQL gateway: a service with `graphql`, no table, routes and a `verifyJwt` step reads other
+    /// services' REST APIs instead of a database, and serves them as one graph on `POST /graphql` (see [`GraphqlSource`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub graphql_sources: Vec<GraphqlSource>,
     /// Named sequences of steps, written once and played by an `include` step in any handler of the service.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fragments: Vec<Fragment>,
+}
+
+/// A type of a gateway's graph, read from a REST API of another service. `GET <path>` answers the rows (a JSON array, or an
+/// object whose `items` is one); `GET <path>/<key>` answers one. The cookie `access_token` of the caller is sent along, so the
+/// service behind applies its own checks and its own tenant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphqlSource {
+    /// The GraphQL type (PascalCase), unique in the service.
+    pub name: String,
+    /// The environment variable holding the base URL of the service behind (never a value of a query).
+    pub base_url_env: String,
+    /// The path of the collection, starting with `/` (`/articles`).
+    pub path: String,
+    /// The fields of a row (the JSON properties of the answer): the others are not exposed.
+    #[serde(default)]
+    pub fields: Vec<GraphqlSourceField>,
+    /// The field that identifies a row: it adds the query `<type>(<key>: ID!)`, read at `GET <path>/<key>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Fields that read other sources, a nested query being one call per relation however many rows it has.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relations: Vec<GraphqlRelation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphqlSourceField {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub ty: ColumnType,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub nullable: bool,
+}
+
+/// A field of a source that reads another source: the rows of `target` whose `target_field` equals the `via` field of the row.
+/// The lookups of all the rows of a response are grouped (a dataloader): one call `GET <target path>?<target_field>=<value>`
+/// per row, or, with `batch_param`, a single `GET <target path>?<batch_param>=<v1>,<v2>,...` for the whole batch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphqlRelation {
+    /// Name of the field (camelCase).
+    pub field: String,
+    /// The `name` of the source it reads.
+    pub target: String,
+    /// Field of this source holding the value to look for.
+    pub via: String,
+    /// Field of the target that must equal it.
+    pub target_field: String,
+    /// A list of rows (`[Target!]!`) rather than at most one (`Target`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub many: bool,
+    /// Query parameter of the target taking a comma-separated list of values: one call for the whole batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_param: Option<String>,
 }
 
 /// A named sequence of steps shared by the handlers of a service (verify the token, require a tenant, build the event

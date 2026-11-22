@@ -71,6 +71,7 @@ pub fn add_service(app: &mut App, kind: ServiceKind) {
             challenge: None,
             compression: false,
             graphql: false,
+            graphql_sources: Vec::new(),
             fragments: Vec::new(),
         };
         if kind == ServiceKind::Realtime {

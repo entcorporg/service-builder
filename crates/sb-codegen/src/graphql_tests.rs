@@ -137,3 +137,113 @@ fn without_graphql_nothing_of_the_endpoint_is_written() {
     assert!(!files.iter().any(|f| f.content.contains("async-graphql")));
     assert!(!files.iter().any(|f| f.content.contains("super::graphql")));
 }
+
+fn source(name: &str, path: &str, fields: &[(&str, ColumnType)]) -> sb_model::GraphqlSource {
+    sb_model::GraphqlSource {
+        name: name.into(),
+        base_url_env: "STOCK_URL".into(),
+        path: path.into(),
+        fields: fields
+            .iter()
+            .map(|(n, ty)| sb_model::GraphqlSourceField {
+                name: (*n).into(),
+                ty: *ty,
+                nullable: false,
+            })
+            .collect(),
+        key: Some("id".into()),
+        relations: vec![],
+    }
+}
+
+/// A service with no table, routes and a token check, that reads articles and their movements from another service.
+fn gateway() -> sb_model::Project {
+    let mut p = sample::showcase();
+    let svc = &mut p.services[0];
+    svc.tables.clear();
+    // What reads a table is not part of a service that has none.
+    svc.routes
+        .retain(|r| !serde_json::to_string(r).unwrap().contains("\"table\""));
+    svc.jobs.clear();
+    svc.graphql = true;
+    let mut article = source(
+        "Article",
+        "/articles",
+        &[("id", ColumnType::Uuid), ("nom", ColumnType::String)],
+    );
+    article.relations.push(sb_model::GraphqlRelation {
+        field: "mouvements".into(),
+        target: "Mouvement".into(),
+        via: "id".into(),
+        target_field: "article_id".into(),
+        many: true,
+        batch_param: None,
+    });
+    let movement = source(
+        "Mouvement",
+        "/mouvements",
+        &[
+            ("id", ColumnType::Uuid),
+            ("article_id", ColumnType::Uuid),
+            ("quantite", ColumnType::Int32),
+        ],
+    );
+    svc.graphql_sources = vec![article, movement];
+    p
+}
+
+#[test]
+fn a_gateway_writes_its_schema_and_reads_the_services_behind_it() {
+    let files = generate(&gateway()).unwrap();
+    let sdl = sdl_file(&files).expect("sdl written");
+    assert!(sdl.contains("type Article {"), "{sdl}");
+    assert!(sdl.contains("  mouvements: [Mouvement!]!"), "{sdl}");
+    assert!(sdl.contains("  article(id: ID!): Article"), "{sdl}");
+    assert!(
+        sdl.contains("  articleList(first: Int): [Article!]!"),
+        "{sdl}"
+    );
+    assert!(sdl.contains("  articleId: ID!"), "{sdl}");
+    let code = find(&files, "services/orders/src/transport/graphql.rs").expect("endpoint");
+    assert!(code.contains("Gateway::from_env(SOURCES)"), "{code}");
+    assert!(code.contains("base_url_env: \"STOCK_URL\""), "{code}");
+    assert!(
+        code.contains(
+            "Relation { field: \"mouvements\", target: \"Mouvement\", via: \"id\", target_field: \"article_id\", many: true, batch_param: None }"
+        ),
+        "{code}"
+    );
+    assert!(code.contains("NON_AUTHENTIFIE"), "{code}");
+    assert!(find(&files, "runtime/src/graphql_gateway.rs").is_some());
+    let cargo = find(&files, "runtime/Cargo.toml").unwrap();
+    assert!(cargo.contains("graphql-gateway = [\"graphql\", \"http-client\"]"));
+    assert!(
+        find(&files, "services/orders/Cargo.toml")
+            .unwrap()
+            .contains("\"graphql-gateway\"")
+    );
+    assert!(
+        find(&files, "runtime/src/lib.rs")
+            .unwrap()
+            .contains("pub mod graphql_gateway;")
+    );
+    // Deterministic.
+    let again = generate(&gateway()).unwrap();
+    assert_eq!(
+        find(&again, "services/orders/src/transport/graphql.rs"),
+        Some(code)
+    );
+}
+
+#[test]
+fn the_sources_of_a_gateway_are_checked() {
+    let mut p = gateway();
+    p.services[0].graphql_sources[0].relations[0].target = "Nothing".into();
+    p.services[0].graphql_sources[1].key = Some("nope".into());
+    let codes: Vec<String> = sb_model::validate(&p).into_iter().map(|d| d.code).collect();
+    assert!(codes.iter().any(|c| c == "E_GRAPHQL_RELATION"), "{codes:?}");
+    assert!(
+        codes.iter().any(|c| c == "E_GRAPHQL_SOURCE_KEY"),
+        "{codes:?}"
+    );
+}

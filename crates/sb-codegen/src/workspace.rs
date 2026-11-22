@@ -38,6 +38,7 @@ const RUNTIME_USAGE: &str = include_str!("../templates/runtime/usage.rs");
 const RUNTIME_RATE_LIMIT: &str = include_str!("../templates/runtime/rate_limit.rs");
 const CONTRACTS_JSON: &str = include_str!("../templates/contracts/json.rs");
 const RUNTIME_GRAPHQL: &str = include_str!("../templates/runtime/graphql.rs");
+const RUNTIME_GRAPHQL_GATEWAY: &str = include_str!("../templates/runtime/graphql_gateway.rs");
 const RUNTIME_CARGO: &str = include_str!("../templates/runtime/Cargo.toml");
 
 pub fn files(project: &Project) -> Vec<GeneratedFile> {
@@ -94,6 +95,12 @@ pub fn files(project: &Project) -> Vec<GeneratedFile> {
             RUNTIME_GRAPHQL,
         ));
     }
+    if serves_gateway(project) {
+        files.push(GeneratedFile::new(
+            "runtime/src/graphql_gateway.rs",
+            RUNTIME_GRAPHQL_GATEWAY,
+        ));
+    }
     if json_adapters(project) {
         files.push(GeneratedFile::new("contracts/src/json.rs", CONTRACTS_JSON));
     }
@@ -105,10 +112,23 @@ fn serves_graphql(project: &Project) -> bool {
     project.services.iter().any(crate::graphql::serves_endpoint)
 }
 
+/// Whether a service of the project is a GraphQL gateway (it reads other services): the runtime then has the gateway engine.
+fn serves_gateway(project: &Project) -> bool {
+    project
+        .services
+        .iter()
+        .any(|s| crate::graphql::is_gateway(s) && crate::graphql::serves_endpoint(s))
+}
+
 fn runtime_cargo(project: &Project) -> String {
     if !serves_graphql(project) {
         return RUNTIME_CARGO.to_string();
     }
+    let gateway = if serves_gateway(project) {
+        "# A gateway (`graphqlSources`) reads other services over HTTP: it needs the HTTP client too.\ngraphql-gateway = [\"graphql\", \"http-client\"]\n"
+    } else {
+        ""
+    };
     RUNTIME_CARGO
         .replace(
             "axum = { workspace = true, optional = true }\n",
@@ -116,7 +136,9 @@ fn runtime_cargo(project: &Project) -> String {
         )
         .replace(
             "[features]\n",
-            "[features]\n# The GraphQL endpoint (`graphql`) brings async-graphql in: only the services that serve it turn this on.\ngraphql = [\"dep:async-graphql\"]\n",
+            &format!(
+                "[features]\n# The GraphQL endpoint (`graphql`) brings async-graphql in: only the services that serve it turn this on.\ngraphql = [\"dep:async-graphql\"]\n{gateway}"
+            ),
         )
 }
 
@@ -124,9 +146,14 @@ fn runtime_lib(project: &Project) -> String {
     if !serves_graphql(project) {
         return RUNTIME_LIB.to_string();
     }
+    let gateway = if serves_gateway(project) {
+        "#[cfg(feature = \"graphql-gateway\")]\npub mod graphql_gateway;\n"
+    } else {
+        ""
+    };
     RUNTIME_LIB.replace(
         "pub mod validation;\n",
-        "pub mod validation;\n#[cfg(feature = \"graphql\")]\npub mod graphql;\n",
+        &format!("pub mod validation;\n#[cfg(feature = \"graphql\")]\npub mod graphql;\n{gateway}"),
     )
 }
 
