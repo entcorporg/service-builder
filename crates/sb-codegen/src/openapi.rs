@@ -359,6 +359,8 @@ fn operation(
             match &f.source {
                 Some(RequestSource::Header { name }) => ("header", name.clone()),
                 Some(RequestSource::Cookie { name }) => ("cookie", name.clone()),
+                // The body itself, not a field of it: nothing to declare.
+                Some(RequestSource::RawBody) => continue,
                 None if route.method.has_body() => {
                     body_fields.push(f);
                     continue;

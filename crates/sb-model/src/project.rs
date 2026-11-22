@@ -254,6 +254,10 @@ pub enum RequestSource {
     Header { name: String },
     /// A cookie of the `Cookie` header, by name, percent-decoded.
     Cookie { name: String },
+    /// The exact bytes of the request body, in base64 (standard alphabet), read before anything parses them: what a
+    /// signed webhook was signed over, to archive byte for byte (`objectPut` takes base64; so does a text column).
+    /// Routes with a body only; one field per schema.
+    RawBody,
 }
 
 /// An image type `imageSniff` accepts. There is no SVG: it can carry a script.

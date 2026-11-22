@@ -98,6 +98,7 @@ const NEW_OBJECT: &str = "+ nouveaux éléments…";
 const SOURCE_BODY: &str = "Corps / query";
 const SOURCE_HEADER: &str = "En-tête";
 const SOURCE_COOKIE: &str = "Cookie";
+const SOURCE_RAW: &str = "Corps brut";
 
 /// How deep nested schemas are shown under their field.
 const MAX_DEPTH: usize = 4;
@@ -571,9 +572,10 @@ fn source_row(
         let (current, name) = match &f.source {
             Some(RequestSource::Header { name }) => (SOURCE_HEADER, name.as_str()),
             Some(RequestSource::Cookie { name }) => (SOURCE_COOKIE, name.as_str()),
+            Some(RequestSource::RawBody) => (SOURCE_RAW, ""),
             None => (SOURCE_BODY, ""),
         };
-        let options = [SOURCE_BODY, SOURCE_HEADER, SOURCE_COOKIE].map(String::from);
+        let options = [SOURCE_BODY, SOURCE_HEADER, SOURCE_COOKIE, SOURCE_RAW].map(String::from);
         let picked = ui
             .allocate_ui(Vec2::new(118.0, 24.0), |ui| {
                 choice(ui, ("source", message, index), &options, current)
@@ -596,11 +598,15 @@ fn source_row(
                 SOURCE_COOKIE => Some(RequestSource::Cookie {
                     name: if name.is_empty() { f.name.clone() } else { name.to_string() },
                 }),
+                SOURCE_RAW => Some(RequestSource::RawBody),
                 _ => None,
             };
             change(app, message, index, |x| x.source = source);
         }
-        if f.source.is_some() {
+        if matches!(
+            f.source,
+            Some(RequestSource::Header { .. } | RequestSource::Cookie { .. })
+        ) {
             let w = ui.available_width().max(80.0);
             if let Some(v) = ui
                 .allocate_ui(Vec2::new(w, 24.0), |ui| {
@@ -610,7 +616,7 @@ fn source_row(
             {
                 change(app, message, index, |x| match &mut x.source {
                     Some(RequestSource::Header { name } | RequestSource::Cookie { name }) => *name = v,
-                    None => {}
+                    Some(RequestSource::RawBody) | None => {}
                 });
             }
         }

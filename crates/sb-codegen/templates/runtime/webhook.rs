@@ -35,6 +35,12 @@ impl fmt::Display for Refused {
     }
 }
 
+/// The exact bytes of a request body as base64 (standard alphabet), the form `objectPut` takes.
+pub fn encode(body: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(body)
+}
+
 fn mac(secret: &[u8], timestamp: i64, body: &[u8]) -> HmacSha256 {
     // An HMAC key can have any length.
     let mut mac = HmacSha256::new_from_slice(secret).expect("an HMAC key of any size");

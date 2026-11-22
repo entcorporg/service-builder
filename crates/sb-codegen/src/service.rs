@@ -1094,7 +1094,11 @@ fn http_rs(project: &Project, service: &Service) -> String {
     c.line("use std::collections::HashMap;");
     c.blank();
     c.line("use axum::{");
-    if service.routes.iter().any(|r| hmac_of(r).is_some()) {
+    if service
+        .routes
+        .iter()
+        .any(|r| hmac_of(r).is_some() || raw_body_field(project, r).is_some())
+    {
         c.line("    body::Bytes,");
     }
     c.line("    Json, Router,");
@@ -1135,7 +1139,7 @@ fn http_rs(project: &Project, service: &Service) -> String {
         if service
             .routes
             .iter()
-            .any(|r| hmac_of(r).is_some() || !sourced_fields(project, r).is_empty())
+            .any(|r| hmac_of(r).is_some() || reads_headers(project, r))
         {
             "    http::{HeaderMap, HeaderValue, StatusCode},"
         } else {
@@ -1276,7 +1280,11 @@ fn http_rs(project: &Project, service: &Service) -> String {
         // A body is read as a `Value` first when some of its fields must be there: presence cannot be seen on the struct.
         let csv_in = r.body_format == BodyFormat::Csv && r.method.has_body();
         let partial = csv_in && r.csv_mode == CsvMode::Partial;
-        let checked = r.method.has_body() && needs && hmac_of(r).is_none() && !csv_in;
+        let checked = r.method.has_body()
+            && needs
+            && hmac_of(r).is_none()
+            && raw_body_field(project, r).is_none()
+            && !csv_in;
         let query_checked = !r.method.has_body() && !required.is_empty();
         let m = if params.is_empty() && sourced.is_empty() {
             ""
@@ -1292,9 +1300,13 @@ fn http_rs(project: &Project, service: &Service) -> String {
             c.line("Path(path): Path<HashMap<String, String>>,");
         }
         let signed = hmac_of(r);
-        if signed.is_some() {
+        let raw_field = raw_body_field(project, r);
+        let bytes_in = signed.is_some() || raw_field.is_some();
+        if bytes_in {
             // The signature covers the exact bytes: they are read as JSON only once it checks out.
-            c.line("headers: HeaderMap,");
+            if signed.is_some() || reads_headers(project, r) {
+                c.line("headers: HeaderMap,");
+            }
             c.line("body: Bytes,");
         } else {
             if !sourced.is_empty() {
@@ -1323,10 +1335,16 @@ fn http_rs(project: &Project, service: &Service) -> String {
                 r.response
             )
         });
-        if let Some((header, secret_env, tolerance)) = signed {
-            c.line(format!(
-                "eda_runtime::webhook::check({secret_env:?}, headers.get({header:?}).and_then(|v| v.to_str().ok()), &body, {tolerance})?;"
-            ));
+        if bytes_in {
+            if let Some((header, secret_env, tolerance)) = signed {
+                c.line(format!(
+                    "eda_runtime::webhook::check({secret_env:?}, headers.get({header:?}).and_then(|v| v.to_str().ok()), &body, {tolerance})?;"
+                ));
+            }
+            if raw_field.is_some() {
+                // Before anything reads the bytes: what is archived is what was received (and signed).
+                c.line("let __raw_body = eda_runtime::webhook::encode(&body);");
+            }
             if needs {
                 c.line("let body: serde_json::Value = serde_json::from_slice(&body)");
                 c.line("    .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?;");
@@ -1407,6 +1425,10 @@ fn http_rs(project: &Project, service: &Service) -> String {
         for (field, source) in &sourced {
             // Always overwritten, so that nothing a client puts in the body or the query stands for a header.
             let read = match source {
+                RequestSource::RawBody => {
+                    c.line(format!("input.{field} = __raw_body;"));
+                    continue;
+                }
                 RequestSource::Header { name } => format!(
                     "headers.get({:?}).and_then(|v| v.to_str().ok()).map(str::to_string)",
                     name.to_ascii_lowercase()
@@ -1418,6 +1440,7 @@ fn http_rs(project: &Project, service: &Service) -> String {
             let what = match source {
                 RequestSource::Header { name } => format!("header `{name}`"),
                 RequestSource::Cookie { name } => format!("cookie `{name}`"),
+                RequestSource::RawBody => unreachable!("handled above"),
             };
             if project
                 .message(&r.request)
@@ -1782,7 +1805,24 @@ fn rules_rs(c: &mut Code, project: &Project, service: &Service) {
     }
 }
 
-/// The signature check of a route, if it has one: the header, the environment variable of the secret, the tolerance.
+/// The field of the request that takes the raw body (base64), on a route with a JSON body.
+fn raw_body_field<'a>(project: &'a Project, route: &sb_model::Route) -> Option<&'a str> {
+    if !route.method.has_body() || route.body_format == BodyFormat::Csv {
+        return None;
+    }
+    sourced_fields(project, route)
+        .into_iter()
+        .find(|(_, s)| matches!(s, RequestSource::RawBody))
+        .map(|(name, _)| name)
+}
+
+/// Whether a route reads a header or a cookie into a field (so its handler takes the `HeaderMap`).
+fn reads_headers(project: &Project, route: &sb_model::Route) -> bool {
+    sourced_fields(project, route)
+        .iter()
+        .any(|(_, s)| !matches!(s, RequestSource::RawBody))
+}
+
 /// The fields of the request of a route that come from a header or a cookie, with where from.
 fn sourced_fields<'a>(
     project: &'a Project,

@@ -1078,6 +1078,24 @@ impl<'a> Checker<'a> {
         let (what, name, extra) = match source {
             RequestSource::Header { name } => ("header", name, ""),
             RequestSource::Cookie { name } => ("cookie", name, "_."),
+            RequestSource::RawBody => {
+                if m.fields
+                    .iter()
+                    .filter(|o| matches!(o.source, Some(RequestSource::RawBody)))
+                    .count()
+                    > 1
+                {
+                    self.error(
+                        "E_SOURCE_RAW_DUPLICATE",
+                        &sp,
+                        format!(
+                            "`{}` has two fields that take the raw body: one is enough",
+                            m.name
+                        ),
+                    );
+                }
+                return;
+            }
         };
         let valid = !name.is_empty()
             && name.len() <= 100
@@ -1234,6 +1252,21 @@ impl<'a> Checker<'a> {
                     format!(
                         "field `{}` of `{}` is read from the request, and `{{{}}}` of the path fills it too",
                         f.name, r.request, f.name
+                    ),
+                );
+            }
+            if (!r.method.has_body() || r.body_format == BodyFormat::Csv)
+                && request
+                    .fields
+                    .iter()
+                    .any(|f| matches!(f.source, Some(RequestSource::RawBody)))
+            {
+                self.error(
+                    "E_SOURCE_RAW_ROUTE",
+                    format!("{rp}/request"),
+                    format!(
+                        "`{}` takes the raw body, which only a JSON body of a POST, PUT or PATCH route has",
+                        r.request
                     ),
                 );
             }

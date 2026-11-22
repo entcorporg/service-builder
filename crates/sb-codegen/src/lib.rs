@@ -1343,6 +1343,64 @@ mod tests {
     }
 
     #[test]
+    fn a_field_can_take_the_raw_body_in_base64_before_it_is_parsed() {
+        let mut p = sample::orders();
+        sample::add_stripe_webhook(&mut p);
+        let event = p
+            .messages
+            .iter_mut()
+            .find(|m| m.name == "StripeEvent")
+            .unwrap();
+        let mut raw = sb_model::Field::new("raw", sb_model::FieldType::String);
+        raw.source = Some(sb_model::RequestSource::RawBody);
+        event.fields.push(raw);
+        assert!(
+            !sb_model::has_errors(&sb_model::validate(&p)),
+            "{:?}",
+            sb_model::validate(&p)
+        );
+        let files = generate(&p).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        let handler = &http[http.find("async fn handle_stripe_webhook(").unwrap()..];
+        let check = handler.find("eda_runtime::webhook::check(").unwrap();
+        let encode = handler
+            .find("let __raw_body = eda_runtime::webhook::encode(&body);")
+            .unwrap();
+        let parse = handler.find("serde_json::from_slice(&body)").unwrap();
+        assert!(
+            check < encode && encode < parse,
+            "signed, then archived as received, then parsed"
+        );
+        assert!(handler.contains("input.raw = __raw_body;"));
+        // The body is not a header or a parameter of the contract.
+        assert!(
+            !file(&files, "services/orders/openapi.json")
+                .contains("\"in\": \"header\", \"name\": \"raw\"")
+        );
+
+        // Without a signature: the route still takes the bytes.
+        let mut plain = sample::orders();
+        sample::add_stripe_webhook(&mut plain);
+        let route = plain.services[0].routes.last_mut().unwrap();
+        route.steps.remove(0);
+        let event = plain
+            .messages
+            .iter_mut()
+            .find(|m| m.name == "StripeEvent")
+            .unwrap();
+        let mut raw = sb_model::Field::new("raw", sb_model::FieldType::String);
+        raw.source = Some(sb_model::RequestSource::RawBody);
+        event.fields.push(raw);
+        let files = generate(&plain).unwrap();
+        let http = file(&files, "services/orders/src/transport/http.rs");
+        let handler = &http[http.find("async fn handle_stripe_webhook(").unwrap()..];
+        assert!(handler.contains("body: Bytes,"));
+        assert!(!handler.contains("headers: HeaderMap,"));
+        assert!(!handler.contains("webhook::check"));
+        assert!(handler.contains("input.raw = __raw_body;"));
+    }
+
+    #[test]
     fn encryption_steps_read_their_key_from_the_environment_and_fail_fast() {
         let mut p = sample::orders();
         sample::add_sealed_text(&mut p);

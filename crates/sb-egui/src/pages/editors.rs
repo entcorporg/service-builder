@@ -250,6 +250,7 @@ pub fn message_form(app: &mut App) {
 const SOURCE_NONE: &str = "(corps ou paramètres)";
 const SOURCE_HEADER: &str = "en-tête";
 const SOURCE_COOKIE: &str = "cookie";
+const SOURCE_RAW: &str = "corps brut";
 
 fn rules_text(rules: &[Rule]) -> String {
     rules
@@ -331,6 +332,7 @@ pub fn field_form(app: &mut App, message: usize, index: Option<usize>) {
         let (source, name) = match current.as_ref().and_then(|f| f.source.clone()) {
             Some(RequestSource::Header { name }) => (SOURCE_HEADER, name),
             Some(RequestSource::Cookie { name }) => (SOURCE_COOKIE, name),
+            Some(RequestSource::RawBody) => (SOURCE_RAW, String::new()),
             None => (SOURCE_NONE, String::new()),
         };
         inputs.push(
@@ -347,6 +349,7 @@ pub fn field_form(app: &mut App, message: usize, index: Option<usize>) {
                     SOURCE_NONE.into(),
                     SOURCE_HEADER.into(),
                     SOURCE_COOKIE.into(),
+                    SOURCE_RAW.into(),
                 ],
                 selected: Some(source.into()),
             },
@@ -378,6 +381,7 @@ pub fn field_form(app: &mut App, message: usize, index: Option<usize>) {
                 }
                 SOURCE_HEADER => Some(RequestSource::Header { name: source_name }),
                 SOURCE_COOKIE => Some(RequestSource::Cookie { name: source_name }),
+                SOURCE_RAW => Some(RequestSource::RawBody),
                 _ => None,
             };
         }

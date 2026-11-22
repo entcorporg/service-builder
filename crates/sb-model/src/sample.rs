@@ -796,6 +796,41 @@ pub fn add_stripe_webhook(p: &mut Project) {
     });
 }
 
+/// Adds to the first service a route that archives the exact bytes it received in a bucket: the field `raw` takes the
+/// body in base64 (`rawBody`) and `objectPut` stores it. Needs `add_stripe_webhook` (the answer schema).
+pub fn add_raw_archive(p: &mut Project) {
+    let mut raw = field("raw", FieldType::String);
+    raw.source = Some(RequestSource::RawBody);
+    p.messages.push(api("ArchiveEvent", vec![raw]));
+    p.services[0].routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
+        csv_mode: Default::default(),
+        name: "archive_event".into(),
+        method: HttpMethod::Post,
+        path: "/webhook/archive".into(),
+        request: "ArchiveEvent".into(),
+        response: "WebhookAck".into(),
+        status: 200,
+        steps: vec![
+            Step::ObjectPut {
+                id: "a1".into(),
+                bucket_env: "ARCHIVE_BUCKET".into(),
+                key: lit("events/last.json"),
+                body: path("input.raw"),
+                content_type: lit("application/json"),
+            },
+            Step::Respond {
+                id: "a2".into(),
+                fields: vec![set("received", lit(true))],
+                status: None,
+                cookies: vec![],
+                headers: vec![],
+            },
+        ],
+    });
+}
+
 /// Adds to the first service a route that seals a text with AES-256-GCM and opens it again, with a key of the
 /// environment (`NOTES_KEY`): what a TOTP secret goes through before it is stored.
 pub fn add_sealed_text(p: &mut Project) {
@@ -1009,6 +1044,7 @@ pub fn showcase() -> Project {
     add_single_use_token(&mut p);
     add_cleaner_job(&mut p);
     add_stripe_webhook(&mut p);
+    add_raw_archive(&mut p);
     add_sealed_text(&mut p);
     add_signup(&mut p);
     add_challenge(&mut p);

@@ -538,6 +538,11 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
   seule fois, et la route a un corps (POST, PUT, PATCH) ; sinon `E_HMAC_POSITION`, `E_HMAC_DUPLICATE`, `E_HMAC_METHOD`.
   Aussi `E_HMAC_HEADER`, `E_HMAC_SECRET_ENV`, `E_HMAC_TOLERANCE` et `E_HMAC_OUTSIDE_ROUTE`. Seul ce schéma est géré ; un
   autre (GitHub, Shopify) demanderait un autre format d'en-tête.
+  **Archiver le corps reçu, octet pour octet** : un champ texte du schéma de requête de source `{"from":"rawBody"}` reçoit les
+  octets exacts du corps en base64 (alphabet standard), lus avant tout parsing (après la vérification de signature s'il y en
+  a une). Il se passe à `objectPut` (`body: input.raw`, vers Garage, MinIO ou AWS) ou s'écrit dans une colonne texte. Un seul
+  champ par schéma, route POST/PUT/PATCH à corps JSON (`E_SOURCE_RAW_ROUTE`, `E_SOURCE_RAW_DUPLICATE`) ; le champ n'est pas
+  dans le contrat OpenAPI. La limite de corps d'axum (2 Mio) s'applique.
 - **CORS** : les origines autorisées se règlent avec `CORS_ORIGINS` (`*` par défaut, à restreindre en production).
 - **Ports** : chaque service a un port HTTP (`<SERVICE>_HTTP_PORT`), distinct des autres ports du projet. gRPC et HTTP
   tournent dans le même processus.
