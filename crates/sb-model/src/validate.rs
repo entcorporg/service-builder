@@ -4699,10 +4699,16 @@ impl<'a> Checker<'a> {
                 }
                 false
             }
-            Step::HashPassword { input, bind, .. } => {
+            Step::HashPassword {
+                input,
+                bind,
+                weakness,
+                ..
+            } => {
                 self.check_var_name(bind, &format!("{path}/bind"));
                 let text = TypeRef::scalar(FieldType::String);
                 self.check_expr(scope, input, Some(&text), &format!("{path}/input"));
+                self.check_weakness(scope, weakness, path);
                 scope.bind(bind.clone(), text);
                 false
             }
@@ -4710,10 +4716,12 @@ impl<'a> Checker<'a> {
                 password,
                 stored,
                 bind,
+                weakness,
                 ..
             } => {
                 self.check_var_name(bind, &format!("{path}/bind"));
                 let text = TypeRef::scalar(FieldType::String);
+                self.check_weakness(scope, weakness, path);
                 // The stored hash may be absent: an unknown account.
                 let maybe = TypeRef {
                     optional: true,
@@ -5607,6 +5615,29 @@ impl<'a> Checker<'a> {
             }
             self.check_expr(scope, &h.value, Some(&text), &format!("{hp}/value"));
         }
+    }
+
+    /// The `weakness` of a step that sees a clear password: a `bool` variable, a score from 0 to 4, texts for `inputs`.
+    fn check_weakness(&mut self, scope: &mut Scope, weakness: &Option<Weakness>, path: &str) {
+        let Some(weak) = weakness else { return };
+        self.check_var_name(&weak.bind, &format!("{path}/weakness/bind"));
+        if weak.below > 4 {
+            self.error(
+                "E_PASSWORD_SCORE",
+                format!("{path}/weakness/below"),
+                "the score goes from 0 to 4",
+            );
+        }
+        let text = TypeRef::scalar(FieldType::String);
+        for (i, input) in weak.inputs.iter().enumerate() {
+            self.check_expr(
+                scope,
+                input,
+                Some(&text),
+                &format!("{path}/weakness/inputs/{i}"),
+            );
+        }
+        scope.bind(weak.bind.clone(), TypeRef::scalar(FieldType::Bool));
     }
 
     fn check_var_name(&mut self, name: &str, path: &str) {
@@ -7673,6 +7704,7 @@ mod tests {
                     id: "c".into(),
                     input: path("digest"),
                     bind: "hash".into(),
+                    weakness: None,
                 },
                 // The stored hash may be a plain string, an optional one, or absent.
                 Step::VerifyPassword {
@@ -7680,6 +7712,7 @@ mod tests {
                     password: path("token"),
                     stored: path("hash"),
                     bind: "ok".into(),
+                    weakness: None,
                 },
                 Step::VerifyPassword {
                     id: "e".into(),
@@ -7688,6 +7721,7 @@ mod tests {
                         value: serde_json::Value::Null,
                     },
                     bind: "ghost_ok".into(),
+                    weakness: None,
                 },
                 Step::Branch {
                     id: "f".into(),
@@ -7708,6 +7742,7 @@ mod tests {
             id: "c".into(),
             input: path("input.amount"),
             bind: "hash".into(),
+            weakness: None,
         };
         assert!(
             errors(&p).contains(&"E_TYPE_MISMATCH".to_string()),
@@ -7718,6 +7753,7 @@ mod tests {
             id: "c".into(),
             input: path("ok"),
             bind: "hash".into(),
+            weakness: None,
         };
         assert!(
             errors(&p).contains(&"E_UNKNOWN_PATH".to_string()),
@@ -7755,6 +7791,7 @@ mod tests {
                 password: path("input.order_id"),
                 stored: path("order.status"),
                 bind: "ok".into(),
+                weakness: None,
             },
         );
         assert!(errors(&p).is_empty(), "{:?}", errors(&p));

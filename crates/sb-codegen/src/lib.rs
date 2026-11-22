@@ -1029,12 +1029,22 @@ mod tests {
                     id: "c".into(),
                     input: path("digest"),
                     bind: "hash".into(),
+                    weakness: Some(sb_model::Weakness {
+                        bind: "weak_new".into(),
+                        below: 3,
+                        inputs: vec![],
+                    }),
                 },
                 Step::VerifyPassword {
                     id: "d".into(),
                     password: path("token"),
                     stored: path("hash"),
                     bind: "ok".into(),
+                    weakness: Some(sb_model::Weakness {
+                        bind: "weak_login".into(),
+                        below: 4,
+                        inputs: vec![path("token")],
+                    }),
                 },
                 Step::VerifyPassword {
                     id: "e".into(),
@@ -1043,6 +1053,7 @@ mod tests {
                         value: serde_json::Value::Null,
                     },
                     bind: "ghost_ok".into(),
+                    weakness: None,
                 },
             ],
         );
@@ -1065,6 +1076,13 @@ mod tests {
             "eda_runtime::crypto::verify_password(token.clone(), Some(hash.clone())).await;"
         ));
         assert!(api.contains("eda_runtime::crypto::verify_password(token.clone(), None).await;"));
+        // A weak password is told, not refused: the hash one is judged as it goes by, the login one only when it was right.
+        assert!(api.contains(
+            "let weak_new: bool = eda_runtime::password::is_weak(&(digest.clone()), &[], 3).await?;"
+        ));
+        assert!(api.contains(
+            "let weak_login: bool = ok && eda_runtime::password::is_weak(&(token.clone()), &[(token.clone()).as_str()], 4).await?;"
+        ));
         // The runtime ships the module and what it needs.
         assert!(file(&files, "runtime/src/crypto.rs").contains("spawn_blocking"));
         assert!(file(&files, "runtime/Cargo.toml").contains("argon2.workspace = true"));

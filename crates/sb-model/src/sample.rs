@@ -951,6 +951,7 @@ pub fn add_signup(p: &mut Project) {
                 id: "s1".into(),
                 input: path("input.password"),
                 bind: "password_hash".into(),
+                weakness: None,
             },
             Step::Respond {
                 id: "s2".into(),
@@ -1176,6 +1177,7 @@ pub fn add_login(p: &mut Project) {
                 password: path("input.password"),
                 stored: path("stored"),
                 bind: "password_ok".into(),
+                weakness: None,
             },
             // The same answer whether the e-mail or the password was wrong.
             Step::Branch {

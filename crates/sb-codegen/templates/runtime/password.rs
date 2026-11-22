@@ -126,6 +126,19 @@ pub async fn check(
     Ok(judgment.score)
 }
 
+/// Whether the password is weak (a score under `below`), without refusing it: what `weakness` of `hashPassword` and
+/// `verifyPassword` binds, to tell the person to change it.
+pub async fn is_weak(password: &str, inputs: &[&str], below: u8) -> Result<bool> {
+    let (password, inputs): (String, Vec<String>) =
+        (password.to_owned(), inputs.iter().map(|i| (*i).to_owned()).collect());
+    let judgment = tokio::task::spawn_blocking(move || {
+        let refs: Vec<&str> = inputs.iter().map(String::as_str).collect();
+        judge(&password, &refs)
+    })
+    .await?;
+    Ok(judgment.score < below)
+}
+
 /// The SHA-1 of the password in upper-case hexadecimal, split into what is sent (five characters) and what stays.
 fn split_hash(password: &str) -> (String, String) {
     let hash = hex::encode_upper(Sha1::digest(password.as_bytes()));
@@ -220,6 +233,13 @@ mod tests {
         let started = std::time::Instant::now();
         assert_eq!(judge(&long, &[]).score, 4);
         assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn a_weak_password_is_told_not_refused() {
+        assert!(is_weak("password", &[], 3).await.unwrap());
+        assert!(!is_weak("q7#Vf!z9Lm2@xT4w", &[], 3).await.unwrap());
+        assert!(!is_weak("password", &[], 0).await.unwrap());
     }
 
     fn refused(error: anyhow::Error) -> (u16, String) {

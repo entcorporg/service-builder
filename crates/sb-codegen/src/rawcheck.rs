@@ -321,15 +321,24 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                 expr(account, &format!("{path}/account"), out);
                 expr(code, &format!("{path}/code"), out);
             }
-            Step::HashPassword { input, .. }
-            | Step::Sha256 { input, .. }
+            Step::HashPassword {
+                input, weakness, ..
+            } => {
+                expr(input, &format!("{path}/input"), out);
+                weak_exprs(weakness, &path, out);
+            }
+            Step::Sha256 { input, .. }
             | Step::Encrypt { input, .. }
             | Step::Decrypt { input, .. } => expr(input, &format!("{path}/input"), out),
             Step::VerifyPassword {
-                password, stored, ..
+                password,
+                stored,
+                weakness,
+                ..
             } => {
                 expr(password, &format!("{path}/password"), out);
                 expr(stored, &format!("{path}/stored"), out);
+                weak_exprs(weakness, &path, out);
             }
             Step::RandomToken { .. } => {}
             Step::HttpCall {
@@ -397,6 +406,14 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                     push(out, format!("{path}/code"), e);
                 }
             }
+        }
+    }
+}
+
+fn weak_exprs(weakness: &Option<sb_model::Weakness>, path: &str, out: &mut Vec<Diagnostic>) {
+    if let Some(weak) = weakness {
+        for (i, input) in weak.inputs.iter().enumerate() {
+            expr(input, &format!("{path}/weakness/inputs/{i}"), out);
         }
     }
 }

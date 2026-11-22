@@ -1594,6 +1594,9 @@ pub enum Step {
         id: String,
         input: Expr,
         bind: String,
+        /// Judge the password as it goes by, without refusing it: tells the visitor it is weak (`passwordStrength` refuses).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        weakness: Option<Weakness>,
     },
     /// Checks a password against a stored hash into a `bool`. `stored` may be absent (an unknown
     /// account): the check then runs against a dummy hash, so that it takes as long as a real
@@ -1604,6 +1607,10 @@ pub enum Step {
         password: Expr,
         stored: Expr,
         bind: String,
+        /// Judge the password once it is right (a wrong one is not judged), without refusing the login: a way to tell the
+        /// person to change a weak password.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        weakness: Option<Weakness>,
     },
     /// Issues an API key to a client that is a machine, not a person: `sbk_<id>_<secret>`, a readable prefix and an id (what the
     /// client and the lists name), then 256 random bits. Only the SHA-256 of the secret is stored (it is random enough for a fast
@@ -2621,6 +2628,19 @@ fn default_sequence_start() -> i64 {
 /// The score under which `passwordStrength` refuses a password: "safely unguessable".
 pub const DEFAULT_MIN_PASSWORD_SCORE: u8 = 3;
 
+/// A judgment of a clear password that refuses nothing: `bind` (a `bool`) is true when the score (zxcvbn, 0 to 4) is under
+/// `below` (3 by default), so that the answer can ask the person to change it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Weakness {
+    pub bind: String,
+    #[serde(default = "default_min_score")]
+    pub below: u8,
+    /// Texts the password must not be made of: the e-mail address, the name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<Expr>,
+}
+
 fn default_min_score() -> u8 {
     DEFAULT_MIN_PASSWORD_SCORE
 }
@@ -3220,7 +3240,15 @@ impl Service {
     pub fn uses_password_strength(&self) -> bool {
         let mut used = false;
         for step in self.handler_steps() {
-            step.walk(&mut |s| used |= matches!(s, Step::PasswordStrength { .. }));
+            step.walk(&mut |s| {
+                used |= match s {
+                    Step::PasswordStrength { .. } => true,
+                    Step::HashPassword { weakness, .. } | Step::VerifyPassword { weakness, .. } => {
+                        weakness.is_some()
+                    }
+                    _ => false,
+                }
+            });
         }
         used
     }

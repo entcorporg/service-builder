@@ -13,6 +13,7 @@
 
 use std::collections::BTreeSet;
 
+use sb_model::Weakness;
 use sb_model::names::route_params;
 use sb_model::names::{shouty, snake, topic_const};
 use sb_model::typing::{Scope, TypeRef};
@@ -3139,9 +3140,15 @@ fn steps(
             }
             Step::Sql { .. } => sql_step(c, project, service, scope, step)?,
             Step::HttpCall { .. } => crate::http_call::http_call_step(c, project, scope, step)?,
-            Step::HashPassword { input, bind, .. } => {
+            Step::HashPassword {
+                input,
+                bind,
+                weakness,
+                ..
+            } => {
                 let text = TypeRef::scalar(FieldType::String);
                 let input = lower(project, scope, input, &text)?;
+                weakness_line(c, project, scope, weakness, &input)?;
                 c.line(format!(
                     "let {bind}: String = eda_runtime::crypto::hash_password({input}).await?;"
                 ));
@@ -3151,6 +3158,7 @@ fn steps(
                 password,
                 stored,
                 bind,
+                weakness,
                 ..
             } => {
                 let text = TypeRef::scalar(FieldType::String);
@@ -3164,6 +3172,12 @@ fn steps(
                     "let {bind}: bool = eda_runtime::crypto::verify_password({password}, {stored}).await;"
                 ));
                 scope.bind(bind.clone(), TypeRef::scalar(FieldType::Bool));
+                // Only a right password is judged: the weakness of a wrong guess says nothing.
+                if let Some(weak) = weakness {
+                    let line = weakness_expr(project, scope, weak, &password)?;
+                    c.line(format!("let {}: bool = {bind} && {line};", weak.bind));
+                    scope.bind(weak.bind.clone(), TypeRef::scalar(FieldType::Bool));
+                }
             }
             Step::Encrypt {
                 key_env,
@@ -4364,4 +4378,42 @@ fn describe(step: &Step) -> String {
         Step::Include { fragment, .. } => format!("include {fragment}"),
         Step::Code { .. } => "custom code".into(),
     }
+}
+
+/// `eda_runtime::password::is_weak(...)`: true when the score of the clear password is under `below`.
+fn weakness_expr(
+    project: &Project,
+    scope: &mut Scope,
+    weak: &Weakness,
+    password: &str,
+) -> Result<String, CodegenError> {
+    let text = TypeRef::scalar(FieldType::String);
+    let mut words = vec![];
+    for input in &weak.inputs {
+        words.push(format!(
+            "({}).as_str()",
+            lower(project, scope, input, &text)?
+        ));
+    }
+    Ok(format!(
+        "eda_runtime::password::is_weak(&({password}), &[{}], {}).await?",
+        words.join(", "),
+        weak.below
+    ))
+}
+
+/// The line that binds the weakness of a password about to be hashed, if the step asks for it.
+fn weakness_line(
+    c: &mut Code,
+    project: &Project,
+    scope: &mut Scope,
+    weakness: &Option<Weakness>,
+    password: &str,
+) -> Result<(), CodegenError> {
+    if let Some(weak) = weakness {
+        let call = weakness_expr(project, scope, weak, password)?;
+        c.line(format!("let {}: bool = {call};", weak.bind));
+        scope.bind(weak.bind.clone(), TypeRef::scalar(FieldType::Bool));
+    }
+    Ok(())
 }
