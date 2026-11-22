@@ -36,6 +36,11 @@ pub fn toolbar(app: &mut App, ui: &mut egui::Ui) {
         });
 }
 
+/// The version shown next to the brand, e.g. `v3.9.4`.
+fn version_label() -> String {
+    format!("v{}", env!("CARGO_PKG_VERSION"))
+}
+
 fn bar(app: &mut App, ui: &mut egui::Ui) {
     let room = room(ui);
     // The brand.
@@ -47,6 +52,8 @@ fn bar(app: &mut App, ui: &mut egui::Ui) {
         );
         if room != Room::Narrow {
             ui.label(RichText::new("Service Builder").font(bold(MD)));
+            ui.label(RichText::new(version_label()).font(mono(SM)).color(FAINT))
+                .on_hover_text("Version de Service Builder");
         }
     });
 
@@ -349,4 +356,14 @@ fn menu(app: &mut App, ui: &mut egui::Ui, room: Room) {
             app.later(crate::files::export_infra);
         }
     });
+}
+
+#[cfg(test)]
+mod version_tests {
+    #[test]
+    fn the_header_shows_the_crate_version() {
+        let label = super::version_label();
+        assert!(label.starts_with('v'));
+        assert_eq!(&label[1..], env!("CARGO_PKG_VERSION"));
+    }
 }
