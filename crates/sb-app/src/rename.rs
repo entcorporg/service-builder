@@ -131,6 +131,15 @@ pub fn topic(p: &mut Project, from: &str, to: &str) {
             if kind(o) == "publish" {
                 set_if(o, "topic", from, to);
             }
+            // The audit event of a refusing check.
+            if matches!(kind(o), "verifyPassword" | "totpVerify" | "recoveryCodeUse")
+                && let Some(Value::Object(publish)) = o
+                    .get_mut("onFail")
+                    .and_then(Value::as_object_mut)
+                    .and_then(|f| f.get_mut("publish"))
+            {
+                set_if(publish, "topic", from, to);
+            }
         });
     }
 }

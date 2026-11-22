@@ -13,10 +13,10 @@
 
 use std::collections::BTreeSet;
 
-use sb_model::Weakness;
 use sb_model::names::route_params;
 use sb_model::names::{shouty, snake, topic_const};
 use sb_model::typing::{Scope, TypeRef};
+use sb_model::{Assignment, OnFail, Weakness};
 use sb_model::{
     BodyFormat, CSV_MAX_BODY_BYTES, Column, ColumnType, CsvMode, DEFAULT_HTTP_PORT, Expr,
     FieldType, HttpMethod, Message, Project, RequestSource, Rule, Service, SqlOp, Step, csv_list,
@@ -289,6 +289,9 @@ fn used_topics<'a>(project: &'a Project, service: &Service) -> Vec<&'a sb_model:
             if let Step::Publish { topic, .. } = s {
                 names.insert(topic);
             }
+            if let Some(fail) = s.fail_publish() {
+                names.insert(&fail.topic);
+            }
         });
     }
     project
@@ -302,7 +305,9 @@ fn used_topics<'a>(project: &'a Project, service: &Service) -> Vec<&'a sb_model:
 fn publishes(service: &Service) -> bool {
     let mut found = false;
     for step in service.handler_steps() {
-        step.walk(&mut |s| found |= matches!(s, Step::Publish { .. }));
+        step.walk(&mut |s| {
+            found |= matches!(s, Step::Publish { .. }) || s.fail_publish().is_some()
+        });
     }
     found
 }
@@ -2459,24 +2464,7 @@ fn steps(
                 c.line(format!("{name} = {value};"));
             }
             Step::Publish { topic, payload, .. } => {
-                let t = project
-                    .topic(topic)
-                    .ok_or_else(|| CodegenError::Internal(format!("unknown topic `{topic}`")))?;
-                let literal = struct_literal(project, scope, &t.message, payload)?;
-                c.block();
-                c.line(format!("let event = {literal};"));
-                let key = match &t.key_field {
-                    Some(key) => {
-                        c.line(format!("let key = event.{key}.to_string();"));
-                        "Some(&key)"
-                    }
-                    None => "None",
-                };
-                c.line(format!(
-                    "eda_runtime::outbox::enqueue(&mut tx, topics::{}, {key}, &event).await?;",
-                    topic_const(topic)
-                ));
-                c.close();
+                publish_lines(c, project, scope, topic, payload)?;
             }
             Step::PublishLive {
                 service: realtime,
@@ -3159,6 +3147,7 @@ fn steps(
                 stored,
                 bind,
                 weakness,
+                on_fail,
                 ..
             } => {
                 let text = TypeRef::scalar(FieldType::String);
@@ -3172,6 +3161,17 @@ fn steps(
                     "let {bind}: bool = eda_runtime::crypto::verify_password({password}, {stored}).await;"
                 ));
                 scope.bind(bind.clone(), TypeRef::scalar(FieldType::Bool));
+                if let Some(on_fail) = on_fail {
+                    c.open(format!("if !{bind}"));
+                    on_fail_lines(
+                        c,
+                        project,
+                        scope,
+                        on_fail,
+                        "eda_runtime::http::HttpError::unauthorized(\"invalid credentials\").into()",
+                    )?;
+                    c.close();
+                }
                 // Only a right password is judged: the weakness of a wrong guess says nothing.
                 if let Some(weak) = weakness {
                     let line = weakness_expr(project, scope, weak, &password)?;
@@ -3309,15 +3309,17 @@ fn steps(
                 sealed,
                 code,
                 account,
+                on_fail,
                 ..
             } => {
                 let text = TypeRef::scalar(FieldType::String);
                 let sealed = lower(project, scope, sealed, &text)?;
                 let code = lower(project, scope, code, &text)?;
                 let account = lower(project, scope, account, &text)?;
-                c.line(format!(
-                    "eda_runtime::totp::verify(&mut tx, {key_env:?}, &{sealed}, &{code}, &{account}).await?;"
-                ));
+                let call = format!(
+                    "eda_runtime::totp::verify(&mut tx, {key_env:?}, &{sealed}, &{code}, &{account}).await"
+                );
+                refusing_call(c, project, scope, &call, on_fail.as_ref())?;
             }
             Step::RecoveryCodes {
                 account,
@@ -3338,13 +3340,19 @@ fn steps(
                     },
                 );
             }
-            Step::RecoveryCodeUse { account, code, .. } => {
+            Step::RecoveryCodeUse {
+                account,
+                code,
+                on_fail,
+                ..
+            } => {
                 let text = TypeRef::scalar(FieldType::String);
                 let account = lower(project, scope, account, &text)?;
                 let code = lower(project, scope, code, &text)?;
-                c.line(format!(
-                    "eda_runtime::totp::use_recovery_code(&mut tx, &{account}, &{code}).await?;"
-                ));
+                let call = format!(
+                    "eda_runtime::totp::use_recovery_code(&mut tx, &{account}, &{code}).await"
+                );
+                refusing_call(c, project, scope, &call, on_fail.as_ref())?;
             }
             Step::PasskeyRegisterStart {
                 account,
@@ -4400,6 +4408,88 @@ fn weakness_expr(
         words.join(", "),
         weak.below
     ))
+}
+
+/// Queues an event in the outbox of the run (what `publish` and the `onFail` of a check do).
+fn publish_lines(
+    c: &mut Code,
+    project: &Project,
+    scope: &Scope,
+    topic: &str,
+    payload: &[Assignment],
+) -> Result<(), CodegenError> {
+    let t = project
+        .topic(topic)
+        .ok_or_else(|| CodegenError::Internal(format!("unknown topic `{topic}`")))?;
+    let literal = struct_literal(project, scope, &t.message, payload)?;
+    c.block();
+    c.line(format!("let event = {literal};"));
+    let key = match &t.key_field {
+        Some(key) => {
+            c.line(format!("let key = event.{key}.to_string();"));
+            "Some(&key)"
+        }
+        None => "None",
+    };
+    c.line(format!(
+        "eda_runtime::outbox::enqueue(&mut tx, topics::{}, {key}, &event).await?;",
+        topic_const(topic)
+    ));
+    c.close();
+    Ok(())
+}
+
+/// A runtime check that returns `Err` to refuse. Without `onFail` the refusal is propagated as it is. With it, a refusal that is an
+/// answer (an `HttpError`, not a failure of the database) queues the event, commits and answers; any other error goes up untouched.
+fn refusing_call(
+    c: &mut Code,
+    project: &Project,
+    scope: &Scope,
+    call: &str,
+    on_fail: Option<&OnFail>,
+) -> Result<(), CodegenError> {
+    let Some(on_fail) = on_fail else {
+        c.line(format!("{call}?;"));
+        return Ok(());
+    };
+    c.open(format!("if let Err(refusal) = {call}"));
+    c.line("if refusal.downcast_ref::<eda_runtime::http::HttpError>().is_none() {");
+    c.line("return Err(refusal);");
+    c.line("}");
+    on_fail_lines(c, project, scope, on_fail, "refusal")?;
+    c.close();
+    Ok(())
+}
+
+/// What a refusing check does before it answers: queue the audit event, **commit** (a plain refusal drops the transaction and
+/// the event with it), then return `error` (an expression of the answer). The caller has opened the block of the refusal.
+fn on_fail_lines(
+    c: &mut Code,
+    project: &Project,
+    scope: &Scope,
+    on_fail: &OnFail,
+    default_error: &str,
+) -> Result<(), CodegenError> {
+    if let Some(publish) = &on_fail.publish {
+        publish_lines(c, project, scope, &publish.topic, &publish.payload)?;
+        c.line("tx.commit().await?;");
+    }
+    match &on_fail.fail {
+        Some(fail) => {
+            c.line(format!(
+                "let error = eda_runtime::http::HttpError::new({}, {:?});",
+                fail.status, fail.message
+            ));
+            if let Some(code) = &fail.code {
+                c.line(format!("let error = error.with_code({code:?});"));
+            }
+            c.line("return Err(error.into());");
+        }
+        None => {
+            c.line(format!("return Err({default_error});"));
+        }
+    }
+    Ok(())
 }
 
 /// The line that binds the weakness of a password about to be hashed, if the step asks for it.

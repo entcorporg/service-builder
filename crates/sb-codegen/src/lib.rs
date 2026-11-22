@@ -1045,6 +1045,7 @@ mod tests {
                         below: 4,
                         inputs: vec![path("token")],
                     }),
+                    on_fail: None,
                 },
                 Step::VerifyPassword {
                     id: "e".into(),
@@ -1054,6 +1055,7 @@ mod tests {
                     },
                     bind: "ghost_ok".into(),
                     weakness: None,
+                    on_fail: None,
                 },
             ],
         );
@@ -1087,6 +1089,81 @@ mod tests {
         assert!(file(&files, "runtime/src/crypto.rs").contains("spawn_blocking"));
         assert!(file(&files, "runtime/Cargo.toml").contains("argon2.workspace = true"));
         assert!(file(&files, "Cargo.toml").contains("argon2 = \"0.6\""));
+    }
+
+    #[test]
+    fn a_refusing_check_publishes_then_commits_before_it_answers() {
+        use sb_model::{Assignment, Expr, FailAs, FailPublish, OnFail, Step};
+        let path = |p: &str| Expr::Path { path: p.into() };
+        let set = |f: &str, e: Expr| Assignment {
+            field: f.into(),
+            value: e,
+        };
+        let audit = || FailPublish {
+            topic: "orders.created".into(),
+            payload: vec![
+                set("order_id", path("order_id")),
+                set("customer", path("input.customer")),
+                set("amount", path("input.amount")),
+                set("items", path("input.items")),
+            ],
+        };
+        let mut p = sample::orders();
+        // Where `order_id` is known and the input is the order: in front of the publish of the handler.
+        let at = p.services[0].rpcs[0]
+            .steps
+            .iter()
+            .position(|s| s.id() == "o3")
+            .expect("the sample publishes at o3");
+        p.services[0].rpcs[0].steps.splice(
+            at..at,
+            [Step::VerifyPassword {
+                id: "va".into(),
+                password: path("order_id"),
+                stored: path("order_id"),
+                bind: "ok".into(),
+                weakness: None,
+                on_fail: Some(OnFail {
+                    publish: Some(audit()),
+                    fail: Some(FailAs {
+                        status: 403,
+                        message: "no".into(),
+                        code: Some("BAD_LOGIN".into()),
+                    }),
+                }),
+            }],
+        );
+        p.services[0].routes[0].steps.insert(
+            0,
+            Step::RecoveryCodeUse {
+                id: "vb".into(),
+                account: Expr::Literal { value: "a".into() },
+                code: Expr::Literal { value: "c".into() },
+                on_fail: Some(OnFail {
+                    publish: Some(FailPublish {
+                        topic: "orders.created".into(),
+                        payload: vec![set("order_id", Expr::Literal { value: "x".into() })],
+                    }),
+                    fail: None,
+                }),
+            },
+        );
+        let v = sb_model::validate(&p);
+        let own: Vec<_> = v.iter().filter(|d| d.path.contains("onFail")).collect();
+        assert!(own.is_empty(), "{own:?}");
+        let files = generate(&p).unwrap();
+        let rpc = file(&files, "services/orders/src/flows/rpc.rs");
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        assert!(rpc.contains("if !ok {"), "{api}");
+        assert!(rpc.contains("HttpError::new(403, \"no\")"));
+        assert!(rpc.contains("with_code(\"BAD_LOGIN\")"));
+        assert!(api.contains("if let Err(refusal) = eda_runtime::totp::use_recovery_code("));
+        assert!(api.contains("refusal.downcast_ref::<eda_runtime::http::HttpError>().is_none()"));
+        assert!(api.contains("return Err(refusal);"));
+        // The event is queued, then the transaction commits, then the refusal goes out.
+        let queued = rpc.find("if !ok {").unwrap();
+        let committed = rpc[queued..].find("tx.commit().await?;").unwrap();
+        assert!(committed > 0);
     }
 
     #[test]

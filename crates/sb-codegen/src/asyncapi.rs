@@ -170,6 +170,9 @@ fn publishes(service: &Service, topic: &str) -> bool {
             if let Step::Publish { topic: t, .. } = s {
                 found |= t == topic;
             }
+            if let Some(fail) = s.fail_publish() {
+                found |= fail.topic == topic;
+            }
         });
     }
     found

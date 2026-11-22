@@ -3476,39 +3476,7 @@ impl<'a> Checker<'a> {
                 false
             }
             Step::Publish { topic, payload, .. } => {
-                match p.topic(topic) {
-                    None => self.error(
-                        "E_UNKNOWN_TOPIC",
-                        format!("{path}/topic"),
-                        format!("unknown topic `{topic}`"),
-                    ),
-                    Some(t) => {
-                        if !t.producers.contains(&env.service.name) {
-                            self.error(
-                                "E_NOT_PRODUCER",
-                                format!("{path}/topic"),
-                                format!(
-                                    "`{}` is not a producer of `{topic}`: declare it on the topic (draw the arrow from the service to the topic)",
-                                    env.service.name
-                                ),
-                            );
-                        }
-                        if let Some(msg) = p.message(&t.message) {
-                            self.assignments(msg, payload, scope, &format!("{path}/payload"));
-                            if let Some(key) = &t.key_field
-                                && !payload.iter().any(|a| &a.field == key)
-                            {
-                                self.warn(
-                                        "W_KEY_FIELD_UNSET",
-                                        format!("{path}/payload"),
-                                        format!(
-                                            "key field `{key}` of topic `{topic}` is not set; records will get an empty key"
-                                        ),
-                                    );
-                            }
-                        }
-                    }
-                }
+                self.check_publish(env, path, topic, payload, scope);
                 false
             }
             Step::SessionTrace {
@@ -3980,8 +3948,10 @@ impl<'a> Checker<'a> {
                 sealed,
                 code,
                 account,
+                on_fail,
                 ..
             } => {
+                self.check_on_fail(env, path, on_fail, scope);
                 self.totp_in_route(env, path, "a refused code");
                 self.jwt_key_env(&format!("{path}/keyEnv"), key_env);
                 let text = TypeRef::scalar(FieldType::String);
@@ -4015,7 +3985,13 @@ impl<'a> Checker<'a> {
                 );
                 false
             }
-            Step::RecoveryCodeUse { account, code, .. } => {
+            Step::RecoveryCodeUse {
+                account,
+                code,
+                on_fail,
+                ..
+            } => {
+                self.check_on_fail(env, path, on_fail, scope);
                 self.totp_in_route(env, path, "a refused recovery code");
                 let text = TypeRef::scalar(FieldType::String);
                 self.check_expr(scope, account, Some(&text), &format!("{path}/account"));
@@ -4717,11 +4693,13 @@ impl<'a> Checker<'a> {
                 stored,
                 bind,
                 weakness,
+                on_fail,
                 ..
             } => {
                 self.check_var_name(bind, &format!("{path}/bind"));
                 let text = TypeRef::scalar(FieldType::String);
                 self.check_weakness(scope, weakness, path);
+                self.check_on_fail(env, path, on_fail, scope);
                 // The stored hash may be absent: an unknown account.
                 let maybe = TypeRef {
                     optional: true,
@@ -5618,6 +5596,93 @@ impl<'a> Checker<'a> {
     }
 
     /// The `weakness` of a step that sees a clear password: a `bool` variable, a score from 0 to 4, texts for `inputs`.
+    fn check_publish(
+        &mut self,
+        env: &Env,
+        path: &str,
+        topic: &str,
+        payload: &[Assignment],
+        scope: &mut Scope,
+    ) {
+        let p = self.project;
+        match p.topic(topic) {
+            None => self.error(
+                "E_UNKNOWN_TOPIC",
+                format!("{path}/topic"),
+                format!("unknown topic `{topic}`"),
+            ),
+            Some(t) => {
+                if !t.producers.contains(&env.service.name) {
+                    self.error(
+                        "E_NOT_PRODUCER",
+                        format!("{path}/topic"),
+                        format!(
+                            "`{}` is not a producer of `{topic}`: declare it on the topic (draw the arrow from the service to the topic)",
+                            env.service.name
+                        ),
+                    );
+                }
+                if let Some(msg) = p.message(&t.message) {
+                    self.assignments(msg, payload, scope, &format!("{path}/payload"));
+                    if let Some(key) = &t.key_field
+                        && !payload.iter().any(|a| &a.field == key)
+                    {
+                        self.warn(
+                                "W_KEY_FIELD_UNSET",
+                                format!("{path}/payload"),
+                                format!(
+                                    "key field `{key}` of topic `{topic}` is not set; records will get an empty key"
+                                ),
+                            );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The `onFail` of a refusing check: the event it publishes (checked like `publish`) and the answer it gives.
+    fn check_on_fail(
+        &mut self,
+        env: &Env,
+        path: &str,
+        on_fail: &Option<OnFail>,
+        scope: &mut Scope,
+    ) {
+        let Some(on_fail) = on_fail else { return };
+        if on_fail.publish.is_none() && on_fail.fail.is_none() {
+            self.error(
+                "E_ON_FAIL_EMPTY",
+                format!("{path}/onFail"),
+                "`onFail` does nothing: give it a `publish` (the audit event) and/or a `fail` (the answer)",
+            );
+        }
+        if let Some(publish) = &on_fail.publish {
+            let at = format!("{path}/onFail/publish");
+            self.check_publish(env, &at, &publish.topic, &publish.payload, scope);
+        }
+        if let Some(fail) = &on_fail.fail {
+            let at = format!("{path}/onFail/fail");
+            self.check_error_code(fail.code.as_deref(), &format!("{at}/code"));
+            if !(400..=599).contains(&fail.status) || matches!(fail.status, 429 | 503) {
+                self.error(
+                    "E_FAIL_STATUS",
+                    format!("{at}/status"),
+                    format!(
+                        "`{}` is not an error status (400 to 599, without 429 and 503)",
+                        fail.status
+                    ),
+                );
+            }
+            if fail.message.trim().is_empty() {
+                self.error(
+                    "E_FAIL_MESSAGE",
+                    format!("{at}/message"),
+                    "say what the client is told (a 5xx answers a generic text and logs this one)",
+                );
+            }
+        }
+    }
+
     fn check_weakness(&mut self, scope: &mut Scope, weakness: &Option<Weakness>, path: &str) {
         let Some(weak) = weakness else { return };
         self.check_var_name(&weak.bind, &format!("{path}/weakness/bind"));
@@ -7713,6 +7778,7 @@ mod tests {
                     stored: path("hash"),
                     bind: "ok".into(),
                     weakness: None,
+                    on_fail: None,
                 },
                 Step::VerifyPassword {
                     id: "e".into(),
@@ -7722,6 +7788,7 @@ mod tests {
                     },
                     bind: "ghost_ok".into(),
                     weakness: None,
+                    on_fail: None,
                 },
                 Step::Branch {
                     id: "f".into(),
@@ -7774,6 +7841,43 @@ mod tests {
     }
 
     #[test]
+    fn on_fail_is_checked_like_a_publish_and_a_fail() {
+        let mut p = sample::orders();
+        let step = |on_fail| Step::VerifyPassword {
+            id: "v".into(),
+            password: path("input.order_id"),
+            stored: path("input.order_id"),
+            bind: "ok".into(),
+            weakness: None,
+            on_fail: Some(on_fail),
+        };
+        let codes = errors;
+        p.services[0].rpcs[0].steps.insert(
+            0,
+            step(OnFail {
+                publish: None,
+                fail: None,
+            }),
+        );
+        assert!(codes(&p).contains(&"E_ON_FAIL_EMPTY".to_string()));
+        p.services[0].rpcs[0].steps[0] = step(OnFail {
+            publish: Some(FailPublish {
+                topic: "nope".into(),
+                payload: vec![],
+            }),
+            fail: Some(FailAs {
+                status: 200,
+                message: " ".into(),
+                code: None,
+            }),
+        });
+        let found = codes(&p);
+        for code in ["E_UNKNOWN_TOPIC", "E_FAIL_STATUS", "E_FAIL_MESSAGE"] {
+            assert!(found.contains(&code.to_string()), "{code} in {found:?}");
+        }
+    }
+
+    #[test]
     fn a_stored_hash_can_come_from_an_optional_column() {
         let mut p = sample::orders();
         // `get_order` reads `status`. Make it nullable, as the hash column of a table whose rows may lack one;
@@ -7792,6 +7896,7 @@ mod tests {
                 stored: path("order.status"),
                 bind: "ok".into(),
                 weakness: None,
+                on_fail: None,
             },
         );
         assert!(errors(&p).is_empty(), "{:?}", errors(&p));

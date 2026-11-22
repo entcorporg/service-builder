@@ -1178,6 +1178,7 @@ pub fn add_login(p: &mut Project) {
                 stored: path("stored"),
                 bind: "password_ok".into(),
                 weakness: None,
+                on_fail: None,
             },
             // The same answer whether the e-mail or the password was wrong.
             Step::Branch {
@@ -1553,6 +1554,7 @@ pub fn add_totp(p: &mut Project) {
                 sealed: path("factor.secret_sealed"),
                 code: path("input.code"),
                 account: path("input.account"),
+                on_fail: audit_on_fail("CODE_REFUSE"),
             },
             ack("f8"),
         ],
@@ -1574,6 +1576,7 @@ pub fn add_totp(p: &mut Project) {
                 id: "f10".into(),
                 account: path("input.account"),
                 code: path("input.code"),
+                on_fail: audit_on_fail("CODE_REFUSE"),
             },
             ack("f11"),
         ],
@@ -3801,4 +3804,19 @@ pub fn add_http_calls(p: &mut Project) {
             },
         ],
     });
+}
+
+/// An audit event for the `onFail` of a check: the refusal is published (and committed) before it is answered.
+fn audit_on_fail(code: &str) -> Option<OnFail> {
+    Some(OnFail {
+        publish: Some(FailPublish {
+            topic: "orders.created".into(),
+            payload: vec![set("order_id", lit("refused"))],
+        }),
+        fail: Some(FailAs {
+            status: 401,
+            message: "refused".into(),
+            code: Some(code.into()),
+        }),
+    })
 }

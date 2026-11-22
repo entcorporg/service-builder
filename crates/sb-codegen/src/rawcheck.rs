@@ -70,6 +70,13 @@ fn mail_templates(si: usize, s: &sb_model::Service, out: &mut Vec<Diagnostic>) {
 fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
     for (i, step) in list.iter().enumerate() {
         let path = format!("{base}/{i}");
+        if let Some(fail) = step.fail_publish() {
+            assignments(
+                &fail.payload,
+                &format!("{path}/onFail/publish/payload"),
+                out,
+            );
+        }
         match step {
             Step::Log { .. } | Step::Include { .. } => {}
             Step::Let { value, .. } | Step::Assign { value, .. } => {

@@ -1611,6 +1611,10 @@ pub enum Step {
         /// person to change a weak password.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         weakness: Option<Weakness>,
+        /// When the password is wrong: publish an audit event, then refuse (`401 invalid credentials` unless `fail` says
+        /// otherwise). Left out, the step binds `false` and the flow goes on.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_fail: Option<OnFail>,
     },
     /// Issues an API key to a client that is a machine, not a person: `sbk_<id>_<secret>`, a readable prefix and an id (what the
     /// client and the lists name), then 256 random bits. Only the SHA-256 of the secret is stored (it is random enough for a fast
@@ -1788,6 +1792,9 @@ pub enum Step {
         code: Expr,
         /// Whose last accepted time step is kept: an id, not an e-mail that can change.
         account: Expr,
+        /// When the code is refused: publish an audit event (committed), then answer `fail` or the usual 401.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_fail: Option<OnFail>,
     },
     /// Issues `count` recovery codes (`XXXXX-XXXXX`, 40 random bits each) for `account`, replacing the ones it had. Only
     /// their hashes are stored; `bind` receives the codes, a list of texts, to show once.
@@ -1805,6 +1812,9 @@ pub enum Step {
         id: String,
         account: Expr,
         code: Expr,
+        /// When the code is refused: publish an audit event (committed), then answer `fail` or the usual 401.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_fail: Option<OnFail>,
     },
     /// First request of registering a passkey (WebAuthn) for `account`, who is already authenticated: a challenge for the
     /// browser. `bind` receives the API schema `PasskeyChallenge`: `state_id` (given back to `passkeyRegisterFinish`) and
@@ -2479,6 +2489,18 @@ fn default_http_error_message() -> String {
 }
 
 impl Step {
+    /// The event a step publishes besides `Publish`: the audit event of an `onFail`.
+    pub fn fail_publish(&self) -> Option<&FailPublish> {
+        match self {
+            Step::VerifyPassword { on_fail, .. }
+            | Step::TotpVerify { on_fail, .. }
+            | Step::RecoveryCodeUse { on_fail, .. } => {
+                on_fail.as_ref().and_then(|o| o.publish.as_ref())
+            }
+            _ => None,
+        }
+    }
+
     pub fn id(&self) -> &str {
         match self {
             Step::Log { id, .. }
@@ -2639,6 +2661,37 @@ pub struct Weakness {
     /// Texts the password must not be made of: the e-mail address, the name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<Expr>,
+}
+
+/// What a refusing check does on its way out: an event for the audit trail and/or its own answer. The event is queued in the
+/// outbox and the transaction is **committed** before the refusal (a plain refusal rolls everything back, the event too), so
+/// what the flow wrote earlier is kept: put the check first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OnFail {
+    /// The event published when the check refuses: same shape as a `publish` step (topic of the service, payload).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish: Option<FailPublish>,
+    /// The answer, instead of the check's own (`401 invalid code`; `401 invalid credentials` for `verifyPassword`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail: Option<FailAs>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FailPublish {
+    pub topic: String,
+    #[serde(default)]
+    pub payload: Vec<Assignment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FailAs {
+    pub status: u16,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 fn default_min_score() -> u8 {
