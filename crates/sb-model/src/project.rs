@@ -420,6 +420,11 @@ pub struct Service {
     /// compressed). `Vary: Accept-Encoding` tells the caches. A service with no route has nothing to compress.
     #[serde(default, skip_serializing_if = "is_false")]
     pub compression: bool,
+    /// Describe the service's tables as a GraphQL schema (`contracts/graphql/<service>.graphql`): one type per table, read
+    /// queries by key and as paginated connections, and the relations its foreign keys draw. Only the schema is generated for
+    /// now; a frontend can already read it to know what one call will be able to fetch.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub graphql: bool,
     /// Named sequences of steps, written once and played by an `include` step in any handler of the service.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fragments: Vec<Fragment>,

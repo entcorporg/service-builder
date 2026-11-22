@@ -4,6 +4,9 @@
 
 pub mod asyncapi;
 mod expr;
+mod graphql;
+#[cfg(test)]
+mod graphql_tests;
 mod http_call;
 #[cfg(test)]
 mod journal_tests;
@@ -76,6 +79,18 @@ pub fn generate(project: &Project) -> Result<Vec<GeneratedFile>, CodegenError> {
             sb_model::ServiceKind::Mta => mta::generate(project, svc)?,
             sb_model::ServiceKind::Realtime => realtime::generate(project, svc)?,
         });
+    }
+    // The GraphQL schemas of the services that ask for one, next to the .proto: they are contracts.
+    for svc in &project.services {
+        if let Some(sdl) = graphql::sdl(svc) {
+            files.push(GeneratedFile::new(
+                format!(
+                    "contracts/graphql/{}.graphql",
+                    sb_model::names::snake(&svc.name)
+                ),
+                sdl,
+            ));
+        }
     }
     // Safety net: a generator bug must surface here, not as a cryptic compiler error later.
     for f in files.iter().filter(|f| f.path.ends_with(".rs")) {

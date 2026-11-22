@@ -205,6 +205,7 @@ pub fn orders() -> Project {
         realtime: None,
         challenge: None,
         compression: false,
+        graphql: false,
         fragments: Vec::new(),
         rpcs: vec![
             Rpc {
@@ -451,6 +452,7 @@ pub fn orders() -> Project {
         realtime: None,
         challenge: None,
         compression: false,
+        graphql: false,
         fragments: Vec::new(),
         rpcs: vec![],
         http_port: None,
@@ -513,6 +515,7 @@ pub fn orders() -> Project {
         realtime: None,
         challenge: None,
         compression: false,
+        graphql: false,
         fragments: Vec::new(),
         rpcs: vec![],
         http_port: None,
@@ -3058,6 +3061,7 @@ pub fn add_mailer(p: &mut Project) {
         realtime: None,
         challenge: None,
         compression: false,
+        graphql: false,
         fragments: Vec::new(),
     });
 }
@@ -3123,6 +3127,7 @@ pub fn add_realtime(p: &mut Project) {
         realtime: Some(RealtimeConfig::default()),
         challenge: None,
         compression: false,
+        graphql: false,
         fragments: Vec::new(),
     });
 }

@@ -843,6 +843,14 @@ impl<'a> Checker<'a> {
                 );
             }
 
+            if s.graphql && (s.kind != ServiceKind::Standard || s.tables.is_empty()) {
+                self.warn(
+                    "W_GRAPHQL_UNUSED",
+                    format!("{base}/graphql"),
+                    "the GraphQL schema describes the tables of a standard service: with none, nothing is generated",
+                );
+            }
+
             let mut rpc_names = HashSet::new();
             for (j, r) in s.rpcs.iter().enumerate() {
                 let rp = format!("{base}/rpcs/{j}");
@@ -8112,6 +8120,23 @@ mod tests {
             errors(&q).contains(&"E_TABLE_RESERVED".to_string()),
             "{:?}",
             errors(&q)
+        );
+    }
+
+    #[test]
+    fn graphql_is_a_setting_of_a_service_that_has_tables() {
+        let mut p = sample::orders();
+        p.services[0].graphql = true;
+        assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+        p.services[0].tables.clear();
+        assert!(has_warning(&p, "W_GRAPHQL_UNUSED"));
+        let mut q = sample::orders();
+        assert!(!serde_json::to_string(&q).unwrap().contains("graphql"));
+        q.services[0].graphql = true;
+        assert!(
+            serde_json::to_string(&q)
+                .unwrap()
+                .contains("\"graphql\":true")
         );
     }
 
