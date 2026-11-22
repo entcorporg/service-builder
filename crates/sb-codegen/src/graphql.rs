@@ -519,12 +519,17 @@ pub fn transport_rs(service: &Service) -> Option<String> {
                 .map(|p| format!("{p:?}"))
                 .collect();
             c.line(format!(
-                "    Mutation {{ field: {:?}, method: {:?}, path: {:?}, params: &[{}], body: {} }},",
+                "    Mutation {{ field: {:?}, method: {:?}, path: {:?}, params: &[{}], body: {}, roles: &[{}] }},",
                 camel(&r.name),
                 format!("{:?}", r.method).to_uppercase(),
                 r.path,
                 params.join(", "),
-                r.method.has_body()
+                r.method.has_body(),
+                service
+                    .graphql_mutation_roles
+                    .get(&r.name)
+                    .map(|roles| roles.iter().map(|r| format!("{r:?}")).collect::<Vec<_>>().join(", "))
+                    .unwrap_or_default()
             ));
         }
         c.line("];");

@@ -321,6 +321,37 @@ fn the_endpoint_path_and_the_roles_of_a_table_are_in_the_generated_code() {
 }
 
 #[test]
+fn the_roles_of_a_mutation_are_in_the_generated_code_and_checked() {
+    let mut p = served();
+    let route = p.services[0]
+        .routes
+        .iter()
+        .find(|r| {
+            r.method != sb_model::HttpMethod::Get && r.body_format != sb_model::BodyFormat::Csv
+        })
+        .expect("a writing route")
+        .name
+        .clone();
+    p.services[0]
+        .graphql_mutation_roles
+        .insert(route, vec!["admin".into()]);
+    let files = generate(&p).unwrap();
+    let code = find(&files, "services/orders/src/transport/graphql.rs").expect("endpoint");
+    assert!(code.contains("roles: &[\"admin\"] },"), "{code}");
+    assert!(
+        sb_model::validate(&p)
+            .iter()
+            .all(|d| d.code != "E_GRAPHQL_ROLE")
+    );
+    // A route that does not exist is refused.
+    p.services[0]
+        .graphql_mutation_roles
+        .insert("nothing".into(), vec![]);
+    let codes: Vec<String> = sb_model::validate(&p).into_iter().map(|d| d.code).collect();
+    assert!(codes.iter().any(|c| c == "E_GRAPHQL_ROLE"), "{codes:?}");
+}
+
+#[test]
 fn the_graphql_path_and_roles_are_checked() {
     let mut p = served();
     p.services[0].graphql_path = Some("graph".into());

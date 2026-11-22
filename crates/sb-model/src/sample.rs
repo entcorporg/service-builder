@@ -208,6 +208,7 @@ pub fn orders() -> Project {
         graphql: false,
         graphql_sources: Vec::new(),
         graphql_path: None,
+        graphql_mutation_roles: Default::default(),
         fragments: Vec::new(),
         rpcs: vec![
             Rpc {
@@ -457,6 +458,7 @@ pub fn orders() -> Project {
         graphql: false,
         graphql_sources: Vec::new(),
         graphql_path: None,
+        graphql_mutation_roles: Default::default(),
         fragments: Vec::new(),
         rpcs: vec![],
         http_port: None,
@@ -522,6 +524,7 @@ pub fn orders() -> Project {
         graphql: false,
         graphql_sources: Vec::new(),
         graphql_path: None,
+        graphql_mutation_roles: Default::default(),
         fragments: Vec::new(),
         rpcs: vec![],
         http_port: None,
@@ -3070,6 +3073,7 @@ pub fn add_mailer(p: &mut Project) {
         graphql: false,
         graphql_sources: Vec::new(),
         graphql_path: None,
+        graphql_mutation_roles: Default::default(),
         fragments: Vec::new(),
     });
 }
@@ -3138,6 +3142,7 @@ pub fn add_realtime(p: &mut Project) {
         graphql: false,
         graphql_sources: Vec::new(),
         graphql_path: None,
+        graphql_mutation_roles: Default::default(),
         fragments: Vec::new(),
     });
 }

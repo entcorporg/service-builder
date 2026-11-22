@@ -5255,6 +5255,31 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        for (name, roles) in &s.graphql_mutation_roles {
+            let at = format!("{base}/graphqlMutationRoles/{name}");
+            if !s
+                .routes
+                .iter()
+                .any(|r| &r.name == name && r.method != HttpMethod::Get)
+            {
+                self.error(
+                    "E_GRAPHQL_ROLE",
+                    at.clone(),
+                    "a mutation's roles name a POST/PUT/PATCH/DELETE route of the service",
+                );
+            }
+            let mut seen = HashSet::new();
+            if roles
+                .iter()
+                .any(|r| r.trim().is_empty() || !seen.insert(r.as_str()))
+            {
+                self.error(
+                    "E_GRAPHQL_ROLE",
+                    at,
+                    "a role is a non-empty name, listed once",
+                );
+            }
+        }
         for (i, t) in s.tables.iter().enumerate() {
             let mut seen = HashSet::new();
             for (j, role) in t.graphql_roles.iter().enumerate() {

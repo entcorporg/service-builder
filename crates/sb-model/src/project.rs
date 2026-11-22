@@ -439,6 +439,11 @@ pub struct Service {
     /// other route of the service on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graphql_path: Option<String>,
+    /// The roles allowed to call a mutation, by route name (the mutation of a route is named after it). The check runs before
+    /// the route is played, and a refusal is `ACCES_REFUSE`; a route that is not listed (or listed empty) is open to any
+    /// signed-in caller, the route still doing its own checks.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub graphql_mutation_roles: std::collections::BTreeMap<String, Vec<String>>,
     /// Named sequences of steps, written once and played by an `include` step in any handler of the service.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fragments: Vec<Fragment>,

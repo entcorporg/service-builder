@@ -78,6 +78,8 @@ pub struct Mutation {
     pub path: &'static str,
     pub params: &'static [&'static str],
     pub body: bool,
+    /// The roles allowed to call it; empty: any signed-in caller.
+    pub roles: &'static [&'static str],
 }
 
 /// Where the routes of the service listen and who is asking: the mutation sends the caller's own `access_token`, so the route
@@ -155,6 +157,12 @@ fn mutation_field(m: &'static Mutation) -> Field {
     Field::new(m.field, TypeRef::named("JSON"), move |ctx| {
         FieldFuture::new(async move {
             let lb = ctx.data::<Loopback>().map_err(|_| refuse("NON_AUTHENTIFIE", "not signed in"))?;
+            if !m.roles.is_empty() {
+                let access = ctx.data::<Access>().map_err(internal)?;
+                if !m.roles.iter().any(|r| access.roles.iter().any(|h| h == r)) {
+                    return Err(refuse("ACCES_REFUSE", "your role cannot call this mutation"));
+                }
+            }
             let mut input = match ctx.args.get("input") {
                 None => Map::new(),
                 Some(v) => match v.as_value().clone().into_json() {
@@ -563,9 +571,26 @@ mod tests {
     }];
 
     static MUTATIONS: &[Mutation] = &[
-        Mutation { field: "createArticle", method: "POST", path: "/articles", params: &[], body: true },
-        Mutation { field: "renameArticle", method: "PUT", path: "/articles/{id}", params: &["id"], body: true },
+        Mutation { field: "createArticle", method: "POST", path: "/articles", params: &[], body: true, roles: &[] },
+        Mutation { field: "renameArticle", method: "PUT", path: "/articles/{id}", params: &["id"], body: true, roles: &[] },
+        Mutation { field: "purgeArticle", method: "DELETE", path: "/articles/{id}", params: &["id"], body: false, roles: &["admin"] },
     ];
+
+    #[tokio::test]
+    async fn a_mutation_with_roles_is_refused_before_the_route_is_played() {
+        let e = endpoint(true, 8, 200);
+        // The loopback points nowhere: a refusal here can only come from the role check.
+        let run = |roles: Vec<String>| {
+            let lb = Loopback { base: "http://127.0.0.1:1".into(), token: "tok".into() };
+            let q = serde_json::json!({ "query": r#"mutation { purgeArticle(input: {id: "7"}) }"# });
+            let e = &e;
+            async move { e.execute_with(pool(), Some("t".into()), roles, Some(lb), q).await }
+        };
+        let code = |out: Json| out.pointer("/errors/0/extensions/code").and_then(Json::as_str).unwrap_or("none").to_owned();
+        assert_eq!(code(run(vec!["viewer".into()]).await), "ACCES_REFUSE");
+        assert_eq!(code(run(vec![]).await), "ACCES_REFUSE");
+        assert_ne!(code(run(vec!["admin".into()]).await), "ACCES_REFUSE");
+    }
 
     #[test]
     fn a_path_parameter_is_taken_from_the_input_and_cannot_leave_the_path() {
