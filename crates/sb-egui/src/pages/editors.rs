@@ -207,6 +207,7 @@ fn new_service(name: &str, port: u16, http_port: Option<u16>, n: f64) -> Service
         compression: false,
         graphql: false,
         graphql_sources: Vec::new(),
+        graphql_path: None,
         fragments: Vec::new(),
     }
 }

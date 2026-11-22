@@ -854,6 +854,7 @@ impl<'a> Checker<'a> {
                 );
             }
             self.graphql_sources(s, &base);
+            self.graphql_settings(s, &base);
 
             let mut rpc_names = HashSet::new();
             for (j, r) in s.rpcs.iter().enumerate() {
@@ -5231,6 +5232,50 @@ impl<'a> Checker<'a> {
     /// served or not.
     /// The sources of a GraphQL gateway: names, fields and the relations between them must be consistent, and a gateway has no
     /// table of its own.
+    /// `graphqlPath` and the `graphqlRoles` of the tables.
+    fn graphql_settings(&mut self, s: &Service, base: &str) {
+        if let Some(path) = &s.graphql_path {
+            let at = format!("{base}/graphqlPath");
+            let clean = path.starts_with('/')
+                && path.len() > 1
+                && !path.ends_with('/')
+                && !path.contains(['{', '}', '?', '#', ' '])
+                && !path.contains("//");
+            if !clean {
+                self.error(
+                    "E_GRAPHQL_PATH",
+                    at,
+                    "the GraphQL path starts with `/`, has no `{param}`, query, space or trailing `/`",
+                );
+            } else if s.routes.iter().any(|r| &r.path == path) {
+                self.error(
+                    "E_GRAPHQL_PATH",
+                    at,
+                    "a route of the service already uses this path",
+                );
+            }
+        }
+        for (i, t) in s.tables.iter().enumerate() {
+            let mut seen = HashSet::new();
+            for (j, role) in t.graphql_roles.iter().enumerate() {
+                if role.trim().is_empty() || !seen.insert(role.as_str()) {
+                    self.error(
+                        "E_GRAPHQL_ROLE",
+                        format!("{base}/tables/{i}/graphqlRoles/{j}"),
+                        "a role is a non-empty name, listed once",
+                    );
+                }
+            }
+            if !t.graphql_roles.is_empty() && !s.graphql {
+                self.warn(
+                    "W_GRAPHQL_UNUSED",
+                    format!("{base}/tables/{i}/graphqlRoles"),
+                    "`graphqlRoles` is only used when the service has `graphql` on",
+                );
+            }
+        }
+    }
+
     fn graphql_sources(&mut self, s: &Service, base: &str) {
         if s.graphql_sources.is_empty() {
             return;

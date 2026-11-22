@@ -297,3 +297,35 @@ fn a_service_with_no_writing_route_has_no_mutation() {
     let code = find(&files, "services/orders/src/transport/graphql.rs").unwrap_or_default();
     assert!(!code.contains("MUTATIONS") && !code.contains("Loopback"));
 }
+
+#[test]
+fn the_endpoint_path_and_the_roles_of_a_table_are_in_the_generated_code() {
+    let mut p = served();
+    p.services[0].graphql_path = Some("/api/graph".into());
+    let n = p.services[0].tables.len();
+    p.services[0].tables[n - 2].graphql_roles = vec!["admin".into(), "support".into()];
+    let files = generate(&p).unwrap();
+    let code = find(&files, "services/orders/src/transport/graphql.rs").expect("endpoint");
+    assert!(
+        code.contains(".route(\"/api/graph\", post(handle))"),
+        "{code}"
+    );
+    assert!(!code.contains(".route(\"/graphql\""), "{code}");
+    assert!(code.contains("roles: &[\"admin\", \"support\"],"), "{code}");
+    assert!(code.contains("roles: &[],"), "{code}");
+    assert!(
+        code.contains("claims") && code.contains("\"roles\""),
+        "{code}"
+    );
+    assert!(code.contains("tenant, roles,"), "{code}");
+}
+
+#[test]
+fn the_graphql_path_and_roles_are_checked() {
+    let mut p = served();
+    p.services[0].graphql_path = Some("graph".into());
+    p.services[0].tables[0].graphql_roles = vec!["".into()];
+    let codes: Vec<String> = sb_model::validate(&p).into_iter().map(|d| d.code).collect();
+    assert!(codes.iter().any(|c| c == "E_GRAPHQL_PATH"), "{codes:?}");
+    assert!(codes.iter().any(|c| c == "E_GRAPHQL_ROLE"), "{codes:?}");
+}

@@ -301,6 +301,11 @@ pub fn serves_endpoint(service: &Service) -> bool {
     sdl(service).is_some() && !service.routes.is_empty() && token_check(service).is_some()
 }
 
+/// The path the endpoint is served on.
+pub fn endpoint_path(service: &Service) -> &str {
+    service.graphql_path.as_deref().unwrap_or("/graphql")
+}
+
 fn opt(v: Option<&str>) -> String {
     v.map_or("None".to_string(), |v| format!("Some({v:?})"))
 }
@@ -373,7 +378,10 @@ fn gateway_transport_rs(service: &Service, source: &str, issuer: &str) -> String
     c.line("];");
     c.blank();
     c.open("pub fn router() -> Router<Ctx>");
-    c.line("Router::new().route(\"/graphql\", post(handle))");
+    c.line(format!(
+        "Router::new().route({:?}, post(handle))",
+        endpoint_path(service)
+    ));
     c.close();
     c.blank();
     c.open("fn gateway() -> Result<&'static Gateway, &'static str>");
@@ -457,6 +465,14 @@ pub fn transport_rs(service: &Service) -> Option<String> {
         }
         c.line("],");
         c.line(format!("tenant: {},", opt(t.tenant_column.as_deref())));
+        c.line(format!(
+            "roles: &[{}],",
+            t.graphql_roles
+                .iter()
+                .map(|r| format!("{r:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
         c.line("parents: &[");
         for fk in t.foreign_keys.iter().filter(|f| f.columns.len() == 1) {
             let nullable = t
@@ -515,7 +531,10 @@ pub fn transport_rs(service: &Service) -> Option<String> {
         c.blank();
     }
     c.open("pub fn router() -> Router<Ctx>");
-    c.line("Router::new().route(\"/graphql\", post(handle))");
+    c.line(format!(
+        "Router::new().route({:?}, post(handle))",
+        endpoint_path(service)
+    ));
     c.close();
     c.blank();
     c.open("fn endpoint() -> Result<&'static Endpoint, &'static str>");
@@ -550,6 +569,15 @@ pub fn transport_rs(service: &Service) -> Option<String> {
     c.line("    Ok(claims) => claims,");
     c.line("    Err(_) => return refused(StatusCode::UNAUTHORIZED, \"NON_AUTHENTIFIE\", \"invalid token\"),");
     c.line("};");
+    c.line("// The roles of the caller: the claim `roles` (a list) or `role` (a string).");
+    c.line("let mut roles: Vec<String> = claims");
+    c.line("    .get(\"roles\")");
+    c.line("    .and_then(|v| v.as_array())");
+    c.line("    .map(|a| a.iter().filter_map(|r| r.as_str().map(str::to_owned)).collect())");
+    c.line("    .unwrap_or_default();");
+    c.line("if let Some(role) = claims.get(\"role\").and_then(|v| v.as_str()) {");
+    c.line("    roles.push(role.to_owned());");
+    c.line("}");
     c.line("// The tenant is a claim of the token: `tenantId`, or `tenant_id`.");
     c.line("let tenant = [\"tenantId\", \"tenant_id\"]");
     c.line("    .iter()");
@@ -560,7 +588,9 @@ pub fn transport_rs(service: &Service) -> Option<String> {
     c.line("Err(message) => return refused(StatusCode::INTERNAL_SERVER_ERROR, \"ERREUR_INTERNE\", message),");
     c.close_with(";");
     if mutations.is_empty() {
-        c.line("Json(endpoint.execute(ctx.db.clone(), tenant, request).await).into_response()");
+        c.line(
+            "Json(endpoint.execute(ctx.db.clone(), tenant, roles, request).await).into_response()",
+        );
     } else {
         // The mutations play the routes of this very service over the loopback, with the caller's cookie.
         c.line(format!(
@@ -568,7 +598,7 @@ pub fn transport_rs(service: &Service) -> Option<String> {
             format!("{}_HTTP_PORT", shouty(&service.name)),
             service.http_port.unwrap_or(sb_model::DEFAULT_HTTP_PORT)
         ));
-        c.line("Json(endpoint.execute_with(ctx.db.clone(), tenant, Some(loopback), request).await).into_response()");
+        c.line("Json(endpoint.execute_with(ctx.db.clone(), tenant, roles, Some(loopback), request).await).into_response()");
     }
     c.close();
     Some(c.finish())

@@ -44,6 +44,8 @@ pub struct Table {
     pub columns: &'static [Column],
     pub keys: &'static [Column],
     pub tenant: Option<&'static str>,
+    /// The roles allowed to read the table; empty: any signed-in caller.
+    pub roles: &'static [&'static str],
     pub parents: &'static [Parent],
     pub children: &'static [Child],
 }
@@ -55,6 +57,7 @@ const MAX_PAGE: usize = 100;
 struct Access {
     db: sqlx::PgPool,
     tenant: Option<String>,
+    roles: Vec<String>,
     tables: &'static [Table],
 }
 
@@ -192,6 +195,9 @@ async fn rows(
     limit: usize,
     offset: usize,
 ) -> Result<Vec<Json>, Error> {
+    if !table.roles.is_empty() && !table.roles.iter().any(|r| access.roles.iter().any(|h| h == r)) {
+        return Err(refuse("ACCES_REFUSE", "your role cannot read this data"));
+    }
     let mut conditions = Vec::new();
     let mut binds: Vec<&str> = Vec::new();
     for (column, value) in filters {
@@ -478,8 +484,8 @@ impl Endpoint {
     }
 
     /// Runs the request of a client for `tenant`; the answer is the JSON body of the response, every error with a `code`.
-    pub async fn execute(&self, db: sqlx::PgPool, tenant: Option<String>, body: Json) -> Json {
-        self.execute_with(db, tenant, None, body).await
+    pub async fn execute(&self, db: sqlx::PgPool, tenant: Option<String>, roles: Vec<String>, body: Json) -> Json {
+        self.execute_with(db, tenant, roles, None, body).await
     }
 
     /// Same, for a service that has mutations: they play the routes of the service through `loopback`.
@@ -487,6 +493,7 @@ impl Endpoint {
         &self,
         db: sqlx::PgPool,
         tenant: Option<String>,
+        roles: Vec<String>,
         loopback: Option<Loopback>,
         body: Json,
     ) -> Json {
@@ -494,7 +501,7 @@ impl Endpoint {
             Ok(r) => r,
             Err(_) => return error_body("REQUETE_INVALIDE", "the body is not a GraphQL request"),
         };
-        let mut request = request.data(Access { db, tenant, tables: self.tables });
+        let mut request = request.data(Access { db, tenant, roles, tables: self.tables });
         if let Some(loopback) = loopback {
             request = request.data(loopback);
         }
@@ -550,6 +557,7 @@ mod tests {
         columns: &[ID, NAME],
         keys: &[ID],
         tenant: Some("tenant_id"),
+        roles: &["admin"],
         parents: &[],
         children: &[Child { field: "again", table: "articles", column: "id", ref_column: "id" }],
     }];
@@ -617,7 +625,7 @@ mod tests {
         let run = |q: &'static str| {
             let lb = Loopback { base: base.clone(), token: "tok".into() };
             let e = &e;
-            async move { e.execute_with(pool(), Some("t".into()), Some(lb), serde_json::json!({ "query": q })).await }
+            async move { e.execute_with(pool(), Some("t".into()), vec![], Some(lb), serde_json::json!({ "query": q })).await }
         };
         let ok = run(r#"mutation { createArticle(input: {nom: "x"}) }"#).await;
         assert_eq!(ok["data"]["createArticle"]["id"], "1", "{ok}");
@@ -634,7 +642,7 @@ mod tests {
     }
 
     async fn code_of(e: &Endpoint, tenant: Option<&str>, query: &str) -> String {
-        let out = e.execute(pool(), tenant.map(str::to_owned), serde_json::json!({ "query": query })).await;
+        let out = e.execute(pool(), tenant.map(str::to_owned), vec![], serde_json::json!({ "query": query })).await;
         out.pointer("/errors/0/extensions/code").and_then(Json::as_str).unwrap_or("none").to_owned()
     }
 
@@ -643,6 +651,18 @@ mod tests {
         let e = endpoint(true, 8, 200);
         assert_eq!(code_of(&e, None, "{ articlesConnection { edges { node { nom } } } }").await, "ACCES_REFUSE");
         assert_eq!(code_of(&e, None, "{ articles(id: \"1\") { nom } }").await, "ACCES_REFUSE");
+    }
+
+    #[tokio::test]
+    async fn a_table_with_roles_is_refused_to_a_caller_without_one_of_them() {
+        let e = endpoint(true, 8, 200);
+        let q = serde_json::json!({ "query": "{ articlesConnection { edges { node { nom } } } }" });
+        let code = |out: Json| out.pointer("/errors/0/extensions/code").and_then(Json::as_str).unwrap_or("none").to_owned();
+        let out = e.execute(pool(), Some("t".into()), vec!["viewer".into()], q.clone()).await;
+        assert_eq!(code(out), "ACCES_REFUSE");
+        // With the role the refusal is no longer the role's: the (absent) database answers instead.
+        let out = e.execute(pool(), Some("t".into()), vec!["admin".into()], q).await;
+        assert_ne!(code(out), "ACCES_REFUSE");
     }
 
     #[tokio::test]
@@ -658,7 +678,7 @@ mod tests {
         assert_eq!(code_of(&endpoint(true, 8, 200), Some("t"), q).await, "none");
         assert_ne!(code_of(&endpoint(false, 8, 200), Some("t"), q).await, "none");
         assert_eq!(code_of(&endpoint(true, 8, 200), Some("t"), "{ nothing }").await, "REQUETE_INVALIDE");
-        let bad = endpoint(true, 8, 200).execute(pool(), None, serde_json::json!(7)).await;
+        let bad = endpoint(true, 8, 200).execute(pool(), None, vec![], serde_json::json!(7)).await;
         assert_eq!(bad["errors"][0]["extensions"]["code"], "REQUETE_INVALIDE");
     }
 }

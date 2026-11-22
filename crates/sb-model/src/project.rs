@@ -435,6 +435,10 @@ pub struct Service {
     /// services' REST APIs instead of a database, and serves them as one graph on `POST /graphql` (see [`GraphqlSource`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub graphql_sources: Vec<GraphqlSource>,
+    /// The path the GraphQL endpoint is served on (default `/graphql`): it must start with `/`, with no `{param}` and no
+    /// other route of the service on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphql_path: Option<String>,
     /// Named sequences of steps, written once and played by an `include` step in any handler of the service.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fragments: Vec<Fragment>,
@@ -882,6 +886,11 @@ pub struct Table {
     /// this is destructive, so it is an explicit list and not the mere absence of the column.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dropped_columns: Vec<String>,
+    /// The roles allowed to read this table through the GraphQL endpoint (the token's claim `roles`, a list, or `role`, a
+    /// string). Empty: any signed-in caller. The check runs before any row is read, for a root query as well as for a
+    /// relation that reaches the table, and a refusal is `ACCES_REFUSE`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub graphql_roles: Vec<String>,
 }
 
 /// The column a soft delete sets.
@@ -899,6 +908,7 @@ impl Table {
             soft_delete: false,
             renamed_from: vec![],
             dropped_columns: vec![],
+            graphql_roles: vec![],
         }
     }
 

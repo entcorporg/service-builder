@@ -296,25 +296,51 @@ fn graphql(app: &mut App, ui: &mut Ui, svc: &Service, sname: &str) {
         return;
     }
     let current = svc.graphql;
-    let set = section(
+    let (set, new_path) = section(
         ui,
         "GraphQL",
         "publish",
         |_| {},
         |ui| {
-            field(
+            let on = field(
                 ui,
                 "Exposer en GraphQL",
-                "Écrit le schéma dans contracts/graphql et sert POST /graphql : lecture des tables (par id et connexions paginées) et mutations qui rejouent les routes d’écriture, avec le même cookie, le même tenant et les mêmes erreurs.",
+                "Écrit le schéma dans contracts/graphql et sert POST /graphql : lecture des tables (par id et connexions paginées) et mutations qui rejouent les routes d’écriture, avec le même cookie, le même tenant et les mêmes erreurs. Les rôles autorisés à lire une table se règlent sur la table (graphqlRoles).",
                 |ui| crate::widgets::check(ui, current, "Le service sert une API GraphQL"),
-            )
+            );
+            let path = if current {
+                field(
+                    ui,
+                    "Chemin",
+                    "Chemin de l’endpoint GraphQL (par défaut /graphql). Ce ne doit pas être celui d’une route.",
+                    |ui| {
+                        commit_entry(
+                            ui,
+                            ("graphql-path", sname),
+                            svc.graphql_path.as_deref().unwrap_or("/graphql"),
+                            true,
+                            "/graphql",
+                            false,
+                        )
+                    },
+                )
+            } else {
+                None
+            };
+            (on, path)
         },
     );
-    if let Some(on) = set {
+    if set.is_some() || new_path.is_some() {
         let sname = sname.to_string();
         app.edit(|p| {
             if let Some(s) = svc_mut(p, &sname) {
-                s.graphql = on;
+                if let Some(on) = set {
+                    s.graphql = on;
+                }
+                if let Some(path) = new_path {
+                    s.graphql_path =
+                        Some(path.trim().to_string()).filter(|v| !v.is_empty() && v != "/graphql");
+                }
             }
         });
     }
