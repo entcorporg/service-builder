@@ -99,7 +99,7 @@ pub mod http {
     }
 
     #[cfg(test)]
-    mod tests {
+    mod http_error_tests {
         use super::HttpError;
 
         #[test]

@@ -5,7 +5,11 @@
 //! Only the schema is generated: it is what a frontend reads to know what a single call will be able to fetch.
 
 use sb_model::names::pascal;
-use sb_model::{Column, ColumnType, GraphqlSourceField, Service, ServiceKind, Table};
+use sb_model::names::shouty;
+use sb_model::{
+    BodyFormat, Column, ColumnType, GraphqlSourceField, HttpMethod, Route, Service, ServiceKind,
+    Table,
+};
 
 use crate::writer::Code;
 
@@ -137,6 +141,33 @@ fn gateway_sdl(service: &Service) -> String {
     c.finish()
 }
 
+/// The routes a client can call as mutations: the `POST`/`PUT`/`PATCH`/`DELETE` routes of a service that serves its tables (a
+/// CSV body is a file, not a GraphQL value). The mutation plays the route itself, so its validation, its tenant and its errors
+/// are the route's.
+fn mutation_routes(service: &Service) -> Vec<&Route> {
+    if is_gateway(service) || !service.graphql || service.tables.is_empty() {
+        return Vec::new();
+    }
+    service
+        .routes
+        .iter()
+        .filter(|r| r.method != HttpMethod::Get && r.body_format != BodyFormat::Csv)
+        .collect()
+}
+
+/// Whether the endpoint of the service has mutations (the runtime then needs the HTTP client to call the routes).
+pub fn serves_mutations(service: &Service) -> bool {
+    serves_endpoint(service) && !mutation_routes(service).is_empty()
+}
+
+/// The `{params}` of a route path.
+fn path_params(path: &str) -> Vec<&str> {
+    path.split('{')
+        .skip(1)
+        .filter_map(|rest| rest.split_once('}').map(|(name, _)| name))
+        .collect()
+}
+
 /// The SDL of the service, or `None` when it has not asked for it or has nothing to describe.
 pub fn sdl(service: &Service) -> Option<String> {
     if is_gateway(service) {
@@ -225,6 +256,18 @@ pub fn sdl(service: &Service) -> Option<String> {
         c.line(q);
     }
     c.line("}");
+    let mutations = mutation_routes(service);
+    if !mutations.is_empty() {
+        c.blank();
+        c.line("# One mutation per route: `input` holds the fields of the body and the {params} of the path;");
+        c.line("# the answer is the body of the route.");
+        c.line("type Mutation {");
+        for r in mutations {
+            c.line(format!("  # {:?} {}", r.method, r.path));
+            c.line(format!("  {}(input: JSON): JSON", camel(&r.name)));
+        }
+        c.line("}");
+    }
     Some(c.finish())
 }
 
@@ -385,7 +428,14 @@ pub fn transport_rs(service: &Service) -> Option<String> {
     c.line("    response::{IntoResponse, Response},");
     c.line("    routing::post,");
     c.line("};");
-    c.line("use eda_runtime::graphql::{Child, Column, Endpoint, Parent, Table, error_body};");
+    let mutations = mutation_routes(service);
+    if mutations.is_empty() {
+        c.line("use eda_runtime::graphql::{Child, Column, Endpoint, Parent, Table, error_body};");
+    } else {
+        c.line("use eda_runtime::graphql::{");
+        c.line("    Child, Column, Endpoint, Loopback, Mutation, Parent, Table, error_body,");
+        c.line("};");
+    }
     c.blank();
     c.line("use crate::app::ctx::Ctx;");
     c.blank();
@@ -445,6 +495,25 @@ pub fn transport_rs(service: &Service) -> Option<String> {
     c.dedent();
     c.line("];");
     c.blank();
+    if !mutations.is_empty() {
+        c.line("static MUTATIONS: &[Mutation] = &[");
+        for r in &mutations {
+            let params: Vec<String> = path_params(&r.path)
+                .iter()
+                .map(|p| format!("{p:?}"))
+                .collect();
+            c.line(format!(
+                "    Mutation {{ field: {:?}, method: {:?}, path: {:?}, params: &[{}], body: {} }},",
+                camel(&r.name),
+                format!("{:?}", r.method).to_uppercase(),
+                r.path,
+                params.join(", "),
+                r.method.has_body()
+            ));
+        }
+        c.line("];");
+        c.blank();
+    }
     c.open("pub fn router() -> Router<Ctx>");
     c.line("Router::new().route(\"/graphql\", post(handle))");
     c.close();
@@ -452,7 +521,14 @@ pub fn transport_rs(service: &Service) -> Option<String> {
     c.open("fn endpoint() -> Result<&'static Endpoint, &'static str>");
     c.line("static ENDPOINT: OnceLock<Result<Endpoint, String>> = OnceLock::new();");
     c.line("ENDPOINT");
-    c.line("    .get_or_init(|| Endpoint::from_env(TABLES).map_err(|e| e.to_string()))");
+    c.line(format!(
+        "    .get_or_init(|| Endpoint::from_env(TABLES, {}).map_err(|e| e.to_string()))",
+        if mutations.is_empty() {
+            "&[]"
+        } else {
+            "MUTATIONS"
+        }
+    ));
     c.line("    .as_ref()");
     c.line("    .map_err(|_| \"the GraphQL schema cannot be built\")");
     c.close();
@@ -483,7 +559,17 @@ pub fn transport_rs(service: &Service) -> Option<String> {
     c.line("Ok(e) => e,");
     c.line("Err(message) => return refused(StatusCode::INTERNAL_SERVER_ERROR, \"ERREUR_INTERNE\", message),");
     c.close_with(";");
-    c.line("Json(endpoint.execute(ctx.db.clone(), tenant, request).await).into_response()");
+    if mutations.is_empty() {
+        c.line("Json(endpoint.execute(ctx.db.clone(), tenant, request).await).into_response()");
+    } else {
+        // The mutations play the routes of this very service over the loopback, with the caller's cookie.
+        c.line(format!(
+            "let loopback = Loopback {{ base: format!(\"http://127.0.0.1:{{}}\", eda_runtime::env_or({:?}, \"{}\")), token }};",
+            format!("{}_HTTP_PORT", shouty(&service.name)),
+            service.http_port.unwrap_or(sb_model::DEFAULT_HTTP_PORT)
+        ));
+        c.line("Json(endpoint.execute_with(ctx.db.clone(), tenant, Some(loopback), request).await).into_response()");
+    }
     c.close();
     Some(c.finish())
 }

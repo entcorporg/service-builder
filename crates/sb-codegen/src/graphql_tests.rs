@@ -247,3 +247,53 @@ fn the_sources_of_a_gateway_are_checked() {
         "{codes:?}"
     );
 }
+
+#[test]
+fn the_routes_that_write_become_mutations_that_play_them() {
+    let p = served();
+    let writes = p.services[0].routes.iter().any(|r| {
+        r.method != sb_model::HttpMethod::Get && r.body_format != sb_model::BodyFormat::Csv
+    });
+    assert!(writes, "the sample has a writing route");
+    let files = generate(&p).unwrap();
+    let sdl = sdl_file(&files).expect("sdl");
+    assert!(sdl.contains("type Mutation {"), "{sdl}");
+    assert!(sdl.contains("(input: JSON): JSON"), "{sdl}");
+    let code = find(&files, "services/orders/src/transport/graphql.rs").expect("endpoint");
+    assert!(code.contains("static MUTATIONS: &[Mutation]"), "{code}");
+    assert!(
+        code.contains("Endpoint::from_env(TABLES, MUTATIONS)"),
+        "{code}"
+    );
+    assert!(code.contains("Loopback { base: format!"), "{code}");
+    assert!(
+        find(&files, "services/orders/Cargo.toml")
+            .unwrap()
+            .contains("\"graphql-mutations\"")
+    );
+    assert!(
+        find(&files, "runtime/Cargo.toml")
+            .unwrap()
+            .contains("graphql-mutations = [\"graphql\", \"http-client\"]")
+    );
+    // Deterministic.
+    assert_eq!(
+        find(
+            &generate(&p).unwrap(),
+            "services/orders/src/transport/graphql.rs"
+        ),
+        Some(code)
+    );
+}
+
+#[test]
+fn a_service_with_no_writing_route_has_no_mutation() {
+    let mut p = served();
+    p.services[0]
+        .routes
+        .retain(|r| r.method == sb_model::HttpMethod::Get);
+    let files = generate(&p).unwrap();
+    assert!(!sdl_file(&files).unwrap_or_default().contains("Mutation"));
+    let code = find(&files, "services/orders/src/transport/graphql.rs").unwrap_or_default();
+    assert!(!code.contains("MUTATIONS") && !code.contains("Loopback"));
+}

@@ -129,6 +129,15 @@ fn runtime_cargo(project: &Project) -> String {
     } else {
         ""
     };
+    let mutations = if project
+        .services
+        .iter()
+        .any(crate::graphql::serves_mutations)
+    {
+        "# The mutations of `graphql` play the routes of the service over the loopback: they need the HTTP client.\ngraphql-mutations = [\"graphql\", \"http-client\"]\n"
+    } else {
+        ""
+    };
     RUNTIME_CARGO
         .replace(
             "axum = { workspace = true, optional = true }\n",
@@ -137,7 +146,7 @@ fn runtime_cargo(project: &Project) -> String {
         .replace(
             "[features]\n",
             &format!(
-                "[features]\n# The GraphQL endpoint (`graphql`) brings async-graphql in: only the services that serve it turn this on.\ngraphql = [\"dep:async-graphql\"]\n{gateway}"
+                "[features]\n# The GraphQL endpoint (`graphql`) brings async-graphql in: only the services that serve it turn this on.\ngraphql = [\"dep:async-graphql\"]\n{gateway}{mutations}"
             ),
         )
 }

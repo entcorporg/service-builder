@@ -425,7 +425,10 @@ pub struct Service {
     /// and a `verifyJwt` step, it serves `POST /graphql` (read only): the cookie `access_token` is checked like that step does,
     /// the tenant is the claim `tenantId` (or `tenant_id`), errors carry a machine code in `errors[].extensions.code`
     /// (`NON_AUTHENTIFIE` without a valid cookie), depth and complexity are limited (`GRAPHQL_MAX_DEPTH`,
-    /// `GRAPHQL_MAX_COMPLEXITY`) and `GRAPHQL_INTROSPECTION=off` turns introspection off. Mutations are not served yet.
+    /// `GRAPHQL_MAX_COMPLEXITY`) and `GRAPHQL_INTROSPECTION=off` turns introspection off. Each `POST`/`PUT`/`PATCH`/`DELETE` route of the service
+    /// is also a mutation (`type Mutation { <routeName>(input: JSON): JSON }`): it plays the route over the loopback with the
+    /// caller's cookie, so validation, tenant and `{code, message}` errors are the route's; `input` holds the body fields and
+    /// the `{params}` of the path.
     #[serde(default, skip_serializing_if = "is_false")]
     pub graphql: bool,
     /// The sources of a GraphQL gateway: a service with `graphql`, no table, routes and a `verifyJwt` step reads other
