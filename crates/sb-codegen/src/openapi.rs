@@ -272,6 +272,16 @@ fn step_statuses(route: &Route) -> Vec<(u16, String, bool)> {
                         .map(|_| (403, "The API key is not allowed to do this".into(), false))
                 }
                 Step::ApiKeyRevoke { .. } => Some((404, "No such API key".into(), false)),
+                Step::RefreshRotate { token: Some(_), on_replay, .. } => {
+                    out.push((
+                        401,
+                        "The refresh token is not valid, expired, or was already used (its family is then revoked)".into(),
+                        false,
+                    ));
+                    on_replay.as_ref().and_then(|o| o.fail.as_ref()).map(|f| {
+                        (f.status, f.message.clone(), false)
+                    })
+                }
                 Step::PasswordStrength { .. } => Some((
                     400,
                     "The password is too easy to guess, or is in a known breach".into(),

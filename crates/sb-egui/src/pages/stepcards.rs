@@ -66,6 +66,7 @@ pub fn title(kind: &str) -> &'static str {
         "apiKeyCreate" => "Émettre une clé d’API",
         "apiKeyVerify" => "Vérifier une clé d’API",
         "apiKeyRevoke" => "Révoquer une clé d’API",
+        "refreshRotate" => "Jeton de rafraîchissement (rotation)",
         "hashPassword" => "Hacher un mot de passe",
         "verifyPassword" => "Vérifier un mot de passe",
         "randomToken" => "Jeton aléatoire",
@@ -126,6 +127,17 @@ fn summary(step: &Step, kind: &str) -> String {
             }
         ),
         "apiKeyRevoke" => get("keyId"),
+        "refreshRotate" => {
+            if get("token").is_empty() {
+                format!(
+                    "nouvelle famille pour {}, dans {}",
+                    get("subject"),
+                    get("bind")
+                )
+            } else {
+                format!("tourne {}, dans {}", get("token"), get("bind"))
+            }
+        }
         "passwordStrength" => format!(
             "score ≥ {}{}",
             get("minScore"),
@@ -232,6 +244,10 @@ fn field_name(key: &str) -> String {
         "scope" => "Portée exigée",
         "expiresInSecs" => "Validité (s, vide : n’expire pas)",
         "keyIdBind" => "Identifiant de la clé dans",
+        "token" => "Jeton présenté (vide : ouvre une famille)",
+        "ttlSecs" => "Validité (s)",
+        "subjectBind" => "Sujet de la famille dans",
+        "onReplay" => "Si le jeton est rejoué (JSON : publish, fail)",
         "keyId" => "Identifiant de la clé",
         "inputs" => "Textes du compte (e-mail, nom)",
         "refuseBreached" => "Refuser les mots de passe des fuites connues",
@@ -630,7 +646,7 @@ fn form(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, index: usize) {
 }
 
 /// The blocks that can be added, in the order of the web version.
-const ORDER: [&str; 54] = [
+const ORDER: [&str; 55] = [
     "publish",
     "publishLive",
     "liveGrants",
@@ -679,6 +695,7 @@ const ORDER: [&str; 54] = [
     "apiKeyCreate",
     "apiKeyVerify",
     "apiKeyRevoke",
+    "refreshRotate",
     "hashPassword",
     "verifyPassword",
     "randomToken",
@@ -794,6 +811,9 @@ fn hint(kind: &str) -> &'static str {
         "apiKeyRevoke" => {
             "Révoque une clé (404 si inconnue ou déjà révoquée) ; avec un propriétaire, seulement les siennes"
         }
+        "refreshRotate" => {
+            "Jeton à usage unique, par famille : sans jeton, ouvre une famille (connexion) ; avec le jeton présenté, le tourne. Un jeton déjà tourné révoque la famille (401)"
+        }
         "passwordStrength" => {
             "Refuse en 400 un mot de passe trop facile à deviner (zxcvbn), et, en option, ceux des fuites connues. Avant « Hacher »"
         }
@@ -832,7 +852,7 @@ fn allowed(app: &App, list: &[Step], loc: &Loc) -> Vec<&'static str> {
             "respond" => has_response,
             "fail" | "requirePermission" | "rateLimit" | "checkQuota" | "verifyChallenge"
             | "passwordStrength" | "verifyJwt" | "imageSniff" | "totpVerify"
-            | "recoveryCodeUse" => http,
+            | "recoveryCodeUse" | "refreshRotate" => http,
             t if t.starts_with("passkey") => http,
             "verifyHmac" => allow_signature,
             _ => true,

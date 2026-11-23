@@ -1662,6 +1662,33 @@ pub enum Step {
         #[serde(default)]
         owner: Option<Expr>,
     },
+    /// Refresh tokens that work once, in families. Without `token` it **starts a family**: a first refresh token for
+    /// `subject` (at a login), valid `ttlSecs` seconds. With `token` (the one the client presents) it **rotates**: the token is
+    /// spent, a new one of the same family is issued into `bind` (the client keeps only the new one) and the subject of the
+    /// family into `subjectBind`, which the flow signs the new access token for. Only the SHA-256 of a token is stored (table
+    /// `refresh_tokens`, in the transaction of the handler). A token that is unknown, expired or of a revoked family is a
+    /// `401 invalid refresh token`. A token **already spent** was stolen or copied: the whole family is revoked (committed, a
+    /// plain refusal would undo it), `onReplay` publishes the audit event and answers (`fail`, else the same 401). Routes only.
+    #[serde(rename_all = "camelCase")]
+    RefreshRotate {
+        id: String,
+        /// The refresh token the client presents; left out, a new family is started.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<Expr>,
+        /// Whom a new family is for (a text: an account id). Only when `token` is left out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject: Option<Expr>,
+        /// Seconds the new token is valid.
+        ttl_secs: u32,
+        /// Receives the new refresh token (a text, shown once).
+        bind: String,
+        /// Receives the subject of the family (rotation only); also readable in the `publish` of `onReplay`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject_bind: Option<String>,
+        /// A spent token was presented again (rotation only): publish an audit event, then answer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_replay: Option<OnFail>,
+    },
     /// Judges a password before it is hashed: how easy it is to guess (zxcvbn: dictionaries, keyboard patterns, dates, repeats,
     /// l33t, and the `inputs` of this account: the e-mail, the name) and, with `refuseBreached`, whether it is in a known data
     /// breach (the first five characters of its SHA-1 are sent to the Pwned Passwords range API, never the password). Under
@@ -2497,6 +2524,9 @@ impl Step {
             | Step::RecoveryCodeUse { on_fail, .. } => {
                 on_fail.as_ref().and_then(|o| o.publish.as_ref())
             }
+            Step::RefreshRotate { on_replay, .. } => {
+                on_replay.as_ref().and_then(|o| o.publish.as_ref())
+            }
             _ => None,
         }
     }
@@ -2553,6 +2583,7 @@ impl Step {
             | Step::ApiKeyCreate { id, .. }
             | Step::ApiKeyVerify { id, .. }
             | Step::ApiKeyRevoke { id, .. }
+            | Step::RefreshRotate { id, .. }
             | Step::Sha256 { id, .. }
             | Step::ForEach { id, .. }
             | Step::Include { id, .. }
@@ -3204,6 +3235,15 @@ impl Service {
                         | Step::ApiKeyRevoke { .. }
                 )
             });
+        }
+        used
+    }
+
+    /// Whether a step of the service issues or rotates a refresh token: its database then holds `refresh_tokens`.
+    pub fn uses_refresh_tokens(&self) -> bool {
+        let mut used = false;
+        for step in self.handler_steps() {
+            step.walk(&mut |s| used |= matches!(s, Step::RefreshRotate { .. }));
         }
         used
     }

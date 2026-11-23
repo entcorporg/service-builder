@@ -51,7 +51,7 @@ vérité : le canvas, l'inspecteur et le code généré en sont des vues.
   Un producteur sans étape *Publier* donne un avertissement. Les projets enregistrés avant (`schemaVersion` 1) sont
   migrés à l'ouverture : tout service qui publiait sur un topic en devient producteur.
 - **Services** : des RPC (gRPC), des routes HTTP, des consumers (Kafka) et des tâches planifiées. Chacun contient une **liste d'étapes**.
-- **Étapes** : `log`, `let`, `publish`, `publishLive`, `liveGrants`, `sessionTrace`, `sessionRevoke`, `callRpc`, `include` (rejoue un fragment du service), `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `requirePermission` (403 si la liste de permissions du jeton ne contient pas la permission), `rateLimit`, `checkQuota`, `verifyChallenge`, `passwordStrength`, `apiKeyVerify`, `apiKeyRevoke` et `verifyHmac` (routes HTTP), `meter`, `nextNumber`, `audit`, `auditRead`, `flag`, `apiKeyCreate`, `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
+- **Étapes** : `log`, `let`, `publish`, `publishLive`, `liveGrants`, `sessionTrace`, `sessionRevoke`, `callRpc`, `include` (rejoue un fragment du service), `branch` (étapes imbriquées), `forEach` (une boucle, étapes imbriquées), `respond`, `fail`, `requirePermission` (403 si la liste de permissions du jeton ne contient pas la permission), `rateLimit`, `checkQuota`, `verifyChallenge`, `passwordStrength`, `apiKeyVerify`, `apiKeyRevoke`, `refreshRotate` et `verifyHmac` (routes HTTP), `meter`, `nextNumber`, `audit`, `auditRead`, `flag`, `apiKeyCreate`, `sql`, `httpCall`, `hashPassword`, `verifyPassword`, `randomToken`, `sha256`, `encrypt`, `decrypt`, `signJwt`, `verifyJwt`, `jwks`, `code`.
   Une liste d'étapes est un arbre (pas un graphe arbitraire) : cela se génère en Rust structuré et s'édite comme
   une pile de blocs, comme dans un page builder.
 
@@ -361,6 +361,15 @@ d'étapes, exactement comme un RPC (y compris *Publier* : l'événement passe pa
   redirection), la comparaison se fait sur place ; l'adresse est `PWNED_PASSWORDS_URL` (un miroir peut être nommé). Si l'API ne
   répond pas en 3 s, le mot de passe **passe** (et le journal le dit) : on n'arrête pas les inscriptions parce qu'un autre
   service est tombé. Routes seulement (`E_PASSWORD_OUTSIDE_ROUTE`). Limite : la vérification de fuite sort du réseau du projet.
+- **Jetons de rafraîchissement** : `refreshRotate { token?, subject?, ttlSecs, bind, subjectBind?, onReplay? }` (routes seulement,
+  table `refresh_tokens`, nom réservé). Sans `token`, ouvre une famille pour `subject` (à la connexion) et `bind` reçoit le premier
+  jeton ; avec `token`, le tourne : il est dépensé, `bind` reçoit le suivant de la même famille et `subjectBind` le sujet (pour
+  signer le nouvel accès). Seul le SHA-256 est stocké ; jeton inconnu, expiré ou de famille révoquée = 401 identique. Un jeton
+  **déjà dépensé** (copié, volé) révoque toute la famille, **commit avant la réponse** (un refus normal annulerait la
+  révocation), puis `onReplay { publish?, fail? }` (comme `onFail`, `subjectBind` lisible dans le `publish`) ou le 401. Les
+  verrous de ligne (`FOR UPDATE`) font que deux requêtes avec le même jeton ne sont pas toutes deux les premières. Limites : pas
+  d'étape « révoquer une famille » (déconnexion) ; `validate` : `E_REFRESH_SUBJECT`, `E_REFRESH_BIND`, `E_REFRESH_REPLAY`,
+  `E_REFRESH_TTL`, `E_REFRESH_OUTSIDE_ROUTE`.
 - **Clés d'API** : pour un client qui est une machine, pas une personne. Trois étapes, dans la base du service (table `api_keys`,
   créée avec le schéma, nom réservé : `E_TABLE_RESERVED`), **dans la transaction du handler**.
   - `apiKeyCreate { owner, name, scopes, expiresInSecs?, bind, keyIdBind? }` émet `sbk_<id>_<secret>` : un préfixe lisible (un

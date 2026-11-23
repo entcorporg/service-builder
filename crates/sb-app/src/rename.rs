@@ -132,9 +132,14 @@ pub fn topic(p: &mut Project, from: &str, to: &str) {
                 set_if(o, "topic", from, to);
             }
             // The audit event of a refusing check.
-            if matches!(kind(o), "verifyPassword" | "totpVerify" | "recoveryCodeUse")
+            let field = match kind(o) {
+                "verifyPassword" | "totpVerify" | "recoveryCodeUse" => Some("onFail"),
+                "refreshRotate" => Some("onReplay"),
+                _ => None,
+            };
+            if let Some(field) = field
                 && let Some(Value::Object(publish)) = o
-                    .get_mut("onFail")
+                    .get_mut(field)
                     .and_then(Value::as_object_mut)
                     .and_then(|f| f.get_mut("publish"))
             {

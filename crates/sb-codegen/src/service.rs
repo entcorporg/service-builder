@@ -749,6 +749,11 @@ fn schema_rs(service: &Service) -> String {
         c.line("eda_runtime::api_key::CREATE_TABLE,");
         c.line("eda_runtime::api_key::CREATE_OWNER_INDEX,");
     }
+    if service.uses_refresh_tokens() {
+        // The refresh tokens, in families: only the hash of each.
+        c.line("eda_runtime::refresh::CREATE_TABLE,");
+        c.line("eda_runtime::refresh::CREATE_FAMILY_INDEX,");
+    }
     if service.uses_challenge_check() {
         // The solutions already accepted: a solution is worth one form, for every replica.
         c.line("eda_runtime::challenge::CREATE_USES_TABLE,");
@@ -2868,6 +2873,72 @@ fn steps(
                     "eda_runtime::api_key::revoke(&mut tx, &({key_id}), {owner}).await?;"
                 ));
             }
+            Step::RefreshRotate {
+                token,
+                subject,
+                ttl_secs,
+                bind,
+                subject_bind,
+                on_replay,
+                ..
+            } => {
+                let text = TypeRef::scalar(FieldType::String);
+                match token {
+                    None => {
+                        let subject = match subject {
+                            Some(subject) => lower(project, scope, subject, &text)?,
+                            None => {
+                                return Err(CodegenError::Internal(
+                                    "refreshRotate without a token has no subject".into(),
+                                ));
+                            }
+                        };
+                        c.line(format!(
+                            "let {bind}: String = eda_runtime::refresh::start(&mut tx, &({subject}), {ttl_secs}).await?;"
+                        ));
+                        scope.bind(bind.clone(), text);
+                    }
+                    Some(token) => {
+                        let token = lower(project, scope, token, &text)?;
+                        let subject_var =
+                            subject_bind.clone().unwrap_or_else(|| "__subject".into());
+                        // The subject is readable in the audit event of a replay.
+                        let mut inner = scope.clone();
+                        inner.bind(subject_var.clone(), text.clone());
+                        c.line(format!(
+                            "let ({bind}, {subject_var}): (String, String) = match eda_runtime::refresh::rotate(&mut tx, &({token}), {ttl_secs}).await? {{"
+                        ));
+                        c.line("eda_runtime::refresh::Rotation::Rotated(rotated) => (rotated.token, rotated.subject),");
+                        c.open("eda_runtime::refresh::Rotation::Replayed(replayed) =>");
+                        c.line(format!("let {subject_var}: String = replayed.subject;"));
+                        match on_replay {
+                            Some(on_fail) => {
+                                if on_fail.publish.is_none() {
+                                    // The family is revoked: that must outlive the refusal.
+                                    c.line("tx.commit().await?;");
+                                }
+                                on_fail_lines(
+                                    c,
+                                    project,
+                                    &inner,
+                                    on_fail,
+                                    "eda_runtime::refresh::refused()",
+                                )?;
+                            }
+                            None => {
+                                c.line("tx.commit().await?;");
+                                c.line("return Err(eda_runtime::refresh::refused());");
+                            }
+                        }
+                        c.close();
+                        c.line("};");
+                        scope.bind(bind.clone(), text.clone());
+                        if subject_bind.is_some() {
+                            scope.bind(subject_var, text);
+                        }
+                    }
+                }
+            }
             Step::Flag {
                 key,
                 subject,
@@ -4334,6 +4405,12 @@ fn describe(step: &Step) -> String {
         Step::ApiKeyCreate { bind, .. } => format!("issue an API key into {bind}"),
         Step::ApiKeyVerify { bind, .. } => format!("check the API key, its owner into {bind}"),
         Step::ApiKeyRevoke { .. } => "revoke an API key".into(),
+        Step::RefreshRotate {
+            token: None, bind, ..
+        } => {
+            format!("start a refresh token family into {bind}")
+        }
+        Step::RefreshRotate { bind, .. } => format!("rotate a refresh token into {bind}"),
         Step::Meter { key, .. } => format!("meter {key}"),
         Step::CheckQuota { key, .. } => format!("check the quota of {key}"),
         Step::HashPassword { bind, .. } => format!("hash password into {bind}"),

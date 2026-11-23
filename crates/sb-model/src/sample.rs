@@ -1076,6 +1076,7 @@ pub fn showcase() -> Project {
     add_notes(&mut p);
     add_usage(&mut p);
     add_api_keys(&mut p);
+    add_refresh_tokens(&mut p);
     add_invoices(&mut p);
     add_calendar(&mut p);
     add_audit(&mut p);
@@ -1974,6 +1975,82 @@ pub fn add_avatars(p: &mut Project) {
     );
     download.path = "/avatar/url".into();
     routes.push(download);
+}
+
+/// Refresh tokens that work once: a login starts a family, each refresh spends the token and issues the next one, and a token
+/// presented again revokes its family (answered with its own status and code).
+pub fn add_refresh_tokens(p: &mut Project) {
+    let string = || FieldType::String;
+    p.messages
+        .push(api("RefreshStart", vec![field("account", string())]));
+    p.messages
+        .push(api("RefreshBody", vec![field("refresh_token", string())]));
+    p.messages.push(api(
+        "RefreshIssued",
+        vec![field("refresh_token", string()), field("account", string())],
+    ));
+    let routes = &mut p.services[0].routes;
+    let route = |name: &str, url: &str, request: &str, who: &str, step: Step| Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
+        csv_mode: Default::default(),
+        name: name.into(),
+        method: HttpMethod::Post,
+        path: url.into(),
+        request: request.into(),
+        response: "RefreshIssued".into(),
+        status: 200,
+        steps: vec![
+            step,
+            Step::Respond {
+                id: "r2".into(),
+                fields: vec![
+                    set("refresh_token", path("refresh")),
+                    set("account", path(who)),
+                ],
+                status: None,
+                cookies: vec![],
+                headers: vec![],
+            },
+        ],
+    };
+    routes.push(route(
+        "start_refresh",
+        "/auth/refresh/start",
+        "RefreshStart",
+        "input.account",
+        Step::RefreshRotate {
+            id: "r1".into(),
+            token: None,
+            subject: Some(path("input.account")),
+            ttl_secs: 2_592_000,
+            bind: "refresh".into(),
+            subject_bind: None,
+            on_replay: None,
+        },
+    ));
+    routes.push(route(
+        "rotate_refresh",
+        "/auth/refresh",
+        "RefreshBody",
+        "who",
+        Step::RefreshRotate {
+            id: "r1".into(),
+            token: Some(path("input.refresh_token")),
+            subject: None,
+            ttl_secs: 2_592_000,
+            bind: "refresh".into(),
+            subject_bind: Some("who".into()),
+            on_replay: Some(OnFail {
+                publish: None,
+                fail: Some(FailAs {
+                    status: 401,
+                    message: "session compromised, sign in again".into(),
+                    code: Some("SESSION_COMPROMISE".into()),
+                }),
+            }),
+        },
+    ));
 }
 
 /// API keys for a client that is a machine. A company, signed in with a token (the `tid` claim), issues keys scoped to what a

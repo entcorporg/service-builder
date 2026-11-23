@@ -92,6 +92,12 @@ fn bind(project: &Project, scope: &mut BTreeMap<String, Ty>, step: &Step) {
     {
         scope.insert(var.into(), scalar("string"));
     }
+    // The subject of a refresh token family comes apart from the new token that `bind` holds.
+    if kind == "refreshRotate"
+        && let Some(var) = text("subjectBind")
+    {
+        scope.insert(var.into(), scalar("string"));
+    }
     // The cursor of the next page of the audit journal: a number that may be absent.
     if kind == "auditRead"
         && let Some(var) = text("nextCursorBind")
@@ -114,8 +120,8 @@ fn bind(project: &Project, scope: &mut BTreeMap<String, Ty>, step: &Step) {
         // The score of the password, 0 to 4.
         "passwordStrength" => scalar("int32"),
         "hashPassword" | "randomToken" | "sha256" | "encrypt" | "decrypt" | "signJwt"
-        | "apiKeyCreate" | "apiKeyVerify" | "passkeyLoginFinish" | "imageSniff"
-        | "objectPresignGet" | "objectPresignPut" => scalar("string"),
+        | "apiKeyCreate" | "apiKeyVerify" | "refreshRotate" | "passkeyLoginFinish"
+        | "imageSniff" | "objectPresignGet" | "objectPresignPut" => scalar("string"),
         "verifyJwt" => message(text("schema").unwrap_or_default()),
         "totpGenerate" => message("TotpSetup"),
         "recoveryCodes" => Ty {

@@ -205,6 +205,7 @@ mod tests {
                 "runtime/src/outbox.rs",
                 "runtime/src/password.rs",
                 "runtime/src/rate_limit.rs",
+                "runtime/src/refresh.rs",
                 "runtime/src/resilience.rs",
                 "runtime/src/s3.rs",
                 "runtime/src/sequence.rs",
@@ -1164,6 +1165,62 @@ mod tests {
         let queued = rpc.find("if !ok {").unwrap();
         let committed = rpc[queued..].find("tx.commit().await?;").unwrap();
         assert!(committed > 0);
+    }
+
+    #[test]
+    fn a_refresh_rotation_commits_the_revoked_family_before_it_answers() {
+        use sb_model::{Assignment, Expr, FailPublish, OnFail, Step};
+        let mut p = sample::showcase();
+        // The showcase has the two routes, and the service its table.
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        assert!(api.contains(
+            "eda_runtime::refresh::start(&mut tx, &(input.account.clone()), 2592000).await?;"
+        ));
+        assert!(api.contains(
+            "eda_runtime::refresh::Rotation::Rotated(rotated) => (rotated.token, rotated.subject),"
+        ));
+        assert!(api.contains("eda_runtime::refresh::Rotation::Replayed(replayed) =>"));
+        let at = api.find("Rotation::Replayed").unwrap();
+        let commit = api[at..].find("tx.commit().await?;").unwrap();
+        let answer = api[at..].find("HttpError::new(401,").unwrap();
+        assert!(commit < answer, "the family is committed first");
+        let schema = file(&files, "services/orders/src/app/schema.rs");
+        assert!(schema.contains("eda_runtime::refresh::CREATE_TABLE,"));
+        assert!(file(&files, "runtime/src/lib.rs").contains("pub mod refresh;"));
+        // The audit event of a replay reads the subject, and is queued before the commit.
+        if let Some(Step::RefreshRotate { on_replay, .. }) = p.services[0]
+            .routes
+            .iter_mut()
+            .find(|r| r.name == "rotate_refresh")
+            .map(|r| &mut r.steps[0])
+        {
+            *on_replay = Some(OnFail {
+                publish: Some(FailPublish {
+                    topic: "orders.created".into(),
+                    payload: vec![Assignment {
+                        field: "order_id".into(),
+                        value: Expr::Path { path: "who".into() },
+                    }],
+                }),
+                fail: None,
+            });
+        }
+        let v = sb_model::validate(&p);
+        let own: Vec<_> = v.iter().filter(|d| d.path.contains("onReplay")).collect();
+        assert!(own.is_empty(), "{own:?}");
+        let files = generate(&p).unwrap();
+        let api = file(&files, "services/orders/src/flows/api.rs");
+        let at = api.find("Rotation::Replayed").unwrap();
+        let queued = api[at..].find("outbox::enqueue").unwrap();
+        let commit = api[at..].find("tx.commit().await?;").unwrap();
+        let answer = api[at..]
+            .find("return Err(eda_runtime::refresh::refused());")
+            .unwrap();
+        assert!(queued < commit && commit < answer);
+        // Without the step, nothing of it is generated.
+        let plain = generate(&sample::orders()).unwrap();
+        assert!(!file(&plain, "services/orders/src/app/schema.rs").contains("refresh"));
     }
 
     #[test]

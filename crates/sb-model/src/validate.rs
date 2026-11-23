@@ -106,6 +106,8 @@ pub const USAGE_TABLES: [&str; 2] = ["usage_events", "usage_daily"];
 
 /// What the API key steps keep in the database of the service: the keys.
 pub const API_KEYS_TABLE: &str = "api_keys";
+/// The table `refreshRotate` keeps its tokens in (hashed).
+pub const REFRESH_TOKENS_TABLE: &str = "refresh_tokens";
 
 /// What the audit steps keep in the database of the service: the journal.
 pub const AUDIT_TABLE: &str = "audit_events";
@@ -2097,6 +2099,7 @@ impl<'a> Checker<'a> {
             if (s.uses_usage() && USAGE_TABLES.contains(&t.name.as_str()))
                 || (s.uses_challenge_check() && t.name == CHALLENGE_TABLE)
                 || (s.uses_api_keys() && t.name == API_KEYS_TABLE)
+                || (s.uses_refresh_tokens() && t.name == REFRESH_TOKENS_TABLE)
                 || (s.uses_sequences() && t.name == SEQUENCES_TABLE)
                 || (s.uses_audit() && t.name == AUDIT_TABLE)
                 || (s.uses_flags() && t.name == FLAGS_TABLE)
@@ -3951,7 +3954,7 @@ impl<'a> Checker<'a> {
                 on_fail,
                 ..
             } => {
-                self.check_on_fail(env, path, on_fail, scope);
+                self.check_on_fail(env, path, "onFail", on_fail, scope);
                 self.totp_in_route(env, path, "a refused code");
                 self.jwt_key_env(&format!("{path}/keyEnv"), key_env);
                 let text = TypeRef::scalar(FieldType::String);
@@ -3991,7 +3994,7 @@ impl<'a> Checker<'a> {
                 on_fail,
                 ..
             } => {
-                self.check_on_fail(env, path, on_fail, scope);
+                self.check_on_fail(env, path, "onFail", on_fail, scope);
                 self.totp_in_route(env, path, "a refused recovery code");
                 let text = TypeRef::scalar(FieldType::String);
                 self.check_expr(scope, account, Some(&text), &format!("{path}/account"));
@@ -4384,6 +4387,82 @@ impl<'a> Checker<'a> {
                 }
                 false
             }
+            Step::RefreshRotate {
+                token,
+                subject,
+                ttl_secs,
+                bind,
+                subject_bind,
+                on_replay,
+                ..
+            } => {
+                if !matches!(env.handler, Handler::Route { .. }) {
+                    self.error(
+                        "E_REFRESH_OUTSIDE_ROUTE",
+                        path,
+                        "a bad refresh token is answered with a 401: it only makes sense in an HTTP route",
+                    );
+                }
+                if *ttl_secs == 0 {
+                    self.error(
+                        "E_REFRESH_TTL",
+                        format!("{path}/ttlSecs"),
+                        "a refresh token is valid for a positive number of seconds",
+                    );
+                }
+                let text = TypeRef::scalar(FieldType::String);
+                match (token, subject) {
+                    (None, None) => self.error(
+                        "E_REFRESH_SUBJECT",
+                        format!("{path}/subject"),
+                        "without a `token` the step starts a family: say whom it is for (`subject`)",
+                    ),
+                    (Some(_), Some(_)) => self.error(
+                        "E_REFRESH_SUBJECT",
+                        format!("{path}/subject"),
+                        "a rotation takes its subject from the token: leave `subject` out (read it with `subjectBind`)",
+                    ),
+                    _ => {}
+                }
+                if let Some(token) = token {
+                    self.check_expr(scope, token, Some(&text), &format!("{path}/token"));
+                }
+                if let Some(subject) = subject {
+                    self.check_expr(scope, subject, Some(&text), &format!("{path}/subject"));
+                }
+                if token.is_none() {
+                    if subject_bind.is_some() {
+                        self.error(
+                            "E_REFRESH_BIND",
+                            format!("{path}/subjectBind"),
+                            "a new family has no subject to read back: it is the `subject` you gave",
+                        );
+                    }
+                    if on_replay.is_some() {
+                        self.error(
+                            "E_REFRESH_REPLAY",
+                            format!("{path}/onReplay"),
+                            "only a rotation can meet a token that was already spent",
+                        );
+                    }
+                }
+                self.check_var_name(bind, &format!("{path}/bind"));
+                scope.bind(bind.clone(), text.clone());
+                if let Some(var) = subject_bind {
+                    self.check_var_name(var, &format!("{path}/subjectBind"));
+                    if var == bind {
+                        self.error(
+                            "E_REFRESH_BIND",
+                            format!("{path}/subjectBind"),
+                            "the token and its subject are two variables",
+                        );
+                    }
+                    scope.bind(var.clone(), text.clone());
+                }
+                // The audit event may name the subject of the family.
+                self.check_on_fail(env, path, "onReplay", on_replay, scope);
+                false
+            }
             Step::ApiKeyRevoke { key_id, owner, .. } => {
                 if !matches!(env.handler, Handler::Route { .. }) {
                     self.error(
@@ -4699,7 +4778,7 @@ impl<'a> Checker<'a> {
                 self.check_var_name(bind, &format!("{path}/bind"));
                 let text = TypeRef::scalar(FieldType::String);
                 self.check_weakness(scope, weakness, path);
-                self.check_on_fail(env, path, on_fail, scope);
+                self.check_on_fail(env, path, "onFail", on_fail, scope);
                 // The stored hash may be absent: an unknown account.
                 let maybe = TypeRef {
                     optional: true,
@@ -5645,6 +5724,7 @@ impl<'a> Checker<'a> {
         &mut self,
         env: &Env,
         path: &str,
+        field: &str,
         on_fail: &Option<OnFail>,
         scope: &mut Scope,
     ) {
@@ -5652,16 +5732,16 @@ impl<'a> Checker<'a> {
         if on_fail.publish.is_none() && on_fail.fail.is_none() {
             self.error(
                 "E_ON_FAIL_EMPTY",
-                format!("{path}/onFail"),
-                "`onFail` does nothing: give it a `publish` (the audit event) and/or a `fail` (the answer)",
+                format!("{path}/{field}"),
+                format!("`{field}` does nothing: give it a `publish` (the audit event) and/or a `fail` (the answer)"),
             );
         }
         if let Some(publish) = &on_fail.publish {
-            let at = format!("{path}/onFail/publish");
+            let at = format!("{path}/{field}/publish");
             self.check_publish(env, &at, &publish.topic, &publish.payload, scope);
         }
         if let Some(fail) = &on_fail.fail {
-            let at = format!("{path}/onFail/fail");
+            let at = format!("{path}/{field}/fail");
             self.check_error_code(fail.code.as_deref(), &format!("{at}/code"));
             if !(400..=599).contains(&fail.status) || matches!(fail.status, 429 | 503) {
                 self.error(
@@ -7838,6 +7918,74 @@ mod tests {
             bind: "tx".into(),
         };
         assert!(errors(&p).contains(&"E_RESERVED_NAME".to_string()));
+    }
+
+    #[test]
+    fn a_refresh_rotation_is_a_family_start_or_a_rotation_and_nothing_between() {
+        let codes = |f: &dyn Fn(&mut Step)| -> Vec<String> {
+            let mut p = sample::showcase();
+            for r in &mut p.services[0].routes {
+                if r.name == "rotate_refresh" || r.name == "start_refresh" {
+                    f(&mut r.steps[0]);
+                }
+            }
+            validate(&p)
+                .into_iter()
+                .map(|d| d.code.to_string())
+                .collect()
+        };
+        assert!(codes(&|_| {}).is_empty());
+        // A rotation names no subject; a new family needs one.
+        let both = codes(&|s| {
+            if let Step::RefreshRotate {
+                token: Some(_),
+                subject,
+                ..
+            } = s
+            {
+                *subject = Some(Expr::Literal { value: "a".into() });
+            }
+        });
+        assert!(both.contains(&"E_REFRESH_SUBJECT".to_string()), "{both:?}");
+        let neither = codes(&|s| {
+            if let Step::RefreshRotate {
+                token: None,
+                subject,
+                ..
+            } = s
+            {
+                *subject = None;
+            }
+        });
+        assert!(
+            neither.contains(&"E_REFRESH_SUBJECT".to_string()),
+            "{neither:?}"
+        );
+        // Only a rotation reads its subject back and meets a replay.
+        let start = codes(&|s| {
+            if let Step::RefreshRotate {
+                token: None,
+                subject_bind,
+                on_replay,
+                ..
+            } = s
+            {
+                *subject_bind = Some("who".into());
+                *on_replay = Some(OnFail {
+                    publish: None,
+                    fail: None,
+                });
+            }
+        });
+        for code in ["E_REFRESH_BIND", "E_REFRESH_REPLAY", "E_ON_FAIL_EMPTY"] {
+            assert!(start.contains(&code.to_string()), "{code} in {start:?}");
+        }
+        let ttl = codes(&|s| {
+            if let Step::RefreshRotate { ttl_secs, .. } = s {
+                *ttl_secs = 0;
+            }
+        });
+        assert!(ttl.contains(&"E_REFRESH_TTL".to_string()), "{ttl:?}");
     }
 
     #[test]
