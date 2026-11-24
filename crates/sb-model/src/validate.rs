@@ -5403,6 +5403,13 @@ impl<'a> Checker<'a> {
 
     fn graphql_sources(&mut self, s: &Service, base: &str) {
         if s.graphql_sources.is_empty() {
+            if !s.graphql_roots.is_empty() {
+                self.error(
+                    "E_GRAPHQL_ROOT",
+                    format!("{base}/graphqlRoots"),
+                    "`graphqlRoots` read the `graphqlSources` of the service: declare them",
+                );
+            }
             return;
         }
         if !s.graphql {
@@ -5513,6 +5520,169 @@ impl<'a> Checker<'a> {
                         format!("{rp}/batchParam"),
                         "`batchParam` is a query parameter name",
                     );
+                }
+            }
+            self.graphql_computed(s, src, &at);
+        }
+        self.graphql_roots(s, base);
+    }
+
+    fn graphql_computed(&mut self, s: &Service, src: &GraphqlSource, at: &str) {
+        let is_int = |src: &GraphqlSource, f: &str| {
+            src.fields
+                .iter()
+                .any(|x| x.name == f && matches!(x.ty, ColumnType::Int32 | ColumnType::Int64))
+        };
+        let mut taken: HashSet<String> = src
+            .fields
+            .iter()
+            .map(|f| f.name.clone())
+            .chain(src.relations.iter().map(|r| r.field.clone()))
+            .collect();
+        for (j, c) in src.computed.iter().enumerate() {
+            let cp = format!("{at}/computed/{j}");
+            if !is_lower_camel(&c.name) || !taken.insert(c.name.clone()) {
+                self.error(
+                    "E_GRAPHQL_COMPUTED",
+                    format!("{cp}/name"),
+                    "a computed field is named in camelCase, with a name no field or relation of the source has",
+                );
+            }
+            let operands_ok = match &c.kind {
+                GraphqlComputedKind::Product { fields } => {
+                    fields.len() >= 2 && fields.iter().all(|f| is_int(src, f))
+                }
+                GraphqlComputedKind::Ratio {
+                    numerator,
+                    denominator,
+                } => is_int(src, numerator) && is_int(src, denominator),
+                GraphqlComputedKind::Sum {
+                    relation,
+                    field,
+                    times,
+                } => src
+                    .relations
+                    .iter()
+                    .find(|r| &r.field == relation && r.many)
+                    .and_then(|r| s.graphql_sources.iter().find(|t| t.name == r.target))
+                    .is_some_and(|t| {
+                        is_int(t, field) && times.as_deref().is_none_or(|f| is_int(t, f))
+                    }),
+            };
+            if !operands_ok {
+                self.error(
+                    "E_GRAPHQL_COMPUTED",
+                    cp,
+                    "the operands of a computed field are integer fields (int32 or int64) of the source (of the related source for `sum`, which reads a `many` relation); `product` needs two",
+                );
+            }
+        }
+    }
+
+    fn graphql_roots(&mut self, s: &Service, base: &str) {
+        let mut names: HashSet<String> = HashSet::new();
+        for src in &s.graphql_sources {
+            names.insert(lower_first(&src.name));
+            names.insert(format!("{}List", lower_first(&src.name)));
+        }
+        for (i, r) in s.graphql_roots.iter().enumerate() {
+            let at = format!("{base}/graphqlRoots/{i}");
+            let type_taken = s
+                .graphql_sources
+                .iter()
+                .any(|x| x.name == crate::names::pascal(&r.name));
+            if !is_lower_camel(&r.name) || type_taken || !names.insert(r.name.clone()) {
+                self.error(
+                    "E_GRAPHQL_ROOT",
+                    format!("{at}/name"),
+                    "a root is named in camelCase, with a name no other query has",
+                );
+            }
+            let mut args = HashSet::new();
+            for (j, a) in r.args.iter().enumerate() {
+                let ok_default = a.default.as_deref().is_none_or(|d| match a.ty {
+                    ColumnType::Int32 => d.parse::<i32>().is_ok(),
+                    ColumnType::Int64 => d.parse::<i64>().is_ok(),
+                    ColumnType::Float | ColumnType::Double => {
+                        d.parse::<f64>().is_ok_and(f64::is_finite)
+                    }
+                    ColumnType::Bool => d.parse::<bool>().is_ok(),
+                    ColumnType::Jsonb => false,
+                    _ => true,
+                });
+                if !is_lower_camel(&a.name) || !args.insert(a.name.as_str()) || !ok_default {
+                    self.error(
+                        "E_GRAPHQL_ROOT_ARG",
+                        format!("{at}/args/{j}"),
+                        "an argument is named in camelCase, once, and its default is a value of its type",
+                    );
+                }
+            }
+            if let Some(g) = &r.guard {
+                if !s.graphql_sources.iter().any(|x| x.name == g.source) {
+                    self.error(
+                        "E_GRAPHQL_ROOT_GUARD",
+                        format!("{at}/guard/source"),
+                        "the guard reads the base URL of a source of the service",
+                    );
+                }
+                let mut rest = g.path.as_str();
+                let mut ok = g.path.starts_with('/')
+                    && !g.path.contains(['?', '#', ' '])
+                    && !g.path.contains("..");
+                while let Some((_, after)) = rest.split_once('{') {
+                    match after.split_once('}') {
+                        Some((name, tail)) if args.contains(name) => rest = tail,
+                        _ => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if !ok {
+                    self.error(
+                        "E_GRAPHQL_ROOT_GUARD",
+                        format!("{at}/guard/path"),
+                        "the path starts with `/`, holds no query or `..`, and each `{name}` is an argument of the root",
+                    );
+                }
+            }
+            if r.blocks.is_empty() {
+                self.error(
+                    "E_GRAPHQL_ROOT_BLOCK",
+                    format!("{at}/blocks"),
+                    "a root answers at least one block",
+                );
+            }
+            let mut fields = HashSet::new();
+            for (j, b) in r.blocks.iter().enumerate() {
+                let bp = format!("{at}/blocks/{j}");
+                if !is_lower_camel(&b.field) || !fields.insert(b.field.as_str()) {
+                    self.error(
+                        "E_GRAPHQL_ROOT_BLOCK",
+                        format!("{bp}/field"),
+                        "a block is named in camelCase, once in its root",
+                    );
+                }
+                if !s.graphql_sources.iter().any(|x| x.name == b.source) {
+                    self.error(
+                        "E_GRAPHQL_ROOT_BLOCK",
+                        format!("{bp}/source"),
+                        "a block reads a source of the service",
+                    );
+                }
+                for (param, arg) in &b.params {
+                    let plain = !param.is_empty()
+                        && param
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-');
+                    if !plain || !args.contains(arg.as_str()) {
+                        self.error(
+                            "E_GRAPHQL_ROOT_BLOCK",
+                            format!("{bp}/params/{param}"),
+                            "a parameter is a query parameter name, fed by an argument of the root",
+                        );
+                    }
                 }
             }
         }
@@ -6394,6 +6564,17 @@ impl<'a> Checker<'a> {
             }
         }
     }
+}
+
+fn is_lower_camel(s: &str) -> bool {
+    s.starts_with(|c: char| c.is_ascii_lowercase()) && s.bytes().all(|c| c.is_ascii_alphanumeric())
+}
+
+fn lower_first(s: &str) -> String {
+    let mut c = s.chars();
+    c.next()
+        .map(|f| f.to_lowercase().chain(c).collect())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

@@ -153,6 +153,7 @@ fn source(name: &str, path: &str, fields: &[(&str, ColumnType)]) -> sb_model::Gr
             .collect(),
         key: Some("id".into()),
         relations: vec![],
+        computed: vec![],
     }
 }
 
@@ -205,7 +206,7 @@ fn a_gateway_writes_its_schema_and_reads_the_services_behind_it() {
     );
     assert!(sdl.contains("  articleId: ID!"), "{sdl}");
     let code = find(&files, "services/orders/src/transport/graphql.rs").expect("endpoint");
-    assert!(code.contains("Gateway::from_env(SOURCES)"), "{code}");
+    assert!(code.contains("Gateway::from_env(SOURCES, ROOTS)"), "{code}");
     assert!(code.contains("base_url_env: \"STOCK_URL\""), "{code}");
     assert!(
         code.contains(
@@ -372,4 +373,142 @@ fn the_tenant_claim_can_be_named() {
     let code = find(&files, "services/orders/src/transport/graphql.rs").expect("endpoint");
     assert!(code.contains("let tenant = [\"tid\"]"), "{code}");
     assert!(!code.contains("\"tenantId\""), "{code}");
+}
+
+/// The gateway of a dashboard: a root with arguments and a guard, blocks, and computed fields.
+fn dashboard() -> sb_model::Project {
+    use sb_model::{
+        GraphqlArg, GraphqlBlock, GraphqlComputed, GraphqlComputedKind, GraphqlGuard, GraphqlRoot,
+    };
+    let mut p = gateway();
+    let svc = &mut p.services[0];
+    svc.graphql_sources[1]
+        .fields
+        .push(sb_model::GraphqlSourceField {
+            name: "prix".into(),
+            ty: ColumnType::Int32,
+            nullable: false,
+        });
+    svc.graphql_sources[1].computed = vec![
+        GraphqlComputed {
+            name: "valeur".into(),
+            kind: GraphqlComputedKind::Product {
+                fields: vec!["quantite".into(), "prix".into()],
+            },
+        },
+        GraphqlComputed {
+            name: "taux".into(),
+            kind: GraphqlComputedKind::Ratio {
+                numerator: "quantite".into(),
+                denominator: "prix".into(),
+            },
+        },
+    ];
+    svc.graphql_sources[0].computed = vec![GraphqlComputed {
+        name: "valeurStock".into(),
+        kind: GraphqlComputedKind::Sum {
+            relation: "mouvements".into(),
+            field: "quantite".into(),
+            times: Some("prix".into()),
+        },
+    }];
+    svc.graphql_roots = vec![GraphqlRoot {
+        name: "tableauDeBord".into(),
+        args: vec![
+            GraphqlArg {
+                name: "entrepotId".into(),
+                ty: ColumnType::Uuid,
+                default: None,
+            },
+            GraphqlArg {
+                name: "limit".into(),
+                ty: ColumnType::Int32,
+                default: Some("6".into()),
+            },
+        ],
+        guard: Some(GraphqlGuard {
+            source: "Article".into(),
+            path: "/entrepots/{entrepotId}".into(),
+        }),
+        blocks: vec![
+            GraphqlBlock {
+                field: "articles".into(),
+                source: "Article".into(),
+                many: true,
+                params: [("limit".to_string(), "limit".to_string())].into(),
+            },
+            GraphqlBlock {
+                field: "premierMouvement".into(),
+                source: "Mouvement".into(),
+                many: false,
+                params: [("entrepot_id".to_string(), "entrepotId".to_string())].into(),
+            },
+        ],
+    }];
+    p
+}
+
+#[test]
+fn a_gateway_declares_roots_with_arguments_blocks_a_guard_and_computed_fields() {
+    let p = dashboard();
+    let errors: Vec<_> = sb_model::validate(&p)
+        .into_iter()
+        .filter(|d| d.severity == sb_model::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    let files = generate(&p).unwrap();
+    let sdl = sdl_file(&files).expect("sdl written");
+    assert!(sdl.contains("type TableauDeBord {"), "{sdl}");
+    assert!(sdl.contains("  articles: [Article!]"), "{sdl}");
+    assert!(sdl.contains("  premierMouvement: Mouvement"), "{sdl}");
+    assert!(
+        sdl.contains("  tableauDeBord(entrepotId: ID!, limit: Int = 6): TableauDeBord!"),
+        "{sdl}"
+    );
+    assert!(sdl.contains("  valeurStock: Long"), "{sdl}");
+    assert!(sdl.contains("  taux: Float"), "{sdl}");
+    let code = find(&files, "services/orders/src/transport/graphql.rs").expect("endpoint");
+    for wanted in [
+        "Arg { name: \"limit\", scalar: \"Int\", default: Some(\"6\") }",
+        "guard: Some(Guard { source: \"Article\", path: \"/entrepots/{entrepotId}\" })",
+        "Block { field: \"articles\", source: \"Article\", many: true, params: &[(\"limit\", \"limit\")] }",
+        "Kind::Sum { relation: \"mouvements\", field: \"quantite\", times: Some(\"prix\") }",
+        "Kind::Ratio(\"quantite\", \"prix\")",
+    ] {
+        assert!(code.contains(wanted), "{wanted} in {code}");
+    }
+    // Deterministic.
+    let again = generate(&dashboard()).unwrap();
+    assert_eq!(
+        find(&again, "services/orders/src/transport/graphql.rs"),
+        Some(code)
+    );
+}
+
+#[test]
+fn the_roots_and_computed_fields_of_a_gateway_are_checked() {
+    let mut p = dashboard();
+    let svc = &mut p.services[0];
+    svc.graphql_roots[0].guard.as_mut().unwrap().path = "/entrepots/{inconnu}".into();
+    svc.graphql_roots[0].blocks[0].source = "Nothing".into();
+    svc.graphql_roots[0].blocks[1]
+        .params
+        .insert("x".into(), "nope".into());
+    svc.graphql_sources[1].computed[0].name = "quantite".into();
+    svc.graphql_sources[0].computed[0] = sb_model::GraphqlComputed {
+        name: "somme".into(),
+        kind: sb_model::GraphqlComputedKind::Sum {
+            relation: "absente".into(),
+            field: "quantite".into(),
+            times: None,
+        },
+    };
+    let codes: Vec<String> = sb_model::validate(&p).into_iter().map(|d| d.code).collect();
+    for wanted in [
+        "E_GRAPHQL_ROOT_GUARD",
+        "E_GRAPHQL_ROOT_BLOCK",
+        "E_GRAPHQL_COMPUTED",
+    ] {
+        assert!(codes.iter().any(|c| c == wanted), "{wanted} in {codes:?}");
+    }
 }

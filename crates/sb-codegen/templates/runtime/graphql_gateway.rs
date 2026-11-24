@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_graphql::dynamic::{Field, FieldFuture, FieldValue, InputValue, Object, ResolverContext, Scalar, Schema, TypeRef};
-use async_graphql::{Error, ErrorExtensions, Request};
+use async_graphql::{Error, ErrorExtensions, Request, Value};
 use serde_json::{Map, Value as Json};
 use tokio::sync::watch;
 
@@ -38,6 +38,50 @@ pub struct Relation {
     pub batch_param: Option<&'static str>,
 }
 
+/// What a computed field is made of (the names are the JSON properties of the rows).
+pub enum Kind {
+    Product(&'static [&'static str]),
+    Ratio(&'static str, &'static str),
+    /// The sum over the rows of the relation `relation` of `field`, or of `field * times`.
+    Sum { relation: &'static str, field: &'static str, times: Option<&'static str> },
+}
+
+pub struct Computed {
+    pub field: &'static str,
+    pub kind: Kind,
+}
+
+/// An argument of a root; `default` is the text of its default value.
+pub struct Arg {
+    pub name: &'static str,
+    pub scalar: &'static str,
+    pub default: Option<&'static str>,
+}
+
+/// A field of a root: the first row (or the rows) of `source`, asked with query parameters taken from the arguments.
+pub struct Block {
+    pub field: &'static str,
+    pub source: &'static str,
+    pub many: bool,
+    /// `(query parameter, argument)`.
+    pub params: &'static [(&'static str, &'static str)],
+}
+
+/// `GET <path>` on `source`, read before the blocks: a refusal stops the request. `{arg}` stands for an argument.
+pub struct Guard {
+    pub source: &'static str,
+    pub path: &'static str,
+}
+
+/// A query field with arguments that answers blocks, each of which may fail on its own.
+pub struct Root {
+    pub field: &'static str,
+    pub ty: &'static str,
+    pub args: &'static [Arg],
+    pub guard: Option<Guard>,
+    pub blocks: &'static [Block],
+}
+
 pub struct Source {
     pub name: &'static str,
     pub base_url_env: &'static str,
@@ -47,14 +91,29 @@ pub struct Source {
     pub props: &'static [Prop],
     pub key: Option<Prop>,
     pub relations: &'static [Relation],
+    pub computed: &'static [Computed],
 }
 
 const MAX_LIST: i64 = 100;
 
-type Failure = (&'static str, String);
+/// Why a call to a service behind failed. A root or a block says what the service said (`error`, `code`, `message`).
+#[derive(Clone)]
+struct Failure {
+    code: String,
+    message: String,
+    error: Option<String>,
+}
+
+impl Failure {
+    fn new(code: &str, message: impl Into<String>) -> Self {
+        Self { code: code.to_owned(), message: message.into(), error: None }
+    }
+}
+
 type Rows = Arc<Result<Vec<Json>, Failure>>;
 
-fn refuse(code: &'static str, message: &str) -> Error {
+fn refuse(code: &str, message: &str) -> Error {
+    let code = code.to_owned();
     Error::new(message).extend_with(move |_, e| e.set("code", code))
 }
 
@@ -85,14 +144,36 @@ struct Loader {
 
 fn upstream(status: u16) -> Failure {
     match status {
-        401 | 403 => ("ACCES_REFUSE", "the service behind refused the request".into()),
-        0 | 429 | 500..=599 => ("SERVICE_INDISPONIBLE", "the service behind is unavailable".into()),
-        _ => ("ERREUR_INTERNE", "the service behind answered something unexpected".into()),
+        401 | 403 => Failure::new("ACCES_REFUSE", "the service behind refused the request"),
+        0 | 429 | 500..=599 => Failure::new("SERVICE_INDISPONIBLE", "the service behind is unavailable"),
+        _ => Failure::new("ERREUR_INTERNE", "the service behind answered something unexpected"),
     }
 }
 
-fn into_error((code, message): Failure) -> Error {
-    refuse(code, &message)
+/// The refusal of a 4xx as the service behind wrote it (`{error, code, message}`), for a root or a block: the caller learns
+/// the code of the service (`ACCES_REFUSE`, `ENTREPOT_INTROUVABLE`...). A 5xx stays generic.
+fn verbatim(status: u16, body: &Json) -> Failure {
+    let text = |k: &str| body.get(k).and_then(Json::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
+    match (400..500).contains(&status).then(|| text("code")).flatten() {
+        Some(code) => Failure {
+            code,
+            message: text("message").unwrap_or_else(|| "the service behind refused the request".into()),
+            error: text("error"),
+        },
+        None if status == 404 => Failure::new("INTROUVABLE", "not found"),
+        None => upstream(status),
+    }
+}
+
+fn into_error(f: Failure) -> Error {
+    let Failure { code, message, error } = f;
+    let extended = refuse(&code, &message);
+    extended.extend_with(move |_, e| {
+        e.set("message", message.clone());
+        if let Some(error) = error {
+            e.set("error", error);
+        }
+    })
 }
 
 fn rows_of(answer: Json) -> Vec<Json> {
@@ -106,7 +187,14 @@ fn rows_of(answer: Json) -> Vec<Json> {
     }
 }
 
-async fn get(target: &Source, cookie: Option<&str>, path: &str, query: Fields) -> Result<Option<Json>, Failure> {
+/// `verbatim`: a refusal of the service is reported as it wrote it (see [`verbatim`]), and a 404 is a failure, not an absence.
+async fn get(
+    target: &Source,
+    cookie: Option<&str>,
+    path: &str,
+    query: Fields,
+    verbatim_errors: bool,
+) -> Result<Option<Json>, Failure> {
     let mut headers = Fields::default();
     if let Some(token) = cookie {
         headers.set("Cookie", format!("access_token={token}"));
@@ -128,22 +216,25 @@ async fn get(target: &Source, cookie: Option<&str>, path: &str, query: Fields) -
     };
     let answer = crate::http_client::send(call).await.map_err(|e| {
         tracing::error!(error = %e, "graphql gateway call failed");
-        ("ERREUR_INTERNE", "internal error".to_string())
+        Failure::new("ERREUR_INTERNE", "internal error")
     })?;
-    if answer.status == 404 {
+    if answer.status == 404 && !verbatim_errors {
         return Ok(None);
     }
     if !answer.ok() {
+        if verbatim_errors {
+            return Err(verbatim(answer.status, &answer.parse::<Json>().unwrap_or(Json::Null)));
+        }
         return Err(upstream(answer.status));
     }
     answer
         .parse::<Json>()
         .map(Some)
-        .map_err(|_| ("SERVICE_INDISPONIBLE", "the service behind sent an unreadable answer".to_string()))
+        .map_err(|_| Failure::new("SERVICE_INDISPONIBLE", "the service behind sent an unreadable answer"))
 }
 
 async fn rows_for(target: &Source, cookie: Option<&str>, query: Fields) -> Result<Vec<Json>, Failure> {
-    get(target, cookie, target.path, query).await.map(|a| rows_of(a.unwrap_or(Json::Null)))
+    get(target, cookie, target.path, query, false).await.map(|a| rows_of(a.unwrap_or(Json::Null)))
 }
 
 impl Context {
@@ -245,6 +336,34 @@ async fn join_all<F: std::future::Future>(calls: impl IntoIterator<Item = F>) ->
     .await
 }
 
+/// The default value of an argument, in the type it is declared with.
+fn default_value(scalar: &str, text: &str) -> Value {
+    let number = |n: Option<serde_json::Number>| n.map_or_else(|| Value::String(text.to_owned()), Value::Number);
+    match scalar {
+        "Int" | "Long" => number(text.parse::<i64>().ok().map(Into::into)),
+        "Float" => number(text.parse::<f64>().ok().and_then(serde_json::Number::from_f64)),
+        "Boolean" => text.parse::<bool>().map_or_else(|_| Value::String(text.to_owned()), Value::Boolean),
+        _ => Value::String(text.to_owned()),
+    }
+}
+
+/// The rows of a block of a root: one call to its source, with the query parameters its arguments give.
+async fn read_block(ctx: &ResolverContext<'_>, b: &'static Block) -> Result<Option<FieldValue<'static>>, Error> {
+    let req = context(ctx)?;
+    let args = parent_json(ctx)?;
+    let target = source(req.sources, b.source).ok_or_else(|| refuse("ERREUR_INTERNE", "internal error"))?;
+    let mut q = Fields::default();
+    for (param, arg) in b.params {
+        if let Some(v) = args.get(*arg).and_then(text_of) {
+            q.set(*param, v);
+        }
+    }
+    let answer = get(target, req.cookie.as_deref(), target.path, q, true).await.map_err(into_error)?;
+    let mut rows = rows_of(answer.unwrap_or(Json::Null));
+    rows.truncate(MAX_LIST as usize);
+    Ok(if b.many { Some(FieldValue::list(rows.into_iter().map(object))) } else { rows.into_iter().next().map(object) })
+}
+
 fn context<'a>(ctx: &'a ResolverContext<'_>) -> Result<&'a Context, Error> {
     ctx.data::<Context>()
 }
@@ -253,6 +372,7 @@ fn context<'a>(ctx: &'a ResolverContext<'_>) -> Result<&'a Context, Error> {
 /// asked for.
 pub fn schema(
     sources: &'static [Source],
+    roots: &'static [Root],
     max_depth: usize,
     max_complexity: usize,
     introspection: bool,
@@ -286,6 +406,46 @@ pub fn schema(
                 })
             }));
         }
+        for c in s.computed {
+            let scalar = if matches!(c.kind, Kind::Ratio(..)) { TypeRef::FLOAT } else { "Long" };
+            ty = ty.field(Field::new(c.field, TypeRef::named(scalar), move |ctx| {
+                FieldFuture::new(async move {
+                    let parent = parent_json(&ctx)?;
+                    let int = |row: &Json, k: &str| row.get(k).and_then(Json::as_i64);
+                    let value: Option<Json> = match &c.kind {
+                        Kind::Product(fields) => fields
+                            .iter()
+                            .try_fold(1i64, |acc, f| int(parent, f).and_then(|n| acc.checked_mul(n)))
+                            .map(Json::from),
+                        Kind::Ratio(numerator, denominator) => match (int(parent, numerator), int(parent, denominator)) {
+                            (Some(n), Some(d)) if d != 0 => serde_json::Number::from_f64(n as f64 / d as f64).map(Json::Number),
+                            _ => None,
+                        },
+                        Kind::Sum { relation, field, times } => {
+                            let ri = s.relations.iter().position(|r| r.field == *relation);
+                            match (ri, ri.and_then(|ri| parent.get(s.relations[ri].via).and_then(text_of).map(|v| (ri, v)))) {
+                                (Some(_), Some((ri, via))) => {
+                                    let rows = context(&ctx)?.load(si, ri, via).await?;
+                                    rows.iter()
+                                        .try_fold(0i64, |acc, row| {
+                                            let n = int(row, field)?;
+                                            let n = match times {
+                                                Some(t) => n.checked_mul(int(row, t)?)?,
+                                                None => n,
+                                            };
+                                            acc.checked_add(n)
+                                        })
+                                        .map(Json::from)
+                                }
+                                (Some(_), None) => Some(Json::from(0)),
+                                _ => None,
+                            }
+                        }
+                    };
+                    Ok(value.and_then(|v| Value::from_json(v).ok()).map(FieldValue::value))
+                })
+            }));
+        }
         builder = builder.register(ty);
 
         if let Some(key) = s.key.as_ref() {
@@ -298,7 +458,7 @@ pub fn schema(
                     let segment = crate::http_client::segment(&value)
                         .map_err(|_| refuse("PARAMETRE_INVALIDE", "the key is not valid"))?;
                     let path = format!("{}/{segment}", target.path);
-                    let found = get(target, req.cookie.as_deref(), &path, Fields::default()).await.map_err(into_error)?;
+                    let found = get(target, req.cookie.as_deref(), &path, Fields::default(), false).await.map_err(into_error)?;
                     Ok(found.filter(Json::is_object).map(object))
                 })
             })
@@ -325,6 +485,60 @@ pub fn schema(
         .argument(InputValue::new("first", TypeRef::named(TypeRef::INT)));
         query = query.field(list);
     }
+    for root in roots {
+        let mut ty = Object::new(root.ty);
+        for b in root.blocks {
+            let Some(target) = source(sources, b.source) else { continue };
+            let reference = if b.many { TypeRef::named_nn_list(target.name) } else { TypeRef::named(target.name) };
+            ty = ty.field(Field::new(b.field, reference, move |ctx| {
+                FieldFuture::new(async move {
+                    match read_block(&ctx, b).await {
+                        Ok(value) => Ok(value),
+                        // The block alone fails: it is `null`, with its error at its path, and the other blocks are answered.
+                        Err(error) => {
+                            let server = ctx.ctx.set_error_path(error.into_server_error(ctx.ctx.item.pos));
+                            ctx.ctx.add_error(server);
+                            Ok(None)
+                        }
+                    }
+                })
+            }));
+        }
+        builder = builder.register(ty);
+        let mut field = Field::new(root.field, TypeRef::named_nn(root.ty), move |ctx| {
+            FieldFuture::new(async move {
+                let req = context(&ctx)?;
+                let mut args = Map::new();
+                for a in root.args {
+                    if let Some(v) = ctx.args.get(a.name) {
+                        let v = v.as_value().clone().into_json().map_err(|_| refuse("PARAMETRE_INVALIDE", "unexpected argument"))?;
+                        args.insert(a.name.to_owned(), v);
+                    }
+                }
+                if let Some(g) = &root.guard {
+                    let target = source(req.sources, g.source).ok_or_else(|| refuse("ERREUR_INTERNE", "internal error"))?;
+                    let mut path = g.path.to_owned();
+                    for a in root.args {
+                        if let Some(v) = args.get(a.name).and_then(text_of) {
+                            let segment = crate::http_client::segment(&v)
+                                .map_err(|_| refuse("PARAMETRE_INVALIDE", "the argument is not valid"))?;
+                            path = path.replace(&format!("{{{}}}", a.name), &segment.to_string());
+                        }
+                    }
+                    get(target, req.cookie.as_deref(), &path, Fields::default(), true).await.map_err(into_error)?;
+                }
+                Ok(Some(object(Json::Object(args))))
+            })
+        });
+        for a in root.args {
+            let input = match a.default {
+                Some(text) => InputValue::new(a.name, TypeRef::named(a.scalar)).default_value(default_value(a.scalar, text)),
+                None => InputValue::new(a.name, TypeRef::named_nn(a.scalar)),
+            };
+            field = field.argument(input);
+        }
+        query = query.field(field);
+    }
     builder = builder.register(query).limit_depth(max_depth).limit_complexity(max_complexity);
     if !introspection {
         builder = builder.disable_introspection();
@@ -340,12 +554,12 @@ pub struct Gateway {
 
 impl Gateway {
     /// Limits and introspection come from the environment, like for the tables.
-    pub fn from_env(sources: &'static [Source]) -> anyhow::Result<Self> {
+    pub fn from_env(sources: &'static [Source], roots: &'static [Root]) -> anyhow::Result<Self> {
         let number = |name: &str, default: usize| std::env::var(name).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default);
         let introspection = std::env::var("GRAPHQL_INTROSPECTION")
             .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "off" | "false" | "0" | "no"))
             .unwrap_or(true);
-        let schema = schema(sources, number("GRAPHQL_MAX_DEPTH", 8), number("GRAPHQL_MAX_COMPLEXITY", 200), introspection)
+        let schema = schema(sources, roots, number("GRAPHQL_MAX_DEPTH", 8), number("GRAPHQL_MAX_COMPLEXITY", 200), introspection)
             .map_err(|e| anyhow::anyhow!("cannot build the GraphQL schema: {e}"))?;
         Ok(Self { schema, sources })
     }
@@ -384,14 +598,34 @@ mod tests {
         fake.cookies.lock().unwrap().push(cookie.to_string());
     }
 
-    async fn articles(State(fake): State<Fake>, headers: HeaderMap) -> AxJson<Json> {
+    async fn articles(State(fake): State<Fake>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> AxJson<Json> {
         fake.article_calls.fetch_add(1, Ordering::SeqCst);
         note(&fake, &headers);
-        AxJson(serde_json::json!([
-            { "id": "a1", "nom": "Vis" },
-            { "id": "a2", "nom": "Ecrou" },
-            { "id": "a3", "nom": "Rondelle" }
-        ]))
+        let all = [("a1", "Vis"), ("a2", "Ecrou"), ("a3", "Rondelle")];
+        let limit = q.get("limit").and_then(|l| l.parse().ok()).unwrap_or(all.len());
+        AxJson(Json::Array(all.iter().take(limit).map(|(id, nom)| serde_json::json!({ "id": id, "nom": nom })).collect()))
+    }
+
+    async fn warehouse(axum::extract::Path(id): axum::extract::Path<String>) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        match id.as_str() {
+            "w1" => AxJson(serde_json::json!({ "id": "w1" })).into_response(),
+            "w403" => (
+                axum::http::StatusCode::FORBIDDEN,
+                AxJson(serde_json::json!({ "error": "forbidden", "code": "ENTREPOT_INTERDIT", "message": "no access" })),
+            )
+                .into_response(),
+            _ => axum::http::StatusCode::NOT_FOUND.into_response(),
+        }
+    }
+
+    async fn lots() -> axum::response::Response {
+        use axum::response::IntoResponse;
+        (
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            AxJson(serde_json::json!({ "error": "invalid", "code": "LOT_INVALIDE", "message": "lots are broken" })),
+        )
+            .into_response()
     }
 
     async fn article(axum::extract::Path(id): axum::extract::Path<String>) -> axum::response::Response {
@@ -419,7 +653,7 @@ mod tests {
         let rows: Vec<Json> = all
             .iter()
             .filter(|(_, a, _)| wanted.contains(a))
-            .map(|(id, a, n)| serde_json::json!({ "id": id, "article_id": a, "quantite": n }))
+            .map(|(id, a, n)| serde_json::json!({ "id": id, "article_id": a, "quantite": n, "prix": 10 }))
             .collect();
         AxJson(Json::Array(rows))
     }
@@ -430,6 +664,8 @@ mod tests {
             .route("/articles", get(articles))
             .route("/articles/{id}", get(article))
             .route("/mouvements", get(movements))
+            .route("/entrepots/{id}", get(warehouse))
+            .route("/lots", get(lots))
             .with_state(fake.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -458,6 +694,7 @@ mod tests {
                 ],
                 key: Some(Prop { name: "id", field: "id", scalar: "ID", nullable: false }),
                 relations,
+                computed: &[],
             },
             Source {
                 name: "Mouvement",
@@ -471,6 +708,7 @@ mod tests {
                 ],
                 key: None,
                 relations: &[],
+                computed: &[],
             },
         ]))
     }
@@ -480,7 +718,7 @@ mod tests {
     async fn run(env: &'static str, batch: Option<&'static str>, query: &str) -> (Fake, Json) {
         let (fake, url) = upstream_api().await;
         unsafe { std::env::set_var(env, url) };
-        let gateway = Gateway::from_env(sources(env, batch)).unwrap();
+        let gateway = Gateway::from_env(sources(env, batch), &[]).unwrap();
         let out = gateway.execute(Some("tok".into()), serde_json::json!({ "query": query })).await;
         (fake, out)
     }
@@ -521,8 +759,115 @@ mod tests {
     #[tokio::test]
     async fn a_service_that_is_down_is_a_coded_error() {
         unsafe { std::env::set_var("EDA_TEST_GW_DOWN", "http://127.0.0.1:1") };
-        let gateway = Gateway::from_env(sources("EDA_TEST_GW_DOWN", None)).unwrap();
+        let gateway = Gateway::from_env(sources("EDA_TEST_GW_DOWN", None), &[]).unwrap();
         let out = gateway.execute(None, serde_json::json!({ "query": "{ articleList { nom } }" })).await;
         assert_eq!(out["errors"][0]["extensions"]["code"], "SERVICE_INDISPONIBLE");
+    }
+
+    /// Articles with their stock value, the movements and the broken lots, behind a root with arguments and a guard.
+    fn dashboard(env: &'static str) -> (&'static [Source], &'static [Root]) {
+        let id = || Prop { name: "id", field: "id", scalar: "ID", nullable: false };
+        let relations: &'static [Relation] = Box::leak(Box::new([Relation {
+            field: "mouvements",
+            target: "Mouvement",
+            via: "id",
+            target_field: "article_id",
+            many: true,
+            batch_param: Some("article_ids"),
+        }]));
+        let sources: &'static [Source] = Box::leak(Box::new([
+            Source {
+                name: "Article",
+                base_url_env: env,
+                path: "/articles",
+                query: "article",
+                props: Box::leak(Box::new([id()])),
+                key: None,
+                relations,
+                computed: Box::leak(Box::new([Computed {
+                    field: "valeurStock",
+                    kind: Kind::Sum { relation: "mouvements", field: "quantite", times: Some("prix") },
+                }])),
+            },
+            Source {
+                name: "Mouvement",
+                base_url_env: env,
+                path: "/mouvements",
+                query: "mouvement",
+                props: Box::leak(Box::new([id(), Prop { name: "quantite", field: "quantite", scalar: "Int", nullable: false }])),
+                key: None,
+                relations: &[],
+                computed: Box::leak(Box::new([
+                    Computed { field: "valeur", kind: Kind::Product(&["quantite", "prix"]) },
+                    Computed { field: "taux", kind: Kind::Ratio("quantite", "prix") },
+                    Computed { field: "sansDenominateur", kind: Kind::Ratio("quantite", "absent") },
+                ])),
+            },
+            Source { name: "Lot", base_url_env: env, path: "/lots", query: "lot", props: Box::leak(Box::new([id()])), key: None, relations: &[], computed: &[] },
+        ]));
+        let roots: &'static [Root] = Box::leak(Box::new([Root {
+            field: "tableauDeBord",
+            ty: "TableauDeBord",
+            args: Box::leak(Box::new([
+                Arg { name: "entrepotId", scalar: "ID", default: None },
+                Arg { name: "limit", scalar: "Int", default: Some("2") },
+            ])),
+            guard: Some(Guard { source: "Article", path: "/entrepots/{entrepotId}" }),
+            blocks: Box::leak(Box::new([
+                Block { field: "articles", source: "Article", many: true, params: &[("limit", "limit")] },
+                Block { field: "lots", source: "Lot", many: true, params: &[] },
+            ])),
+        }]));
+        (sources, roots)
+    }
+
+    async fn dashboard_run(env: &'static str, query: &str) -> (Fake, Json) {
+        let (fake, url) = upstream_api().await;
+        unsafe { std::env::set_var(env, url) };
+        let (sources, roots) = dashboard(env);
+        let gateway = Gateway::from_env(sources, roots).unwrap();
+        let out = gateway.execute(Some("tok".into()), serde_json::json!({ "query": query })).await;
+        (fake, out)
+    }
+
+    #[tokio::test]
+    async fn a_root_passes_its_arguments_computes_fields_and_keeps_the_blocks_that_work() {
+        let q = r#"{ tableauDeBord(entrepotId: "w1") { articles { id valeurStock } lots { id } } }"#;
+        let (fake, out) = dashboard_run("EDA_TEST_GW_ROOT", q).await;
+        let articles = out["data"]["tableauDeBord"]["articles"].as_array().unwrap();
+        assert_eq!(articles.len(), 2, "limit defaults to 2: {out}");
+        assert_eq!(articles[0]["valeurStock"], 30, "(5 - 2) * 10: {out}");
+        assert_eq!(articles[1]["valeurStock"], 70, "{out}");
+        assert!(out["data"]["tableauDeBord"]["lots"].is_null(), "{out}");
+        let error = &out["errors"][0];
+        assert_eq!(error["path"], serde_json::json!(["tableauDeBord", "lots"]), "{out}");
+        assert_eq!(error["extensions"]["code"], "LOT_INVALIDE");
+        assert_eq!(error["extensions"]["error"], "invalid");
+        assert_eq!(error["extensions"]["message"], "lots are broken");
+        assert_eq!(out["errors"].as_array().unwrap().len(), 1, "{out}");
+        assert_eq!(fake.article_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.movement_calls.load(Ordering::SeqCst), 1, "grouped by the dataloader");
+    }
+
+    #[tokio::test]
+    async fn the_guard_stops_the_request_with_the_code_of_the_service() {
+        let q = r#"{ tableauDeBord(entrepotId: "w403") { articles { id } } }"#;
+        let (fake, out) = dashboard_run("EDA_TEST_GW_GUARD", q).await;
+        assert!(out["data"].is_null(), "{out}");
+        assert_eq!(out["errors"][0]["extensions"]["code"], "ENTREPOT_INTERDIT", "{out}");
+        assert_eq!(fake.article_calls.load(Ordering::SeqCst), 0, "no block ran");
+        let q = r#"{ tableauDeBord(entrepotId: "nope", limit: 1) { articles { id } } }"#;
+        let (_, out) = dashboard_run("EDA_TEST_GW_GUARD2", q).await;
+        assert_eq!(out["errors"][0]["extensions"]["code"], "INTROUVABLE", "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_product_and_a_ratio_are_computed_and_a_missing_operand_is_null() {
+        let q = "{ articleList(first: 1) { mouvements { quantite valeur taux sansDenominateur } } }";
+        let (_, out) = dashboard_run("EDA_TEST_GW_COMPUTED", q).await;
+        let first = &out["data"]["articleList"][0]["mouvements"][0];
+        assert_eq!(first["valeur"], 50, "{out}");
+        assert_eq!(first["taux"], 0.5, "{out}");
+        assert!(first["sansDenominateur"].is_null(), "{out}");
     }
 }

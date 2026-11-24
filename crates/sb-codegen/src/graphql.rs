@@ -7,8 +7,8 @@
 use sb_model::names::pascal;
 use sb_model::names::shouty;
 use sb_model::{
-    BodyFormat, Column, ColumnType, GraphqlSourceField, HttpMethod, Route, Service, ServiceKind,
-    Table,
+    BodyFormat, Column, ColumnType, GraphqlComputedKind, GraphqlSourceField, HttpMethod, Route,
+    Service, ServiceKind, Table,
 };
 
 use crate::writer::Code;
@@ -116,6 +116,14 @@ fn gateway_sdl(service: &Service) -> String {
                 c.line(format!("  {}: {}", camel(&r.field), r.target));
             }
         }
+        for comp in &src.computed {
+            let ty = if matches!(comp.kind, GraphqlComputedKind::Ratio { .. }) {
+                "Float"
+            } else {
+                "Long"
+            };
+            c.line(format!("  {}: {ty}", comp.name));
+        }
         c.line("}");
         let q = camel(&src.name);
         if let Some(key) = src
@@ -132,6 +140,36 @@ fn gateway_sdl(service: &Service) -> String {
         }
         query.push(format!("  {q}List(first: Int): [{}!]!", src.name));
     }
+    for root in &service.graphql_roots {
+        c.blank();
+        c.line(format!(
+            "# {}: each block is read on its own, a failing one is null with its error.",
+            root.name
+        ));
+        c.line(format!("type {} {{", pascal(&root.name)));
+        for b in &root.blocks {
+            if b.many {
+                c.line(format!("  {}: [{}!]", b.field, b.source));
+            } else {
+                c.line(format!("  {}: {}", b.field, b.source));
+            }
+        }
+        c.line("}");
+        let args: Vec<String> = root
+            .args
+            .iter()
+            .map(|a| match &a.default {
+                Some(d) => format!("{}: {} = {}", a.name, scalar(a.ty), sdl_default(a.ty, d)),
+                None => format!("{}: {}!", a.name, scalar(a.ty)),
+            })
+            .collect();
+        let args = if args.is_empty() {
+            String::new()
+        } else {
+            format!("({})", args.join(", "))
+        };
+        query.push(format!("  {}{args}: {}!", root.name, pascal(&root.name)));
+    }
     c.blank();
     c.line("type Query {");
     for q in query {
@@ -139,6 +177,17 @@ fn gateway_sdl(service: &Service) -> String {
     }
     c.line("}");
     c.finish()
+}
+
+fn sdl_default(ty: ColumnType, text: &str) -> String {
+    match ty {
+        ColumnType::Int32
+        | ColumnType::Int64
+        | ColumnType::Float
+        | ColumnType::Double
+        | ColumnType::Bool => text.to_owned(),
+        _ => format!("{text:?}"),
+    }
 }
 
 /// The routes a client can call as mutations: the `POST`/`PUT`/`PATCH`/`DELETE` routes of a service that serves its tables (a
@@ -336,7 +385,23 @@ fn gateway_transport_rs(service: &Service, source: &str, issuer: &str) -> String
     c.line("    routing::post,");
     c.line("};");
     c.line("use eda_runtime::graphql::error_body;");
-    c.line("use eda_runtime::graphql_gateway::{Gateway, Prop, Relation, Source};");
+    let computed = service
+        .graphql_sources
+        .iter()
+        .any(|s| !s.computed.is_empty());
+    let roots = !service.graphql_roots.is_empty();
+    let mut imports = vec!["Gateway", "Prop", "Relation", "Root", "Source"];
+    if computed {
+        imports.extend(["Computed", "Kind"]);
+    }
+    if roots {
+        imports.extend(["Arg", "Block", "Guard"]);
+    }
+    imports.sort_unstable();
+    c.line(format!(
+        "use eda_runtime::graphql_gateway::{{{}}};",
+        imports.join(", ")
+    ));
     c.blank();
     c.line("use crate::app::ctx::Ctx;");
     c.blank();
@@ -372,6 +437,81 @@ fn gateway_transport_rs(service: &Service, source: &str, issuer: &str) -> String
             ));
         }
         c.line("],");
+        c.line("computed: &[");
+        for comp in &s.computed {
+            let kind = match &comp.kind {
+                GraphqlComputedKind::Product { fields } => format!(
+                    "Kind::Product(&[{}])",
+                    fields
+                        .iter()
+                        .map(|f| format!("{f:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                GraphqlComputedKind::Ratio {
+                    numerator,
+                    denominator,
+                } => format!("Kind::Ratio({numerator:?}, {denominator:?})"),
+                GraphqlComputedKind::Sum {
+                    relation,
+                    field,
+                    times,
+                } => format!(
+                    "Kind::Sum {{ relation: {:?}, field: {field:?}, times: {} }}",
+                    camel(relation),
+                    opt(times.as_deref())
+                ),
+            };
+            c.line(format!(
+                "    Computed {{ field: {:?}, kind: {kind} }},",
+                comp.name
+            ));
+        }
+        c.line("],");
+        c.close_with(",");
+    }
+    c.dedent();
+    c.line("];");
+    c.blank();
+    c.line("static ROOTS: &[Root] = &[");
+    c.indent();
+    for root in &service.graphql_roots {
+        c.open("Root");
+        c.line(format!("field: {:?},", root.name));
+        c.line(format!("ty: {:?},", pascal(&root.name)));
+        c.line("args: &[");
+        for a in &root.args {
+            c.line(format!(
+                "    Arg {{ name: {:?}, scalar: {:?}, default: {} }},",
+                a.name,
+                scalar(a.ty),
+                opt(a.default.as_deref())
+            ));
+        }
+        c.line("],");
+        match &root.guard {
+            Some(g) => c.line(format!(
+                "guard: Some(Guard {{ source: {:?}, path: {:?} }}),",
+                g.source, g.path
+            )),
+            None => c.line("guard: None,"),
+        };
+        c.line("blocks: &[");
+        for b in &root.blocks {
+            let params: Vec<String> = b
+                .params
+                .iter()
+                .map(|(p, a)| format!("({p:?}, {a:?})"))
+                .collect();
+            c.line(format!(
+                "    Block {{ field: {:?}, source: {:?}, many: {}, params: &[{}] }},",
+                b.field,
+                b.source,
+                b.many,
+                params.join(", ")
+            ));
+        }
+        c.line("],");
         c.close_with(",");
     }
     c.dedent();
@@ -387,7 +527,7 @@ fn gateway_transport_rs(service: &Service, source: &str, issuer: &str) -> String
     c.open("fn gateway() -> Result<&'static Gateway, &'static str>");
     c.line("static GATEWAY: OnceLock<Result<Gateway, String>> = OnceLock::new();");
     c.line("GATEWAY");
-    c.line("    .get_or_init(|| Gateway::from_env(SOURCES).map_err(|e| e.to_string()))");
+    c.line("    .get_or_init(|| Gateway::from_env(SOURCES, ROOTS).map_err(|e| e.to_string()))");
     c.line("    .as_ref()");
     c.line("    .map_err(|_| \"the GraphQL schema cannot be built\")");
     c.close();

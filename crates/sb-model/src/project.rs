@@ -443,6 +443,9 @@ pub struct Service {
     /// `tenant_id`). Set it when the tokens of the project carry another name (for instance `tid`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graphql_tenant_claim: Option<String>,
+    /// The query fields of a gateway that take arguments and answer several blocks at once (see [`GraphqlRoot`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub graphql_roots: Vec<GraphqlRoot>,
     /// The roles allowed to call a mutation, by route name (the mutation of a route is named after it). The check runs before
     /// the route is played, and a refusal is `ACCES_REFUSE`; a route that is not listed (or listed empty) is open to any
     /// signed-in caller, the route still doing its own checks.
@@ -474,6 +477,91 @@ pub struct GraphqlSource {
     /// Fields that read other sources, a nested query being one call per relation however many rows it has.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relations: Vec<GraphqlRelation>,
+    /// Fields computed from the row (or from the rows of a relation), declared rather than coded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub computed: Vec<GraphqlComputed>,
+}
+
+/// A field computed from integers of a row. A missing operand makes the field `null`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphqlComputed {
+    /// Name of the field (camelCase), not used by a field or a relation of the source.
+    pub name: String,
+    #[serde(flatten)]
+    pub kind: GraphqlComputedKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum GraphqlComputedKind {
+    /// The product of integer fields of the row (`Long`).
+    Product { fields: Vec<String> },
+    /// `numerator / denominator`, two integer fields of the row (`Float`, `null` when the denominator is 0).
+    Ratio {
+        numerator: String,
+        denominator: String,
+    },
+    /// The sum, over the rows of a `many` relation of the source, of an integer field of the related rows, or of its product
+    /// with `times` (`Long`): `valeurStock = sum(quantite * prixCentimes)`.
+    Sum {
+        relation: String,
+        field: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        times: Option<String>,
+    },
+}
+
+/// A query field of a gateway: `<name>(<args>): <Name>!`, an object whose blocks each read a source. A block that fails is
+/// `null` with its own error (the code and message of the service behind), the others are answered.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphqlRoot {
+    /// The query field (camelCase), unique among the roots and the queries of the sources.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<GraphqlArg>,
+    /// Read before anything else: a refusal or a `404` of this route stops the whole request, with the code of the answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<GraphqlGuard>,
+    #[serde(default)]
+    pub blocks: Vec<GraphqlBlock>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphqlArg {
+    /// camelCase.
+    pub name: String,
+    #[serde(rename = "type")]
+    pub ty: ColumnType,
+    /// Without a default, the argument is `Type!`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+}
+
+/// `GET <path>` on the service of `source`, `{arg}` standing for the value of an argument of the root.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphqlGuard {
+    /// The `name` of the source whose base URL is used.
+    pub source: String,
+    pub path: String,
+}
+
+/// A field of a root that reads `source` (`GET <path>?<param>=<value>`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphqlBlock {
+    /// Name of the field (camelCase).
+    pub field: String,
+    pub source: String,
+    /// A list of rows (`[Source!]`) rather than the first one (`Source`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub many: bool,
+    /// Query parameters of the call: parameter name -> argument of the root that gives its value.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub params: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
