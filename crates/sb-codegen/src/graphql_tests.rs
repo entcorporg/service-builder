@@ -149,6 +149,7 @@ fn source(name: &str, path: &str, fields: &[(&str, ColumnType)]) -> sb_model::Gr
                 name: (*n).into(),
                 ty: *ty,
                 nullable: false,
+                values: Default::default(),
             })
             .collect(),
         key: Some("id".into()),
@@ -389,6 +390,7 @@ fn dashboard() -> sb_model::Project {
             name: "prix".into(),
             ty: ColumnType::Int32,
             nullable: false,
+            values: Default::default(),
         });
     svc.graphql_sources[1].computed = vec![
         GraphqlComputed {
@@ -560,6 +562,7 @@ fn a_root_total_sums_a_many_block_and_a_double_operand_is_accepted() {
             name: "cout_unitaire".into(),
             ty: ColumnType::Double,
             nullable: false,
+            values: Default::default(),
         });
     svc.graphql_roots[0].blocks.push(sb_model::GraphqlBlock {
         field: "mouvements".into(),
@@ -597,4 +600,69 @@ fn a_root_total_sums_a_many_block_and_a_double_operand_is_accepted() {
         .map(|d| d.code)
         .collect();
     assert!(codes.iter().any(|c| c == "E_GRAPHQL_ROOT_SUM"), "{codes:?}");
+}
+
+#[test]
+fn a_field_maps_its_values_to_an_enumeration_and_a_date_gives_the_days_left() {
+    use sb_model::{GraphqlComputed, GraphqlComputedKind};
+    let mut p = dashboard();
+    let article = &mut p.services[0].graphql_sources[0];
+    article.fields.push(sb_model::GraphqlSourceField {
+        name: "categorie".into(),
+        ty: ColumnType::String,
+        nullable: true,
+        values: [("sortie", "SORTIE"), ("entree", "ENTREE")]
+            .into_iter()
+            .map(|(a, b)| (a.to_owned(), b.to_owned()))
+            .collect(),
+    });
+    article.fields.push(sb_model::GraphqlSourceField {
+        name: "dlc".into(),
+        ty: ColumnType::String,
+        nullable: true,
+        values: Default::default(),
+    });
+    article.computed.push(GraphqlComputed {
+        name: "joursRestants".into(),
+        kind: GraphqlComputedKind::DaysUntil {
+            field: "dlc".into(),
+        },
+    });
+    let errors: Vec<_> = sb_model::validate(&p)
+        .into_iter()
+        .filter(|d| d.severity == sb_model::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    let files = generate(&p).unwrap();
+    let sdl = sdl_file(&files).expect("sdl written");
+    assert!(
+        sdl.contains("enum ArticleCategorie {\n  ENTREE\n  SORTIE\n}"),
+        "{sdl}"
+    );
+    assert!(sdl.contains("  categorie: ArticleCategorie\n"), "{sdl}");
+    assert!(sdl.contains("  joursRestants: Long\n"), "{sdl}");
+    let code = find(&files, "services/orders/src/transport/graphql.rs").expect("endpoint");
+    for wanted in [
+        "scalar: \"ArticleCategorie\", nullable: true, values: &[(\"entree\", \"ENTREE\"), (\"sortie\", \"SORTIE\")] }",
+        "Computed { field: \"joursRestants\", kind: Kind::DaysUntil(\"dlc\") }",
+    ] {
+        assert!(code.contains(wanted), "{wanted} in {code}");
+    }
+    let again = generate(&p).unwrap();
+    assert_eq!(files, again);
+    // Refused: a bad enumeration name, a date field that does not exist.
+    let mut bad = p.clone();
+    bad.services[0].graphql_sources[0].fields[1]
+        .values
+        .insert("x".into(), "minuscule".into());
+    bad.services[0].graphql_sources[0].computed[0].kind = GraphqlComputedKind::DaysUntil {
+        field: "absent".into(),
+    };
+    let codes: Vec<String> = sb_model::validate(&bad)
+        .into_iter()
+        .map(|d| d.code)
+        .collect();
+    for wanted in ["E_GRAPHQL_SOURCE_VALUES", "E_GRAPHQL_COMPUTED"] {
+        assert!(codes.iter().any(|c| c == wanted), "{wanted} in {codes:?}");
+    }
 }

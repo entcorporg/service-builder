@@ -80,12 +80,26 @@ pub fn is_gateway(service: &Service) -> bool {
         && !service.graphql_sources.is_empty()
 }
 
-fn source_prop(f: &GraphqlSourceField) -> String {
+/// The enumeration of a source field with `values`: `<Source><Field>`.
+fn enum_name(source: &str, f: &GraphqlSourceField) -> String {
+    format!("{source}{}", pascal(&f.name))
+}
+
+fn source_prop(source: &str, f: &GraphqlSourceField) -> String {
+    let (ty, values) = if f.values.is_empty() {
+        (scalar(f.ty).to_owned(), String::new())
+    } else {
+        let pairs: Vec<String> = f
+            .values
+            .iter()
+            .map(|(up, name)| format!("({up:?}, {name:?})"))
+            .collect();
+        (enum_name(source, f), pairs.join(", "))
+    };
     format!(
-        "Prop {{ name: {:?}, field: {:?}, scalar: {:?}, nullable: {} }}",
+        "Prop {{ name: {:?}, field: {:?}, scalar: {ty:?}, nullable: {}, values: &[{values}] }}",
         f.name,
         camel(&f.name),
-        scalar(f.ty),
         f.nullable
     )
 }
@@ -103,11 +117,24 @@ fn gateway_sdl(service: &Service) -> String {
     }
     let mut query = Vec::new();
     for src in &service.graphql_sources {
+        for f in src.fields.iter().filter(|f| !f.values.is_empty()) {
+            c.blank();
+            c.line(format!("enum {} {{", enum_name(&src.name, f)));
+            for name in f.values.values() {
+                c.line(format!("  {name}"));
+            }
+            c.line("}");
+        }
         c.blank();
         c.line(format!("type {} {{", src.name));
         for f in &src.fields {
             let bang = if f.nullable { "" } else { "!" };
-            c.line(format!("  {}: {}{bang}", camel(&f.name), scalar(f.ty)));
+            let ty = if f.values.is_empty() {
+                scalar(f.ty).to_owned()
+            } else {
+                enum_name(&src.name, f)
+            };
+            c.line(format!("  {}: {ty}{bang}", camel(&f.name)));
         }
         for r in &src.relations {
             if r.many {
@@ -421,14 +448,16 @@ fn gateway_transport_rs(service: &Service, source: &str, issuer: &str) -> String
         c.line(format!("query: {:?},", camel(&s.name)));
         c.line("props: &[");
         for f in &s.fields {
-            c.line(format!("    {},", source_prop(f)));
+            c.line(format!("    {},", source_prop(&s.name, f)));
         }
         c.line("],");
         let key = s
             .key
             .as_ref()
             .and_then(|k| s.fields.iter().find(|f| &f.name == k))
-            .map_or("None".to_string(), |f| format!("Some({})", source_prop(f)));
+            .map_or("None".to_string(), |f| {
+                format!("Some({})", source_prop(&s.name, f))
+            });
         c.line(format!("key: {key},"));
         c.line("relations: &[");
         for r in &s.relations {
@@ -473,6 +502,9 @@ fn gateway_transport_rs(service: &Service, source: &str, issuer: &str) -> String
                     camel(relation),
                     opt(times.as_deref())
                 ),
+                GraphqlComputedKind::DaysUntil { field } => {
+                    format!("Kind::DaysUntil({field:?})")
+                }
             };
             c.line(format!(
                 "    Computed {{ field: {:?}, kind: {kind} }},",

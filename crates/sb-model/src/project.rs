@@ -514,6 +514,9 @@ pub enum GraphqlComputedKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         times: Option<String>,
     },
+    /// The whole days from today (UTC) to the date held by `field` (a `string` or `timestamp` starting with `YYYY-MM-DD`):
+    /// negative once past, `null` when the field is absent or not a date (`Long`): `joursRestants` of a `dlc`.
+    DaysUntil { field: String },
 }
 
 /// A query field of a gateway: `<name>(<args>): <Name>!`, an object whose blocks each read a source. A block that fails is
@@ -600,6 +603,10 @@ pub struct GraphqlSourceField {
     pub ty: ColumnType,
     #[serde(default, skip_serializing_if = "is_false")]
     pub nullable: bool,
+    /// For a `string` field: upstream value -> name of the GraphQL enumeration value (`entree` -> `ENTREE`). The field then
+    /// has the enumeration type `<Source><Field>`; a value the map lacks is an error of the field.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub values: std::collections::BTreeMap<String, String>,
 }
 
 /// A field of a source that reads another source: the rows of `target` whose `target_field` equals the `via` field of the row.

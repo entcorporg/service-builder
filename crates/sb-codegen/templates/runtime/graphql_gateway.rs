@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use async_graphql::dynamic::{Field, FieldFuture, FieldValue, InputValue, Object, ResolverContext, Scalar, Schema, TypeRef};
+use async_graphql::dynamic::{Enum, EnumItem, Field, FieldFuture, FieldValue, InputValue, Object, ResolverContext, Scalar, Schema, TypeRef};
 use async_graphql::{Error, ErrorExtensions, Request, Value};
 use serde_json::{Map, Value as Json};
 use tokio::sync::watch;
@@ -24,8 +24,11 @@ pub struct Prop {
     pub name: &'static str,
     /// The GraphQL field.
     pub field: &'static str,
+    /// The scalar, or the name of the enumeration when `values` is not empty.
     pub scalar: &'static str,
     pub nullable: bool,
+    /// `(upstream value, enumeration value)`: the field is an enumeration.
+    pub values: &'static [(&'static str, &'static str)],
 }
 
 /// A field that reads another source.
@@ -46,6 +49,47 @@ pub enum Kind {
     Ratio(&'static str, &'static str),
     /// The sum over the rows of the relation `relation` of `field`, or of `field * times`.
     Sum { relation: &'static str, field: &'static str, times: Option<&'static str> },
+    /// The whole days from today (UTC) to the date of `field`.
+    DaysUntil(&'static str),
+}
+
+/// Days since 1970-01-01 of a civil date (proleptic Gregorian).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// The day number of a text starting with `YYYY-MM-DD` (a date, or a timestamp read in its own day).
+fn day_of(text: &str) -> Option<i64> {
+    let b = text.as_bytes();
+    if b.len() < 10 || b[4] != b'-' || b[7] != b'-' || (b.len() > 10 && b[10].is_ascii_digit()) {
+        return None;
+    }
+    let n = |r: std::ops::Range<usize>| text.get(r).filter(|t| t.bytes().all(|c| c.is_ascii_digit())).and_then(|t| t.parse::<i64>().ok());
+    let (y, m, d) = (n(0..4)?, n(5..7)?, n(8..10)?);
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let last = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => 28 + i64::from(leap),
+        _ => return None,
+    };
+    (1..=last).contains(&d).then(|| days_from_civil(y, m, d))
+}
+
+/// The whole days from `today` (a day number) to the date in `row[field]`; `None` when it is absent or not a date.
+fn days_until(row: &Json, field: &str, today: i64) -> Option<i64> {
+    day_of(row.get(field)?.as_str()?).map(|d| d - today)
+}
+
+/// Today (UTC) as a day number: the clock is read here, at run time, never in the generated code.
+fn today() -> i64 {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    (secs / 86_400) as i64
 }
 
 pub struct Computed {
@@ -511,8 +555,22 @@ pub fn schema(
     for (si, s) in sources.iter().enumerate() {
         let mut ty = Object::new(s.name);
         for p in s.props {
+            if !p.values.is_empty() {
+                builder = builder.register(p.values.iter().fold(Enum::new(p.scalar), |e, (_, name)| e.item(EnumItem::new(*name))));
+            }
             ty = ty.field(Field::new(p.field, type_ref(p.scalar, p.nullable), move |ctx| {
-                FieldFuture::new(async move { Ok(prop(parent_json(&ctx)?, p.name)) })
+                FieldFuture::new(async move {
+                    if p.values.is_empty() {
+                        return Ok(prop(parent_json(&ctx)?, p.name));
+                    }
+                    match parent_json(&ctx)?.get(p.name) {
+                        None | Some(Json::Null) => Ok(None),
+                        Some(v) => match p.values.iter().find(|(up, _)| v.as_str() == Some(*up)) {
+                            Some((_, name)) => Ok(Some(FieldValue::value(Value::Enum(async_graphql::Name::new(*name))))),
+                            None => Err(refuse("VALEUR_INCONNUE", "the service behind sent a value this field does not map")),
+                        },
+                    }
+                })
             }));
         }
         for (ri, r) in s.relations.iter().enumerate() {
@@ -550,6 +608,7 @@ pub fn schema(
                                 _ => None,
                             }
                         }
+                        Kind::DaysUntil(field) => days_until(parent, field, today()).map(Json::from),
                         Kind::Sum { relation, field, times } => {
                             let ri = s.relations.iter().position(|r| r.field == *relation);
                             match (ri, ri.and_then(|ri| parent.get(s.relations[ri].via).and_then(text_of).map(|v| (ri, v)))) {
@@ -739,9 +798,18 @@ mod tests {
     async fn articles(State(fake): State<Fake>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> AxJson<Json> {
         fake.article_calls.fetch_add(1, Ordering::SeqCst);
         note(&fake, &headers);
-        let all = [("a1", "Vis"), ("a2", "Ecrou"), ("a3", "Rondelle")];
+        let all = [
+            ("a1", "Vis", "entree", Some("2000-01-01")),
+            ("a2", "Ecrou", "sortie", Some("2999-12-31T10:00:00Z")),
+            ("a3", "Rondelle", "autre", None),
+        ];
         let limit = q.get("limit").and_then(|l| l.parse().ok()).unwrap_or(all.len());
-        AxJson(Json::Array(all.iter().take(limit).map(|(id, nom)| serde_json::json!({ "id": id, "nom": nom })).collect()))
+        AxJson(Json::Array(
+            all.iter()
+                .take(limit)
+                .map(|(id, nom, cat, dlc)| serde_json::json!({ "id": id, "nom": nom, "categorie": cat, "dlc": dlc }))
+                .collect(),
+        ))
     }
 
     async fn warehouse(axum::extract::Path(id): axum::extract::Path<String>) -> axum::response::Response {
@@ -839,12 +907,14 @@ mod tests {
                 path: "/articles",
                 query: "article",
                 props: &[
-                    Prop { name: "id", field: "id", scalar: "ID", nullable: false },
-                    Prop { name: "nom", field: "nom", scalar: "String", nullable: false },
+                    Prop { name: "id", field: "id", scalar: "ID", nullable: false, values: &[] },
+                    Prop { name: "nom", field: "nom", scalar: "String", nullable: false, values: &[] },
+                    Prop { name: "categorie", field: "categorie", scalar: "ArticleCategorie", nullable: true, values: &[("entree", "ENTREE"), ("sortie", "SORTIE")] },
+                    Prop { name: "dlc", field: "dlc", scalar: "String", nullable: true, values: &[] },
                 ],
-                key: Some(Prop { name: "id", field: "id", scalar: "ID", nullable: false }),
+                key: Some(Prop { name: "id", field: "id", scalar: "ID", nullable: false, values: &[] }),
                 relations,
-                computed: &[],
+                computed: &[Computed { field: "joursRestants", kind: Kind::DaysUntil("dlc") }],
             },
             Source {
                 name: "Mouvement",
@@ -852,9 +922,9 @@ mod tests {
                 path: "/mouvements",
                 query: "mouvement",
                 props: &[
-                    Prop { name: "id", field: "id", scalar: "ID", nullable: false },
-                    Prop { name: "article_id", field: "articleId", scalar: "ID", nullable: false },
-                    Prop { name: "quantite", field: "quantite", scalar: "Int", nullable: false },
+                    Prop { name: "id", field: "id", scalar: "ID", nullable: false, values: &[] },
+                    Prop { name: "article_id", field: "articleId", scalar: "ID", nullable: false, values: &[] },
+                    Prop { name: "quantite", field: "quantite", scalar: "Int", nullable: false, values: &[] },
                 ],
                 key: None,
                 relations: &[],
@@ -887,6 +957,36 @@ mod tests {
         assert!(fake.cookies.lock().unwrap().iter().all(|c| c == "access_token=tok"));
     }
 
+    #[test]
+    fn a_date_is_counted_in_days_from_today() {
+        let t = day_of("2026-11-24").unwrap();
+        assert_eq!(day_of("2026-11-25T08:00:00Z").unwrap() - t, 1);
+        assert_eq!(day_of("2024-03-01").unwrap() - day_of("2024-02-28").unwrap(), 2);
+        assert_eq!(day_of("1970-01-02"), Some(1));
+        for bad in ["", "2026-13-01", "2026-02-30", "2026-1-01", "20261124", "2026-11-245"] {
+            assert_eq!(day_of(bad), None, "{bad}");
+        }
+        let row = serde_json::json!({ "dlc": "2026-11-20", "n": 3 });
+        assert_eq!(days_until(&row, "dlc", t), Some(-4));
+        assert_eq!(days_until(&row, "absent", t), None);
+        assert_eq!(days_until(&row, "n", t), None);
+    }
+
+    #[tokio::test]
+    async fn an_enumeration_maps_the_upstream_value_and_days_are_counted() {
+        let q = "{ articleList { categorie joursRestants } }";
+        let (_, out) = run("EDA_TEST_GW_ENUM", None, q).await;
+        let list = out["data"]["articleList"].as_array().unwrap();
+        assert_eq!(list[0]["categorie"], "ENTREE");
+        assert_eq!(list[1]["categorie"], "SORTIE");
+        assert!(list[0]["joursRestants"].as_i64().unwrap() < 0, "{out}");
+        assert!(list[1]["joursRestants"].as_i64().unwrap() > 100_000, "{out}");
+        assert!(list[2]["joursRestants"].is_null());
+        // A value the map lacks is the error of that field only (nullable: null).
+        assert!(list[2]["categorie"].is_null(), "{out}");
+        assert_eq!(out["errors"][0]["extensions"]["code"], "VALEUR_INCONNUE", "{out}");
+    }
+
     #[tokio::test]
     async fn a_batch_parameter_makes_one_call_for_all_the_rows() {
         let (fake, out) = run("EDA_TEST_GW_BATCH", Some("article_ids"), NESTED).await;
@@ -916,7 +1016,7 @@ mod tests {
 
     /// Articles with their stock value, the movements and the broken lots, behind a root with arguments and a guard.
     fn dashboard(env: &'static str) -> (&'static [Source], &'static [Root]) {
-        let id = || Prop { name: "id", field: "id", scalar: "ID", nullable: false };
+        let id = || Prop { name: "id", field: "id", scalar: "ID", nullable: false, values: &[] };
         let relations: &'static [Relation] = Box::leak(Box::new([Relation {
             field: "mouvements",
             target: "Mouvement",
@@ -947,8 +1047,8 @@ mod tests {
                 query: "mouvement",
                 props: Box::leak(Box::new([
                     id(),
-                    Prop { name: "quantite", field: "quantite", scalar: "Int", nullable: false },
-                    Prop { name: "note", field: "note", scalar: "String", nullable: false },
+                    Prop { name: "quantite", field: "quantite", scalar: "Int", nullable: false, values: &[] },
+                    Prop { name: "note", field: "note", scalar: "String", nullable: false, values: &[] },
                 ])),
                 key: None,
                 relations: &[],

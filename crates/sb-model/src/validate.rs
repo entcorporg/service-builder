@@ -5483,6 +5483,22 @@ impl<'a> Checker<'a> {
                         "a field is named, once",
                     );
                 }
+                let mut names = HashSet::new();
+                let names_ok = f.values.iter().all(|(up, name)| {
+                    !up.is_empty()
+                        && name.starts_with(|c: char| c.is_ascii_uppercase())
+                        && name
+                            .chars()
+                            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                        && names.insert(name.as_str())
+                });
+                if !f.values.is_empty() && (f.ty != ColumnType::String || !names_ok) {
+                    self.error(
+                        "E_GRAPHQL_SOURCE_VALUES",
+                        format!("{at}/fields/{j}/values"),
+                        "`values` maps the values of a `string` field to enumeration names (UPPER_SNAKE, each once)",
+                    );
+                }
             }
             if let Some(k) = &src.key
                 && !has(k)
@@ -5602,12 +5618,17 @@ impl<'a> Checker<'a> {
                     .is_some_and(|t| {
                         is_int(t, field) && times.as_deref().is_none_or(|f| is_int(t, f))
                     }),
+                GraphqlComputedKind::DaysUntil { field } => src.fields.iter().any(|x| {
+                    &x.name == field
+                        && x.values.is_empty()
+                        && matches!(x.ty, ColumnType::String | ColumnType::Timestamp)
+                }),
             };
             if !operands_ok {
                 self.error(
                     "E_GRAPHQL_COMPUTED",
                     cp,
-                    "the operands of a computed field are numeric fields (int32, int64, float or double; a double rounds the Long result) of the source (of the related source for `sum`, which reads a `many` relation); `product` needs two",
+                    "the operands of a computed field are numeric fields (int32, int64, float or double; a double rounds the Long result) of the source (of the related source for `sum`, which reads a `many` relation); `product` needs two; `daysUntil` reads a `string` or `timestamp` field holding a date",
                 );
             }
         }
