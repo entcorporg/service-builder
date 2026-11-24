@@ -5522,6 +5522,19 @@ impl<'a> Checker<'a> {
                     ),
                     Some(_) => {}
                 }
+                for param in r.fixed_params.keys() {
+                    if param.is_empty()
+                        || !param
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+                    {
+                        self.error(
+                            "E_GRAPHQL_RELATION",
+                            format!("{rp}/fixedParams/{param}"),
+                            "a fixed parameter is a query parameter name",
+                        );
+                    }
+                }
                 if let Some(b) = &r.batch_param
                     && (b.is_empty()
                         || !b
@@ -5541,10 +5554,18 @@ impl<'a> Checker<'a> {
     }
 
     fn graphql_computed(&mut self, s: &Service, src: &GraphqlSource, at: &str) {
+        // Integers, or doubles (the result of `product` and `sum`, a `Long`, is then rounded to the nearest integer).
         let is_int = |src: &GraphqlSource, f: &str| {
-            src.fields
-                .iter()
-                .any(|x| x.name == f && matches!(x.ty, ColumnType::Int32 | ColumnType::Int64))
+            src.fields.iter().any(|x| {
+                x.name == f
+                    && matches!(
+                        x.ty,
+                        ColumnType::Int32
+                            | ColumnType::Int64
+                            | ColumnType::Float
+                            | ColumnType::Double
+                    )
+            })
         };
         let mut taken: HashSet<String> = src
             .fields
@@ -5586,7 +5607,7 @@ impl<'a> Checker<'a> {
                 self.error(
                     "E_GRAPHQL_COMPUTED",
                     cp,
-                    "the operands of a computed field are integer fields (int32 or int64) of the source (of the related source for `sum`, which reads a `many` relation); `product` needs two",
+                    "the operands of a computed field are numeric fields (int32, int64, float or double; a double rounds the Long result) of the source (of the related source for `sum`, which reads a `many` relation); `product` needs two",
                 );
             }
         }
@@ -5728,6 +5749,46 @@ impl<'a> Checker<'a> {
                             "a parameter is a query parameter name, fed by an argument of the root",
                         );
                     }
+                }
+            }
+            let mut sum_names = HashSet::new();
+            for (j, sm) in r.sums.iter().enumerate() {
+                let sp = format!("{at}/sums/{j}");
+                let block = r.blocks.iter().find(|b| b.field == sm.block);
+                let src = block.and_then(|b| s.graphql_sources.iter().find(|x| x.name == b.source));
+                let numeric = |f: &str| {
+                    src.is_some_and(|x| {
+                        x.fields.iter().any(|y| {
+                            y.name == f
+                                && matches!(
+                                    y.ty,
+                                    ColumnType::Int32
+                                        | ColumnType::Int64
+                                        | ColumnType::Float
+                                        | ColumnType::Double
+                                )
+                        })
+                    })
+                };
+                if !is_lower_camel(&sm.name)
+                    || fields.contains(sm.name.as_str())
+                    || !sum_names.insert(sm.name.as_str())
+                {
+                    self.error(
+                        "E_GRAPHQL_ROOT_SUM",
+                        format!("{sp}/name"),
+                        "a total is named in camelCase, with a name no block of its root has",
+                    );
+                }
+                if !block.is_some_and(|b| b.many)
+                    || !numeric(&sm.field)
+                    || !sm.times.as_deref().is_none_or(numeric)
+                {
+                    self.error(
+                        "E_GRAPHQL_ROOT_SUM",
+                        sp,
+                        "a total sums numeric fields (int32, int64, float, double) of the rows of a `many` block of its root",
+                    );
                 }
             }
         }

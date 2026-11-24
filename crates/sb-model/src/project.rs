@@ -530,6 +530,23 @@ pub struct GraphqlRoot {
     pub guard: Option<GraphqlGuard>,
     #[serde(default)]
     pub blocks: Vec<GraphqlBlock>,
+    /// Totals over the rows of a `many` block of the root (`Long`): the root type gets one field per entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sums: Vec<GraphqlRootSum>,
+}
+
+/// `<name> = sum(field [* times])` over the rows of the block `block` of a root. Operands are numeric fields of the block's
+/// source; a `double` operand makes the term rounded to the nearest integer (a row without the operand counts for nothing).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphqlRootSum {
+    /// Name of the field (camelCase), not used by a block of the root.
+    pub name: String,
+    /// The `field` of a block of the root, which must be `many`.
+    pub block: String,
+    pub field: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub times: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -605,6 +622,10 @@ pub struct GraphqlRelation {
     /// Query parameter of the target taking a comma-separated list of values: one call for the whole batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_param: Option<String>,
+    /// Query parameters with a constant value added to every call of the relation (`archive` -> `tous`). The filter on
+    /// `targetField` (or `batchParam`) wins on the same name.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub fixed_params: std::collections::BTreeMap<String, String>,
 }
 
 /// A named sequence of steps shared by the handlers of a service (verify the token, require a tenant, build the event

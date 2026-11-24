@@ -179,6 +179,7 @@ fn gateway() -> sb_model::Project {
         target_field: "article_id".into(),
         many: true,
         batch_param: None,
+        fixed_params: [("archive".to_string(), "tous".to_string())].into(),
     });
     let movement = source(
         "Mouvement",
@@ -210,7 +211,7 @@ fn a_gateway_writes_its_schema_and_reads_the_services_behind_it() {
     assert!(code.contains("base_url_env: \"STOCK_URL\""), "{code}");
     assert!(
         code.contains(
-            "Relation { field: \"mouvements\", target: \"Mouvement\", via: \"id\", target_field: \"article_id\", many: true, batch_param: None }"
+            "Relation { field: \"mouvements\", target: \"Mouvement\", via: \"id\", target_field: \"article_id\", many: true, batch_param: None, fixed_params: &[(\"archive\", \"tous\")] }"
         ),
         "{code}"
     );
@@ -448,6 +449,7 @@ fn dashboard() -> sb_model::Project {
                 path: None,
             },
         ],
+        sums: vec![],
     }];
     p
 }
@@ -479,6 +481,7 @@ fn a_gateway_declares_roots_with_arguments_blocks_a_guard_and_computed_fields() 
         "static FORWARD: &[&str] = &[];",
         "Kind::Sum { relation: \"mouvements\", field: \"quantite\", times: Some(\"prix\") }",
         "Kind::Ratio(\"quantite\", \"prix\")",
+        "fixed_params: &[(\"archive\", \"tous\")] }",
     ] {
         assert!(code.contains(wanted), "{wanted} in {code}");
     }
@@ -545,4 +548,53 @@ fn the_roots_and_computed_fields_of_a_gateway_are_checked() {
     ] {
         assert!(codes.iter().any(|c| c == wanted), "{wanted} in {codes:?}");
     }
+}
+
+#[test]
+fn a_root_total_sums_a_many_block_and_a_double_operand_is_accepted() {
+    let mut p = dashboard();
+    let svc = &mut p.services[0];
+    svc.graphql_sources[1]
+        .fields
+        .push(sb_model::GraphqlSourceField {
+            name: "cout_unitaire".into(),
+            ty: ColumnType::Double,
+            nullable: false,
+        });
+    svc.graphql_roots[0].blocks.push(sb_model::GraphqlBlock {
+        field: "mouvements".into(),
+        source: "Mouvement".into(),
+        many: true,
+        params: Default::default(),
+        fixed_params: Default::default(),
+        path: None,
+    });
+    svc.graphql_roots[0].sums = vec![sb_model::GraphqlRootSum {
+        name: "valeurTotale".into(),
+        block: "mouvements".into(),
+        field: "quantite".into(),
+        times: Some("cout_unitaire".into()),
+    }];
+    let errors: Vec<_> = sb_model::validate(&p)
+        .into_iter()
+        .filter(|d| d.severity == sb_model::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    let files = generate(&p).unwrap();
+    let sdl = sdl_file(&files).expect("sdl written");
+    assert!(sdl.contains("  valeurTotale: Long"), "{sdl}");
+    let code = find(&files, "services/orders/src/transport/graphql.rs").expect("endpoint");
+    assert!(
+        code.contains("RootSum { field: \"valeurTotale\", block: \"mouvements\", value: \"quantite\", times: Some(\"cout_unitaire\") }"),
+        "{code}"
+    );
+    // A total over a block that is not a list, or over a non-numeric field, is refused.
+    let mut bad = p.clone();
+    bad.services[0].graphql_roots[0].sums[0].block = "premierMouvement".into();
+    bad.services[0].graphql_roots[0].sums[0].field = "id".into();
+    let codes: Vec<String> = sb_model::validate(&bad)
+        .into_iter()
+        .map(|d| d.code)
+        .collect();
+    assert!(codes.iter().any(|c| c == "E_GRAPHQL_ROOT_SUM"), "{codes:?}");
 }

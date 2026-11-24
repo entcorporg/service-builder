@@ -154,6 +154,9 @@ fn gateway_sdl(service: &Service) -> String {
                 c.line(format!("  {}: {}", b.field, b.source));
             }
         }
+        for s in &root.sums {
+            c.line(format!("  {}: Long", s.name));
+        }
         c.line("}");
         let args: Vec<String> = root
             .args
@@ -396,6 +399,9 @@ fn gateway_transport_rs(service: &Service, source: &str, issuer: &str) -> String
     }
     if roots {
         imports.extend(["Arg", "Block", "Guard"]);
+        if service.graphql_roots.iter().any(|r| !r.sums.is_empty()) {
+            imports.push("RootSum");
+        }
     }
     imports.sort_unstable();
     c.line(format!(
@@ -426,14 +432,20 @@ fn gateway_transport_rs(service: &Service, source: &str, issuer: &str) -> String
         c.line(format!("key: {key},"));
         c.line("relations: &[");
         for r in &s.relations {
+            let fixed: Vec<String> = r
+                .fixed_params
+                .iter()
+                .map(|(p, v)| format!("({p:?}, {v:?})"))
+                .collect();
             c.line(format!(
-                "    Relation {{ field: {:?}, target: {:?}, via: {:?}, target_field: {:?}, many: {}, batch_param: {} }},",
+                "    Relation {{ field: {:?}, target: {:?}, via: {:?}, target_field: {:?}, many: {}, batch_param: {}, fixed_params: &[{}] }},",
                 camel(&r.field),
                 r.target,
                 r.via,
                 r.target_field,
                 r.many,
-                opt(r.batch_param.as_deref())
+                opt(r.batch_param.as_deref()),
+                fixed.join(", ")
             ));
         }
         c.line("],");
@@ -526,6 +538,17 @@ fn gateway_transport_rs(service: &Service, source: &str, issuer: &str) -> String
                 params.join(", "),
                 fixed.join(", "),
                 opt(b.path.as_deref())
+            ));
+        }
+        c.line("],");
+        c.line("sums: &[");
+        for s in &root.sums {
+            c.line(format!(
+                "    RootSum {{ field: {:?}, block: {:?}, value: {:?}, times: {} }},",
+                s.name,
+                s.block,
+                s.field,
+                opt(s.times.as_deref())
             ));
         }
         c.line("],");

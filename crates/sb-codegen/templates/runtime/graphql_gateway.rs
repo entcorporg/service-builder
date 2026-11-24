@@ -36,6 +36,8 @@ pub struct Relation {
     pub target_field: &'static str,
     pub many: bool,
     pub batch_param: Option<&'static str>,
+    /// `(query parameter, value)`, constants added to every call; the filter on the relation wins on the same name.
+    pub fixed_params: &'static [(&'static str, &'static str)],
 }
 
 /// What a computed field is made of (the names are the JSON properties of the rows).
@@ -49,6 +51,57 @@ pub enum Kind {
 pub struct Computed {
     pub field: &'static str,
     pub kind: Kind,
+}
+
+/// A number of a row: an integer stays exact, a `double` is rounded to the nearest integer when the result is a `Long`.
+#[derive(Clone, Copy)]
+enum Num {
+    I(i64),
+    F(f64),
+}
+
+impl Num {
+    fn mul(self, other: Num) -> Option<Num> {
+        match (self, other) {
+            (Num::I(a), Num::I(b)) => a.checked_mul(b).map(Num::I),
+            (a, b) => Some(Num::F(a.float() * b.float())),
+        }
+    }
+
+    fn float(self) -> f64 {
+        match self {
+            Num::I(n) => n as f64,
+            Num::F(f) => f,
+        }
+    }
+
+    /// Rounded to the nearest integer (halves away from zero); `None` when it does not fit a `Long`.
+    fn to_long(self) -> Option<i64> {
+        match self {
+            Num::I(n) => Some(n),
+            Num::F(f) => {
+                let r = f.round();
+                (r.is_finite() && r >= -9.2e18 && r <= 9.2e18).then_some(r as i64)
+            }
+        }
+    }
+}
+
+fn num(row: &Json, k: &str) -> Option<Num> {
+    let v = row.get(k)?;
+    v.as_i64().map(Num::I).or_else(|| v.as_f64().map(Num::F))
+}
+
+/// `sum(field [* times])` over `rows`, each term rounded to a `Long`; `None` when a row lacks an operand or it overflows.
+fn sum_rows(rows: &[Json], field: &str, times: Option<&str>) -> Option<i64> {
+    rows.iter().try_fold(0i64, |acc, row| {
+        let n = num(row, field)?;
+        let n = match times {
+            Some(t) => n.mul(num(row, t)?)?,
+            None => n,
+        };
+        acc.checked_add(n.to_long()?)
+    })
 }
 
 /// An argument of a root; `default` is the text of its default value.
@@ -84,6 +137,15 @@ pub struct Root {
     pub args: &'static [Arg],
     pub guard: Option<Guard>,
     pub blocks: &'static [Block],
+    pub sums: &'static [RootSum],
+}
+
+/// `field` of the root: the sum of `value [* times]` over the rows of its block `block` (`Long`, see [`sum_rows`]).
+pub struct RootSum {
+    pub field: &'static str,
+    pub block: &'static str,
+    pub value: &'static str,
+    pub times: Option<&'static str>,
 }
 
 pub struct Source {
@@ -145,6 +207,8 @@ struct Context {
     sources: &'static [Source],
     caller: Caller,
     loader: Mutex<Loader>,
+    /// The rows of the blocks already asked, by block and arguments.
+    blocks: Mutex<HashMap<(usize, String), Arc<tokio::sync::OnceCell<Rows>>>>,
 }
 
 #[derive(Default)]
@@ -303,9 +367,16 @@ impl Context {
         let matching = |rows: Vec<Json>, wanted: &str| -> Vec<Json> {
             rows.into_iter().filter(|r| r.get(relation.target_field).and_then(text_of).as_deref() == Some(wanted)).collect()
         };
+        let base_query = || {
+            let mut query = Fields::default();
+            for (param, value) in relation.fixed_params {
+                query.set(*param, *value);
+            }
+            query
+        };
         let mut out = HashMap::new();
         if let Some(param) = relation.batch_param {
-            let mut query = Fields::default();
+            let mut query = base_query();
             query.set(param, values.join(","));
             let result = rows_for(target, cookie, query).await;
             for v in values {
@@ -314,7 +385,7 @@ impl Context {
             }
         } else {
             let calls = values.iter().map(|v| async move {
-                let mut query = Fields::default();
+                let mut query = base_query();
                 query.set(relation.target_field, v.as_str());
                 (v.clone(), rows_for(target, cookie, query).await)
             });
@@ -363,9 +434,30 @@ fn default_value(scalar: &str, text: &str) -> Value {
 
 /// The rows of a block of a root: one call to its source, with the query parameters its arguments give.
 async fn read_block(ctx: &ResolverContext<'_>, b: &'static Block) -> Result<Option<FieldValue<'static>>, Error> {
-    let req = context(ctx)?;
-    let args = parent_json(ctx)?;
-    let target = source(req.sources, b.source).ok_or_else(|| refuse("ERREUR_INTERNE", "internal error"))?;
+    let rows = block_rows(ctx, b).await;
+    let rows = match &*rows {
+        Ok(rows) => rows.clone(),
+        Err(e) => return Err(into_error(e.clone())),
+    };
+    Ok(if b.many { Some(FieldValue::list(rows.into_iter().map(object))) } else { rows.into_iter().next().map(object) })
+}
+
+/// The rows of a block, read once per request and per arguments: a total over them (`sums`) does not call the service again.
+async fn block_rows(ctx: &ResolverContext<'_>, b: &'static Block) -> Rows {
+    let (req, args) = match (context(ctx), parent_json(ctx)) {
+        (Ok(req), Ok(args)) => (req, args),
+        _ => return Arc::new(Err(Failure::new("ERREUR_INTERNE", "internal error"))),
+    };
+    let key = (b as *const Block as usize, args.to_string());
+    let cell = {
+        let mut cache = req.blocks.lock().unwrap_or_else(|e| e.into_inner());
+        cache.entry(key).or_default().clone()
+    };
+    cell.get_or_init(|| async { Arc::new(fetch_block(req, args, b).await) }).await.clone()
+}
+
+async fn fetch_block(req: &Context, args: &Json, b: &'static Block) -> Result<Vec<Json>, Failure> {
+    let target = source(req.sources, b.source).ok_or_else(|| Failure::new("ERREUR_INTERNE", "internal error"))?;
     let mut q = Fields::default();
     for (param, value) in b.fixed_params {
         q.set(*param, *value);
@@ -381,13 +473,13 @@ async fn read_block(ctx: &ResolverContext<'_>, b: &'static Block) -> Result<Opti
             for (name, value) in map {
                 if let Some(v) = text_of(value) {
                     let segment = crate::http_client::segment(&v)
-                        .map_err(|_| refuse("PARAMETRE_INVALIDE", "the argument is not valid"))?;
+                        .map_err(|_| Failure::new("PARAMETRE_INVALIDE", "the argument is not valid"))?;
                     path = path.replace(&format!("{{{name}}}"), &segment.to_string());
                 }
             }
         }
     }
-    let answer = get(target, &req.caller, &path, q, true).await.map_err(into_error)?;
+    let answer = get(target, &req.caller, &path, q, true).await?;
     let answer = answer.unwrap_or(Json::Null);
     let mut rows = if b.path.is_some() && answer.is_object() && answer.get("items").is_none() {
         vec![answer]
@@ -395,7 +487,7 @@ async fn read_block(ctx: &ResolverContext<'_>, b: &'static Block) -> Result<Opti
         rows_of(answer)
     };
     rows.truncate(MAX_LIST as usize);
-    Ok(if b.many { Some(FieldValue::list(rows.into_iter().map(object))) } else { rows.into_iter().next().map(object) })
+    Ok(rows)
 }
 
 fn context<'a>(ctx: &'a ResolverContext<'_>) -> Result<&'a Context, Error> {
@@ -445,31 +537,25 @@ pub fn schema(
             ty = ty.field(Field::new(c.field, TypeRef::named(scalar), move |ctx| {
                 FieldFuture::new(async move {
                     let parent = parent_json(&ctx)?;
-                    let int = |row: &Json, k: &str| row.get(k).and_then(Json::as_i64);
                     let value: Option<Json> = match &c.kind {
                         Kind::Product(fields) => fields
                             .iter()
-                            .try_fold(1i64, |acc, f| int(parent, f).and_then(|n| acc.checked_mul(n)))
+                            .try_fold(Num::I(1), |acc, f| num(parent, f).and_then(|n| acc.mul(n)))
+                            .and_then(Num::to_long)
                             .map(Json::from),
-                        Kind::Ratio(numerator, denominator) => match (int(parent, numerator), int(parent, denominator)) {
-                            (Some(n), Some(d)) if d != 0 => serde_json::Number::from_f64(n as f64 / d as f64).map(Json::Number),
-                            _ => None,
-                        },
+                        Kind::Ratio(numerator, denominator) => {
+                            let f = |k: &str| parent.get(k).and_then(Json::as_f64);
+                            match (f(numerator), f(denominator)) {
+                                (Some(n), Some(d)) if d != 0.0 => serde_json::Number::from_f64(n / d).map(Json::Number),
+                                _ => None,
+                            }
+                        }
                         Kind::Sum { relation, field, times } => {
                             let ri = s.relations.iter().position(|r| r.field == *relation);
                             match (ri, ri.and_then(|ri| parent.get(s.relations[ri].via).and_then(text_of).map(|v| (ri, v)))) {
                                 (Some(_), Some((ri, via))) => {
                                     let rows = context(&ctx)?.load(si, ri, via).await?;
-                                    rows.iter()
-                                        .try_fold(0i64, |acc, row| {
-                                            let n = int(row, field)?;
-                                            let n = match times {
-                                                Some(t) => n.checked_mul(int(row, t)?)?,
-                                                None => n,
-                                            };
-                                            acc.checked_add(n)
-                                        })
-                                        .map(Json::from)
+                                    sum_rows(&rows, field, *times).map(Json::from)
                                 }
                                 (Some(_), None) => Some(Json::from(0)),
                                 _ => None,
@@ -531,6 +617,23 @@ pub fn schema(
                         // The block alone fails: it is `null`, with its error at its path, and the other blocks are answered.
                         Err(error) => {
                             let server = ctx.ctx.set_error_path(error.into_server_error(ctx.ctx.item.pos));
+                            ctx.ctx.add_error(server);
+                            Ok(None)
+                        }
+                    }
+                })
+            }));
+        }
+        for s in root.sums {
+            let Some(b) = root.blocks.iter().find(|b| b.field == s.block) else { continue };
+            ty = ty.field(Field::new(s.field, TypeRef::named("Long"), move |ctx| {
+                FieldFuture::new(async move {
+                    let rows = block_rows(&ctx, b).await;
+                    match &*rows {
+                        Ok(rows) => Ok(sum_rows(rows, s.value, s.times).and_then(|n| Value::from_json(Json::from(n)).ok()).map(FieldValue::value)),
+                        // The total alone fails: it is `null`, with the error of the block.
+                        Err(e) => {
+                            let server = ctx.ctx.set_error_path(into_error(e.clone()).into_server_error(ctx.ctx.item.pos));
                             ctx.ctx.add_error(server);
                             Ok(None)
                         }
@@ -605,7 +708,7 @@ impl Gateway {
             Ok(r) => r,
             Err(_) => return crate::graphql::error_body("REQUETE_INVALIDE", "the body is not a GraphQL request"),
         };
-        let data = Context { sources: self.sources, caller: Caller { cookie: token, headers }, loader: Mutex::new(Loader::default()) };
+        let data = Context { sources: self.sources, caller: Caller { cookie: token, headers }, loader: Mutex::new(Loader::default()), blocks: Mutex::default() };
         let response = self.schema.execute(request.data(data)).await;
         let mut out = serde_json::to_value(&response).unwrap_or_else(|_| Json::Object(Map::new()));
         add_codes(&mut out);
@@ -697,8 +800,8 @@ mod tests {
         let all = [("m1", "a1", 5), ("m2", "a1", -2), ("m3", "a2", 7)];
         let rows: Vec<Json> = all
             .iter()
-            .filter(|(_, a, _)| wanted.contains(a))
-            .map(|(id, a, n)| serde_json::json!({ "id": id, "article_id": a, "quantite": n, "prix": 10 }))
+            .filter(|(_, a, _)| wanted.is_empty() || wanted.contains(a))
+            .map(|(id, a, n)| serde_json::json!({ "id": id, "article_id": a, "quantite": n, "prix": 10, "cout": 2.5, "note": q.get("archive").cloned().unwrap_or_default() }))
             .collect();
         AxJson(Json::Array(rows))
     }
@@ -727,6 +830,7 @@ mod tests {
             target_field: "article_id",
             many: true,
             batch_param,
+            fixed_params: &[],
         }]));
         Box::leak(Box::new([
             Source {
@@ -820,6 +924,7 @@ mod tests {
             target_field: "article_id",
             many: true,
             batch_param: Some("article_ids"),
+            fixed_params: &[("archive", "tous")],
         }]));
         let sources: &'static [Source] = Box::leak(Box::new([
             Source {
@@ -840,7 +945,11 @@ mod tests {
                 base_url_env: env,
                 path: "/mouvements",
                 query: "mouvement",
-                props: Box::leak(Box::new([id(), Prop { name: "quantite", field: "quantite", scalar: "Int", nullable: false }])),
+                props: Box::leak(Box::new([
+                    id(),
+                    Prop { name: "quantite", field: "quantite", scalar: "Int", nullable: false },
+                    Prop { name: "note", field: "note", scalar: "String", nullable: false },
+                ])),
                 key: None,
                 relations: &[],
                 computed: Box::leak(Box::new([
@@ -862,7 +971,12 @@ mod tests {
             blocks: Box::leak(Box::new([
                 Block { field: "articles", source: "Article", many: true, params: &[("limit", "limit")], fixed_params: &[], path: None },
                 Block { field: "lots", source: "Lot", many: true, params: &[], fixed_params: &[], path: None },
+                Block { field: "mouvements", source: "Mouvement", many: true, params: &[], fixed_params: &[], path: None },
             ])),
+            sums: &[
+                RootSum { field: "valeurTotale", block: "mouvements", value: "quantite", times: Some("cout") },
+                RootSum { field: "totalLots", block: "lots", value: "quantite", times: None },
+            ],
         }]));
         (sources, roots)
     }
@@ -914,6 +1028,7 @@ mod tests {
                 fixed_params: &[("archive", "tous")],
                 path: Some("/entrepots/{entrepotId}/capacite"),
             }])),
+            sums: &[],
         }]));
         let gateway = Gateway::from_env(sources, roots).unwrap();
         let q = r#"{ capacite(entrepotId: "w1") { cap { id } } }"#;
@@ -942,5 +1057,35 @@ mod tests {
         assert_eq!(first["valeur"], 50, "{out}");
         assert_eq!(first["taux"], 0.5, "{out}");
         assert!(first["sansDenominateur"].is_null(), "{out}");
+    }
+
+    #[test]
+    fn a_double_operand_rounds_the_long_result_to_the_nearest_integer() {
+        let rows = [
+            serde_json::json!({ "q": 5, "c": 2.5 }),
+            serde_json::json!({ "q": -2, "c": 2.5 }),
+            serde_json::json!({ "q": 7, "c": 2.5 }),
+        ];
+        assert_eq!(sum_rows(&rows, "q", Some("c")), Some(13 - 5 + 18));
+        assert_eq!(sum_rows(&rows, "q", None), Some(10));
+        assert_eq!(sum_rows(&rows, "q", Some("absent")), None, "a missing operand");
+        assert_eq!(sum_rows(&[serde_json::json!({ "q": 1e30 })], "q", None), None, "does not fit a Long");
+    }
+
+    #[tokio::test]
+    async fn a_root_total_sums_a_block_without_calling_the_service_again_and_a_relation_sends_its_fixed_params() {
+        let q = r#"{ tableauDeBord(entrepotId: "w1") { valeurTotale mouvements { quantite note } totalLots } }"#;
+        let (fake, out) = dashboard_run("EDA_TEST_GW_SUMS", q).await;
+        let root = &out["data"]["tableauDeBord"];
+        assert_eq!(root["valeurTotale"], 13 - 5 + 18, "{out}");
+        assert_eq!(root["mouvements"].as_array().unwrap().len(), 3, "{out}");
+        assert!(root["totalLots"].is_null(), "{out}");
+        assert_eq!(out["errors"].as_array().unwrap().len(), 1, "the failing block alone: {out}");
+        assert_eq!(out["errors"][0]["path"], serde_json::json!(["tableauDeBord", "totalLots"]), "{out}");
+        assert_eq!(out["errors"][0]["extensions"]["code"], "LOT_INVALIDE", "{out}");
+        assert_eq!(fake.movement_calls.load(Ordering::SeqCst), 1, "the block and its total share one call");
+        let q = "{ articleList(first: 1) { mouvements { note } } }";
+        let (_, out) = dashboard_run("EDA_TEST_GW_FIXED", q).await;
+        assert_eq!(out["data"]["articleList"][0]["mouvements"][0]["note"], "tous", "{out}");
     }
 }
