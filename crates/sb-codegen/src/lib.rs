@@ -1092,6 +1092,51 @@ mod tests {
         assert!(file(&files, "Cargo.toml").contains("argon2 = \"0.6\""));
     }
 
+    /// Keeps an export with hashPassword/verifyPassword weakness under `target/export-weakness`,
+    /// to run `cargo check` on it: `cargo test -p sb-codegen --ignored keeps_a_weakness_export`.
+    #[test]
+    #[ignore]
+    fn keeps_a_weakness_export() {
+        use sb_model::{Expr, Step, Weakness};
+        let path = |p: &str| Expr::Path { path: p.into() };
+        let mut p = sample::orders();
+        p.services[0].routes[0].steps.splice(
+            0..0,
+            [
+                Step::RandomToken {
+                    id: "a".into(),
+                    bind: "token".into(),
+                },
+                Step::HashPassword {
+                    id: "c".into(),
+                    input: path("token"),
+                    bind: "hash".into(),
+                    weakness: Some(Weakness {
+                        bind: "weak_new".into(),
+                        below: 3,
+                        inputs: vec![],
+                    }),
+                },
+                Step::VerifyPassword {
+                    id: "d".into(),
+                    password: path("token"),
+                    stored: path("hash"),
+                    bind: "ok".into(),
+                    weakness: Some(Weakness {
+                        bind: "weak_login".into(),
+                        below: 4,
+                        inputs: vec![path("token")],
+                    }),
+                    on_fail: None,
+                },
+            ],
+        );
+        let files = generate(&p).unwrap();
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/export-weakness");
+        let _ = fs::remove_dir_all(&dir);
+        write_to_dir(&files, &dir).unwrap();
+    }
+
     #[test]
     fn a_refusing_check_publishes_then_commits_before_it_answers() {
         use sb_model::{Assignment, Expr, FailAs, FailPublish, OnFail, Step};
