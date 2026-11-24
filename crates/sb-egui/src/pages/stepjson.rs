@@ -10,6 +10,7 @@ use sb_app::stepform::{self, Kind};
 use sb_model::{
     Assignment, CmpOp, Column, Cookie, Expr, Field, JwksSource, ResponseHeader, SameSite,
     SqlCondition, SqlJoin, SqlJoinKind, SqlJoinOn, SqlMissing, SqlSort, SqlTest, Step, Table,
+    Weakness,
 };
 use serde_json::Value;
 
@@ -78,6 +79,7 @@ pub fn structured(
         | ("verifyJwt", "source")
         | ("verifyJwt", "schema")
         | ("sql", "into") => true,
+        ("hashPassword" | "verifyPassword", "weakness") => true,
         ("httpCall", "auth" | "response" | "onError" | "bodyFormat") => true,
         ("sql", "values") => table.is_some(),
         ("sql", "table") => true,
@@ -108,6 +110,7 @@ pub fn structured(
         ("verifyJwt", "source") => jwks_source(ui, id, text),
         ("verifyJwt", "schema") => schema_pick(app, ui, id, text, false),
         ("sql", "into") => schema_pick(app, ui, id, text, true),
+        ("hashPassword" | "verifyPassword", "weakness") => weakness(app, ui, id, text, vars),
         ("httpCall", "auth") => labelled(ui, id, text, &HTTP_AUTH),
         ("httpCall", "onError") => labelled(ui, id, text, &HTTP_ON_ERROR),
         ("httpCall", "bodyFormat") => labelled(ui, id, text, &HTTP_BODY_FORMAT),
@@ -193,6 +196,85 @@ fn set_test(c: &mut SqlCondition, word: &str) {
 
 fn status_words() -> Vec<String> {
     STATUSES.iter().map(|(c, w)| format!("{c} · {w}")).collect()
+}
+
+// ---- password weakness ----
+
+/// The judgment of a clear password that refuses nothing: a box to tick, then the name of the `bool` it fills, the
+/// score under which the password is weak, and the texts it must not be made of. Returns `""` when it is turned off.
+fn weakness(app: &mut App, ui: &mut Ui, id: egui::Id, text: &str, vars: &[Var]) -> Option<String> {
+    let current: Option<Weakness> = serde_json::from_str(text).ok();
+    let mut on = current.is_some();
+    let mut out = None;
+    if ui
+        .checkbox(&mut on, "Signaler un mot de passe faible (sans le refuser)")
+        .changed()
+    {
+        return Some(if on {
+            push(&Weakness {
+                bind: "weak_password".into(),
+                below: sb_model::DEFAULT_MIN_PASSWORD_SCORE,
+                inputs: vec![],
+            })
+        } else {
+            String::new()
+        });
+    }
+    let w = current?;
+    ui.horizontal(|ui| {
+        small(ui, "Vrai si faible, dans");
+        if let Some(v) = commit_entry(ui, id.with("bind"), &w.bind, true, "weak_password", false) {
+            out = Some(push(&Weakness {
+                bind: v,
+                ..w.clone()
+            }));
+        }
+    });
+    ui.horizontal(|ui| {
+        small(ui, "Faible sous le score (0 à 4)");
+        if let Some(v) = commit_entry(ui, id.with("below"), &w.below.to_string(), true, "", false)
+            && let Ok(n) = v.trim().parse::<u8>()
+        {
+            out = Some(push(&Weakness {
+                below: n.min(4),
+                ..w.clone()
+            }));
+        }
+    });
+    small(
+        ui,
+        "Textes que le mot de passe ne doit pas contenir (e-mail, nom)",
+    );
+    let mut inputs = w.inputs.clone();
+    let mut changed = false;
+    let mut remove = None;
+    for (i, input) in inputs.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            fill(ui, 32.0, |ui| {
+                if let Some(Some(e)) =
+                    expr_editor(app, ui, (id, "input", i), None, false, Some(&*input), vars)
+                {
+                    *input = e;
+                    changed = true;
+                }
+            });
+            if icon_btn(ui, "trash", "Retirer ce texte", true).clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        inputs.remove(i);
+        changed = true;
+    }
+    if link(ui, "+ Ajouter un texte").clicked() {
+        inputs.push(expr_of(None));
+        changed = true;
+    }
+    if changed {
+        out = Some(push(&Weakness { inputs, ..w }));
+    }
+    out
 }
 
 // ---- schemas ----

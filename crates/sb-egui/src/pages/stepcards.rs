@@ -251,6 +251,7 @@ fn field_name(key: &str) -> String {
         "subjectBind" => "Sujet de la famille dans",
         "onReplay" => "Si le jeton est rejoué (JSON : publish, fail)",
         "keyId" => "Identifiant de la clé",
+        "weakness" => "Signaler un mot de passe faible",
         "inputs" => "Textes du compte (e-mail, nom)",
         "refuseBreached" => "Refuser les mots de passe des fuites connues",
         "topic" => "Topic",
