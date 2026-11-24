@@ -74,6 +74,7 @@ pub fn add_service(app: &mut App, kind: ServiceKind) {
             graphql_sources: Vec::new(),
             graphql_path: None,
             graphql_tenant_claim: None,
+            graphql_forward_headers: Vec::new(),
             graphql_roots: Vec::new(),
             graphql_mutation_roles: Default::default(),
             fragments: Vec::new(),

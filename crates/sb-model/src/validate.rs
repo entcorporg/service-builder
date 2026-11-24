@@ -5346,6 +5346,19 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        for h in &s.graphql_forward_headers {
+            let plain = !h.is_empty()
+                && h.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+                && !h.eq_ignore_ascii_case("cookie")
+                && !h.eq_ignore_ascii_case("host");
+            if !plain {
+                self.error(
+                    "E_GRAPHQL_FORWARD_HEADER",
+                    format!("{base}/graphqlForwardHeaders"),
+                    format!("`{h}` is not a header that can be forwarded (letters, digits and `-`; never `Cookie` or `Host`)"),
+                );
+            }
+        }
         if let Some(claim) = &s.graphql_tenant_claim {
             if claim.is_empty() || claim.contains(char::is_whitespace) {
                 self.error(
@@ -5670,6 +5683,38 @@ impl<'a> Checker<'a> {
                         format!("{bp}/source"),
                         "a block reads a source of the service",
                     );
+                }
+                for param in b.fixed_params.keys() {
+                    let plain = !param.is_empty()
+                        && param
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-');
+                    if !plain {
+                        self.error(
+                            "E_GRAPHQL_ROOT_BLOCK",
+                            format!("{bp}/fixedParams/{param}"),
+                            "a fixed parameter is a query parameter name",
+                        );
+                    }
+                }
+                if let Some(path) = &b.path {
+                    let mut ok =
+                        path.starts_with('/') && !path.contains("//") && !path.contains('?');
+                    for seg in path.split('/').skip(1) {
+                        if let Some(name) = seg.strip_prefix('{').and_then(|x| x.strip_suffix('}'))
+                        {
+                            ok &= args.contains(name);
+                        } else {
+                            ok &= !seg.contains(['{', '}']) && seg != ".." && seg != ".";
+                        }
+                    }
+                    if !ok {
+                        self.error(
+                            "E_GRAPHQL_ROOT_BLOCK",
+                            format!("{bp}/path"),
+                            "a block path starts with `/`, has no query string and its `{arg}` segments name arguments of the root",
+                        );
+                    }
                 }
                 for (param, arg) in &b.params {
                     let plain = !param.is_empty()

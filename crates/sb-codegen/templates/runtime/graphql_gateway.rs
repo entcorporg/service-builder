@@ -65,6 +65,10 @@ pub struct Block {
     pub many: bool,
     /// `(query parameter, argument)`.
     pub params: &'static [(&'static str, &'static str)],
+    /// `(query parameter, value)`, constants; an argument of `params` wins on the same name.
+    pub fixed_params: &'static [(&'static str, &'static str)],
+    /// Path of the call instead of the source's, `{arg}` standing for an argument; the answer is then one object.
+    pub path: Option<&'static str>,
 }
 
 /// `GET <path>` on `source`, read before the blocks: a refusal stops the request. `{arg}` stands for an argument.
@@ -129,10 +133,17 @@ fn source<'a>(sources: &'a [Source], name: &str) -> Option<&'a Source> {
     sources.iter().find(|s| s.name == name)
 }
 
+/// What of the caller goes to the services behind: its token, and the headers the project forwards.
+#[derive(Default)]
+struct Caller {
+    cookie: Option<String>,
+    headers: Vec<(String, String)>,
+}
+
 /// What the caller said, shared by the resolvers of one request.
 struct Context {
     sources: &'static [Source],
-    cookie: Option<String>,
+    caller: Caller,
     loader: Mutex<Loader>,
 }
 
@@ -190,13 +201,16 @@ fn rows_of(answer: Json) -> Vec<Json> {
 /// `verbatim`: a refusal of the service is reported as it wrote it (see [`verbatim`]), and a 404 is a failure, not an absence.
 async fn get(
     target: &Source,
-    cookie: Option<&str>,
+    caller: &Caller,
     path: &str,
     query: Fields,
     verbatim_errors: bool,
 ) -> Result<Option<Json>, Failure> {
     let mut headers = Fields::default();
-    if let Some(token) = cookie {
+    for (name, value) in &caller.headers {
+        headers.set(name.as_str(), value.as_str());
+    }
+    if let Some(token) = &caller.cookie {
         headers.set("Cookie", format!("access_token={token}"));
     }
     let call = Call {
@@ -233,7 +247,7 @@ async fn get(
         .map_err(|_| Failure::new("SERVICE_INDISPONIBLE", "the service behind sent an unreadable answer"))
 }
 
-async fn rows_for(target: &Source, cookie: Option<&str>, query: Fields) -> Result<Vec<Json>, Failure> {
+async fn rows_for(target: &Source, cookie: &Caller, query: Fields) -> Result<Vec<Json>, Failure> {
     get(target, cookie, target.path, query, false).await.map(|a| rows_of(a.unwrap_or(Json::Null)))
 }
 
@@ -284,7 +298,7 @@ impl Context {
         let Some(target) = source(self.sources, relation.target) else {
             return HashMap::new();
         };
-        let cookie = self.cookie.as_deref();
+        let cookie = &self.caller;
         // The service behind may ignore the filter: only the rows that match are kept.
         let matching = |rows: Vec<Json>, wanted: &str| -> Vec<Json> {
             rows.into_iter().filter(|r| r.get(relation.target_field).and_then(text_of).as_deref() == Some(wanted)).collect()
@@ -353,13 +367,33 @@ async fn read_block(ctx: &ResolverContext<'_>, b: &'static Block) -> Result<Opti
     let args = parent_json(ctx)?;
     let target = source(req.sources, b.source).ok_or_else(|| refuse("ERREUR_INTERNE", "internal error"))?;
     let mut q = Fields::default();
+    for (param, value) in b.fixed_params {
+        q.set(*param, *value);
+    }
     for (param, arg) in b.params {
         if let Some(v) = args.get(*arg).and_then(text_of) {
             q.set(*param, v);
         }
     }
-    let answer = get(target, req.cookie.as_deref(), target.path, q, true).await.map_err(into_error)?;
-    let mut rows = rows_of(answer.unwrap_or(Json::Null));
+    let mut path = b.path.unwrap_or(target.path).to_owned();
+    if b.path.is_some() {
+        if let Some(map) = args.as_object() {
+            for (name, value) in map {
+                if let Some(v) = text_of(value) {
+                    let segment = crate::http_client::segment(&v)
+                        .map_err(|_| refuse("PARAMETRE_INVALIDE", "the argument is not valid"))?;
+                    path = path.replace(&format!("{{{name}}}"), &segment.to_string());
+                }
+            }
+        }
+    }
+    let answer = get(target, &req.caller, &path, q, true).await.map_err(into_error)?;
+    let answer = answer.unwrap_or(Json::Null);
+    let mut rows = if b.path.is_some() && answer.is_object() && answer.get("items").is_none() {
+        vec![answer]
+    } else {
+        rows_of(answer)
+    };
     rows.truncate(MAX_LIST as usize);
     Ok(if b.many { Some(FieldValue::list(rows.into_iter().map(object))) } else { rows.into_iter().next().map(object) })
 }
@@ -458,7 +492,7 @@ pub fn schema(
                     let segment = crate::http_client::segment(&value)
                         .map_err(|_| refuse("PARAMETRE_INVALIDE", "the key is not valid"))?;
                     let path = format!("{}/{segment}", target.path);
-                    let found = get(target, req.cookie.as_deref(), &path, Fields::default(), false).await.map_err(into_error)?;
+                    let found = get(target, &req.caller, &path, Fields::default(), false).await.map_err(into_error)?;
                     Ok(found.filter(Json::is_object).map(object))
                 })
             })
@@ -477,7 +511,7 @@ pub fn schema(
                     }
                     q.set("limit", first.min(MAX_LIST));
                 }
-                let mut rows = rows_for(target, req.cookie.as_deref(), q).await.map_err(into_error)?;
+                let mut rows = rows_for(target, &req.caller, q).await.map_err(into_error)?;
                 rows.truncate(MAX_LIST as usize);
                 Ok(Some(FieldValue::list(rows.into_iter().map(object))))
             })
@@ -525,7 +559,7 @@ pub fn schema(
                             path = path.replace(&format!("{{{}}}", a.name), &segment.to_string());
                         }
                     }
-                    get(target, req.cookie.as_deref(), &path, Fields::default(), true).await.map_err(into_error)?;
+                    get(target, &req.caller, &path, Fields::default(), true).await.map_err(into_error)?;
                 }
                 Ok(Some(object(Json::Object(args))))
             })
@@ -564,13 +598,14 @@ impl Gateway {
         Ok(Self { schema, sources })
     }
 
-    /// Runs the request of a client; `token` is the `access_token` the services behind receive.
-    pub async fn execute(&self, token: Option<String>, body: Json) -> Json {
+    /// Runs the request of a client; `token` is the `access_token` the services behind receive, `headers` the ones the project
+    /// forwards with it.
+    pub async fn execute(&self, token: Option<String>, headers: Vec<(String, String)>, body: Json) -> Json {
         let request: Request = match serde_json::from_value(body) {
             Ok(r) => r,
             Err(_) => return crate::graphql::error_body("REQUETE_INVALIDE", "the body is not a GraphQL request"),
         };
-        let data = Context { sources: self.sources, cookie: token, loader: Mutex::new(Loader::default()) };
+        let data = Context { sources: self.sources, caller: Caller { cookie: token, headers }, loader: Mutex::new(Loader::default()) };
         let response = self.schema.execute(request.data(data)).await;
         let mut out = serde_json::to_value(&response).unwrap_or_else(|_| Json::Object(Map::new()));
         add_codes(&mut out);
@@ -619,6 +654,16 @@ mod tests {
         }
     }
 
+    async fn capacity(
+        axum::extract::Path(id): axum::extract::Path<String>,
+        headers: HeaderMap,
+        Query(q): Query<HashMap<String, String>>,
+    ) -> AxJson<Json> {
+        let front = headers.get("x-frontend-id").and_then(|v| v.to_str().ok()).unwrap_or("none");
+        let archive = q.get("archive").map(String::as_str).unwrap_or("none");
+        AxJson(serde_json::json!({ "id": format!("{id}|{front}|{archive}") }))
+    }
+
     async fn lots() -> axum::response::Response {
         use axum::response::IntoResponse;
         (
@@ -665,6 +710,7 @@ mod tests {
             .route("/articles/{id}", get(article))
             .route("/mouvements", get(movements))
             .route("/entrepots/{id}", get(warehouse))
+            .route("/entrepots/{id}/capacite", get(capacity))
             .route("/lots", get(lots))
             .with_state(fake.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -719,7 +765,7 @@ mod tests {
         let (fake, url) = upstream_api().await;
         unsafe { std::env::set_var(env, url) };
         let gateway = Gateway::from_env(sources(env, batch), &[]).unwrap();
-        let out = gateway.execute(Some("tok".into()), serde_json::json!({ "query": query })).await;
+        let out = gateway.execute(Some("tok".into()), Vec::new(), serde_json::json!({ "query": query })).await;
         (fake, out)
     }
 
@@ -760,7 +806,7 @@ mod tests {
     async fn a_service_that_is_down_is_a_coded_error() {
         unsafe { std::env::set_var("EDA_TEST_GW_DOWN", "http://127.0.0.1:1") };
         let gateway = Gateway::from_env(sources("EDA_TEST_GW_DOWN", None), &[]).unwrap();
-        let out = gateway.execute(None, serde_json::json!({ "query": "{ articleList { nom } }" })).await;
+        let out = gateway.execute(None, Vec::new(), serde_json::json!({ "query": "{ articleList { nom } }" })).await;
         assert_eq!(out["errors"][0]["extensions"]["code"], "SERVICE_INDISPONIBLE");
     }
 
@@ -814,8 +860,8 @@ mod tests {
             ])),
             guard: Some(Guard { source: "Article", path: "/entrepots/{entrepotId}" }),
             blocks: Box::leak(Box::new([
-                Block { field: "articles", source: "Article", many: true, params: &[("limit", "limit")] },
-                Block { field: "lots", source: "Lot", many: true, params: &[] },
+                Block { field: "articles", source: "Article", many: true, params: &[("limit", "limit")], fixed_params: &[], path: None },
+                Block { field: "lots", source: "Lot", many: true, params: &[], fixed_params: &[], path: None },
             ])),
         }]));
         (sources, roots)
@@ -826,7 +872,7 @@ mod tests {
         unsafe { std::env::set_var(env, url) };
         let (sources, roots) = dashboard(env);
         let gateway = Gateway::from_env(sources, roots).unwrap();
-        let out = gateway.execute(Some("tok".into()), serde_json::json!({ "query": query })).await;
+        let out = gateway.execute(Some("tok".into()), Vec::new(), serde_json::json!({ "query": query })).await;
         (fake, out)
     }
 
@@ -847,6 +893,33 @@ mod tests {
         assert_eq!(out["errors"].as_array().unwrap().len(), 1, "{out}");
         assert_eq!(fake.article_calls.load(Ordering::SeqCst), 1);
         assert_eq!(fake.movement_calls.load(Ordering::SeqCst), 1, "grouped by the dataloader");
+    }
+
+    #[tokio::test]
+    async fn a_block_reads_a_path_with_an_argument_fixed_params_and_the_forwarded_headers() {
+        let env = "EDA_TEST_GW_PATH";
+        let (_fake, url) = upstream_api().await;
+        unsafe { std::env::set_var(env, url) };
+        let (sources, _) = dashboard(env);
+        let roots: &'static [Root] = Box::leak(Box::new([Root {
+            field: "capacite",
+            ty: "Capacite",
+            args: Box::leak(Box::new([Arg { name: "entrepotId", scalar: "ID", default: None }])),
+            guard: None,
+            blocks: Box::leak(Box::new([Block {
+                field: "cap",
+                source: "Article",
+                many: false,
+                params: &[],
+                fixed_params: &[("archive", "tous")],
+                path: Some("/entrepots/{entrepotId}/capacite"),
+            }])),
+        }]));
+        let gateway = Gateway::from_env(sources, roots).unwrap();
+        let q = r#"{ capacite(entrepotId: "w1") { cap { id } } }"#;
+        let headers = vec![("x-frontend-id".to_string(), "front-7".to_string())];
+        let out = gateway.execute(Some("tok".into()), headers, serde_json::json!({ "query": q })).await;
+        assert_eq!(out["data"]["capacite"]["cap"]["id"], "w1|front-7|tous", "{out}");
     }
 
     #[tokio::test]

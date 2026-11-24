@@ -443,6 +443,10 @@ pub struct Service {
     /// `tenant_id`). Set it when the tokens of the project carry another name (for instance `tid`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graphql_tenant_claim: Option<String>,
+    /// Headers of the client's request copied to every call of a gateway to the services behind (`X-Frontend-ID`, say), by name,
+    /// when the client sent them. The cookie `access_token` always goes along.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub graphql_forward_headers: Vec<String>,
     /// The query fields of a gateway that take arguments and answer several blocks at once (see [`GraphqlRoot`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub graphql_roots: Vec<GraphqlRoot>,
@@ -562,6 +566,13 @@ pub struct GraphqlBlock {
     /// Query parameters of the call: parameter name -> argument of the root that gives its value.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub params: std::collections::BTreeMap<String, String>,
+    /// Query parameters with a constant value (`archive` -> `tous`); an argument of `params` wins on the same name.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub fixed_params: std::collections::BTreeMap<String, String>,
+    /// Path of the call instead of the source's own, `{arg}` standing for an argument of the root (`/entrepots/{id}/capacite`).
+    /// The answer is then one object (`Source`, with `many` false) rather than a list of rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

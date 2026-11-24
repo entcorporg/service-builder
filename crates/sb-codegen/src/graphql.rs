@@ -473,6 +473,16 @@ fn gateway_transport_rs(service: &Service, source: &str, issuer: &str) -> String
     c.dedent();
     c.line("];");
     c.blank();
+    let forward: Vec<String> = service
+        .graphql_forward_headers
+        .iter()
+        .map(|h| format!("{:?}", h.to_ascii_lowercase()))
+        .collect();
+    c.line(format!(
+        "static FORWARD: &[&str] = &[{}];",
+        forward.join(", ")
+    ));
+    c.blank();
     c.line("static ROOTS: &[Root] = &[");
     c.indent();
     for root in &service.graphql_roots {
@@ -503,12 +513,19 @@ fn gateway_transport_rs(service: &Service, source: &str, issuer: &str) -> String
                 .iter()
                 .map(|(p, a)| format!("({p:?}, {a:?})"))
                 .collect();
+            let fixed: Vec<String> = b
+                .fixed_params
+                .iter()
+                .map(|(p, v)| format!("({p:?}, {v:?})"))
+                .collect();
             c.line(format!(
-                "    Block {{ field: {:?}, source: {:?}, many: {}, params: &[{}] }},",
+                "    Block {{ field: {:?}, source: {:?}, many: {}, params: &[{}], fixed_params: &[{}], path: {} }},",
                 b.field,
                 b.source,
                 b.many,
-                params.join(", ")
+                params.join(", "),
+                fixed.join(", "),
+                opt(b.path.as_deref())
             ));
         }
         c.line("],");
@@ -552,7 +569,8 @@ fn gateway_transport_rs(service: &Service, source: &str, issuer: &str) -> String
     c.line("Ok(g) => g,");
     c.line("Err(message) => return refused(StatusCode::INTERNAL_SERVER_ERROR, \"ERREUR_INTERNE\", message),");
     c.close_with(";");
-    c.line("Json(gateway.execute(Some(token), request).await).into_response()");
+    c.line("let forwarded = FORWARD.iter().filter_map(|n| headers.get(*n).and_then(|v| v.to_str().ok()).map(|v| ((*n).to_string(), v.to_string()))).collect();");
+    c.line("Json(gateway.execute(Some(token), forwarded, request).await).into_response()");
     c.close();
     c.finish()
 }

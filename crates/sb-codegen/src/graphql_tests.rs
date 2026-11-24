@@ -436,12 +436,16 @@ fn dashboard() -> sb_model::Project {
                 source: "Article".into(),
                 many: true,
                 params: [("limit".to_string(), "limit".to_string())].into(),
+                fixed_params: [("archive".to_string(), "tous".to_string())].into(),
+                path: None,
             },
             GraphqlBlock {
                 field: "premierMouvement".into(),
                 source: "Mouvement".into(),
                 many: false,
                 params: [("entrepot_id".to_string(), "entrepotId".to_string())].into(),
+                fixed_params: Default::default(),
+                path: None,
             },
         ],
     }];
@@ -471,7 +475,8 @@ fn a_gateway_declares_roots_with_arguments_blocks_a_guard_and_computed_fields() 
     for wanted in [
         "Arg { name: \"limit\", scalar: \"Int\", default: Some(\"6\") }",
         "guard: Some(Guard { source: \"Article\", path: \"/entrepots/{entrepotId}\" })",
-        "Block { field: \"articles\", source: \"Article\", many: true, params: &[(\"limit\", \"limit\")] }",
+        "Block { field: \"articles\", source: \"Article\", many: true, params: &[(\"limit\", \"limit\")], fixed_params: &[(\"archive\", \"tous\")], path: None }",
+        "static FORWARD: &[&str] = &[];",
         "Kind::Sum { relation: \"mouvements\", field: \"quantite\", times: Some(\"prix\") }",
         "Kind::Ratio(\"quantite\", \"prix\")",
     ] {
@@ -483,6 +488,35 @@ fn a_gateway_declares_roots_with_arguments_blocks_a_guard_and_computed_fields() 
         find(&again, "services/orders/src/transport/graphql.rs"),
         Some(code)
     );
+}
+
+#[test]
+fn a_gateway_forwards_the_headers_it_is_told_to_and_reads_block_paths() {
+    let mut p = dashboard();
+    p.services[0].graphql_forward_headers = vec!["X-Frontend-ID".into()];
+    p.services[0].graphql_roots[0].blocks[1].path = Some("/entrepots/{entrepotId}/capacite".into());
+    let files = generate(&p).unwrap();
+    let code = find(&files, "services/orders/src/transport/graphql.rs").expect("endpoint");
+    assert!(
+        code.contains("static FORWARD: &[&str] = &[\"x-frontend-id\"];"),
+        "{code}"
+    );
+    assert!(
+        code.contains("path: Some(\"/entrepots/{entrepotId}/capacite\")"),
+        "{code}"
+    );
+    assert!(
+        !sb_model::validate(&p)
+            .iter()
+            .any(|d| d.code.starts_with("E_GRAPHQL")),
+        "valid"
+    );
+    p.services[0].graphql_forward_headers = vec!["Cookie".into()];
+    p.services[0].graphql_roots[0].blocks[1].path = Some("/entrepots/{inconnu}/capacite".into());
+    let codes: Vec<String> = sb_model::validate(&p).into_iter().map(|d| d.code).collect();
+    for wanted in ["E_GRAPHQL_FORWARD_HEADER", "E_GRAPHQL_ROOT_BLOCK"] {
+        assert!(codes.iter().any(|c| c == wanted), "{wanted} in {codes:?}");
+    }
 }
 
 #[test]
