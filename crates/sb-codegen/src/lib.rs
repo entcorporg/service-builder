@@ -1188,6 +1188,10 @@ mod tests {
         let schema = file(&files, "services/orders/src/app/schema.rs");
         assert!(schema.contains("eda_runtime::refresh::CREATE_TABLE,"));
         assert!(file(&files, "runtime/src/lib.rs").contains("pub mod refresh;"));
+        // The logout revokes the family of the presented token, with no subject filter.
+        assert!(api.contains(
+            "eda_runtime::refresh::revoke(&mut tx, &(input.refresh_token.clone()), None).await?;"
+        ), "{api}");
         // The audit event of a replay reads the subject, and is queued before the commit.
         if let Some(Step::RefreshRotate { on_replay, .. }) = p.services[0]
             .routes

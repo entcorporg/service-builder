@@ -1989,6 +1989,8 @@ pub fn add_refresh_tokens(p: &mut Project) {
         "RefreshIssued",
         vec![field("refresh_token", string()), field("account", string())],
     ));
+    p.messages
+        .push(api("LoggedOut", vec![field("done", FieldType::Bool)]));
     let routes = &mut p.services[0].routes;
     let route = |name: &str, url: &str, request: &str, who: &str, step: Step| Route {
         response_format: Default::default(),
@@ -2051,6 +2053,32 @@ pub fn add_refresh_tokens(p: &mut Project) {
             }),
         },
     ));
+    // The logout: the family of the presented token ends, whatever the token is.
+    routes.push(Route {
+        response_format: Default::default(),
+        body_format: Default::default(),
+        csv_mode: Default::default(),
+        name: "logout".into(),
+        method: HttpMethod::Post,
+        path: "/auth/logout".into(),
+        request: "RefreshBody".into(),
+        response: "LoggedOut".into(),
+        status: 200,
+        steps: vec![
+            Step::RefreshRevoke {
+                id: "l1".into(),
+                token: path("input.refresh_token"),
+                subject: None,
+            },
+            Step::Respond {
+                id: "l2".into(),
+                fields: vec![set("done", lit(true))],
+                status: None,
+                cookies: vec![],
+                headers: vec![],
+            },
+        ],
+    });
 }
 
 /// API keys for a client that is a machine. A company, signed in with a token (the `tid` claim), issues keys scoped to what a

@@ -1689,6 +1689,19 @@ pub enum Step {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         on_replay: Option<OnFail>,
     },
+    /// Ends a refresh token family (a logout): the family of the presented token is revoked, so no token of it works any more.
+    /// Idempotent: a token that is unknown, expired or of a family already revoked changes nothing and is not an error (a
+    /// logout must always succeed). With `subject`, only a family of that subject is revoked (a user ends their own sessions).
+    /// Same table as `refreshRotate` (`refresh_tokens`, in the transaction of the handler). Routes only.
+    #[serde(rename_all = "camelCase")]
+    RefreshRevoke {
+        id: String,
+        /// The refresh token the client presents.
+        token: Expr,
+        /// Only a family of this subject (a text: an account id) is revoked.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject: Option<Expr>,
+    },
     /// Judges a password before it is hashed: how easy it is to guess (zxcvbn: dictionaries, keyboard patterns, dates, repeats,
     /// l33t, and the `inputs` of this account: the e-mail, the name) and, with `refuseBreached`, whether it is in a known data
     /// breach (the first five characters of its SHA-1 are sent to the Pwned Passwords range API, never the password). Under
@@ -2584,6 +2597,7 @@ impl Step {
             | Step::ApiKeyVerify { id, .. }
             | Step::ApiKeyRevoke { id, .. }
             | Step::RefreshRotate { id, .. }
+            | Step::RefreshRevoke { id, .. }
             | Step::Sha256 { id, .. }
             | Step::ForEach { id, .. }
             | Step::Include { id, .. }
@@ -3243,7 +3257,9 @@ impl Service {
     pub fn uses_refresh_tokens(&self) -> bool {
         let mut used = false;
         for step in self.handler_steps() {
-            step.walk(&mut |s| used |= matches!(s, Step::RefreshRotate { .. }));
+            step.walk(&mut |s| {
+                used |= matches!(s, Step::RefreshRotate { .. } | Step::RefreshRevoke { .. })
+            });
         }
         used
     }

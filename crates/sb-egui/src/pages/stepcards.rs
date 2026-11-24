@@ -67,6 +67,7 @@ pub fn title(kind: &str) -> &'static str {
         "apiKeyVerify" => "Vérifier une clé d’API",
         "apiKeyRevoke" => "Révoquer une clé d’API",
         "refreshRotate" => "Jeton de rafraîchissement (rotation)",
+        "refreshRevoke" => "Déconnexion (révoquer la famille d’un jeton)",
         "hashPassword" => "Hacher un mot de passe",
         "verifyPassword" => "Vérifier un mot de passe",
         "randomToken" => "Jeton aléatoire",
@@ -127,6 +128,7 @@ fn summary(step: &Step, kind: &str) -> String {
             }
         ),
         "apiKeyRevoke" => get("keyId"),
+        "refreshRevoke" => get("token"),
         "refreshRotate" => {
             if get("token").is_empty() {
                 format!(
@@ -646,7 +648,7 @@ fn form(app: &mut App, ui: &mut Ui, step: &Step, loc: &Loc, index: usize) {
 }
 
 /// The blocks that can be added, in the order of the web version.
-const ORDER: [&str; 55] = [
+const ORDER: [&str; 56] = [
     "publish",
     "publishLive",
     "liveGrants",
@@ -696,6 +698,7 @@ const ORDER: [&str; 55] = [
     "apiKeyVerify",
     "apiKeyRevoke",
     "refreshRotate",
+    "refreshRevoke",
     "hashPassword",
     "verifyPassword",
     "randomToken",
@@ -814,6 +817,9 @@ fn hint(kind: &str) -> &'static str {
         "refreshRotate" => {
             "Jeton à usage unique, par famille : sans jeton, ouvre une famille (connexion) ; avec le jeton présenté, le tourne. Un jeton déjà tourné révoque la famille (401)"
         }
+        "refreshRevoke" => {
+            "Déconnexion : révoque toute la famille du jeton présenté. Sans erreur si le jeton est inconnu, expiré ou déjà révoqué ; avec un sujet, seulement ses propres familles"
+        }
         "passwordStrength" => {
             "Refuse en 400 un mot de passe trop facile à deviner (zxcvbn), et, en option, ceux des fuites connues. Avant « Hacher »"
         }
@@ -852,7 +858,7 @@ fn allowed(app: &App, list: &[Step], loc: &Loc) -> Vec<&'static str> {
             "respond" => has_response,
             "fail" | "requirePermission" | "rateLimit" | "checkQuota" | "verifyChallenge"
             | "passwordStrength" | "verifyJwt" | "imageSniff" | "totpVerify"
-            | "recoveryCodeUse" | "refreshRotate" => http,
+            | "recoveryCodeUse" | "refreshRotate" | "refreshRevoke" => http,
             t if t.starts_with("passkey") => http,
             "verifyHmac" => allow_signature,
             _ => true,

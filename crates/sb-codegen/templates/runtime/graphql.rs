@@ -671,6 +671,60 @@ mod tests {
         assert_eq!(refused["errors"][0]["extensions"]["code"], "NOM_PRIS", "{refused}");
     }
 
+    /// Against a real Postgres: `TEST_DATABASE_URL=postgres://… cargo test graphql_on_a_real_database`. Without the variable the
+    /// test does nothing. It works in a schema of its own, dropped at the end.
+    #[tokio::test]
+    async fn graphql_on_a_real_database() {
+        let Ok(url) = std::env::var("TEST_DATABASE_URL") else { return };
+        let schema_name = format!("sb_gql_{}", std::process::id());
+        let admin = sqlx::PgPool::connect(&url).await.unwrap();
+        sqlx::query(&format!("CREATE SCHEMA {schema_name}")).execute(&admin).await.unwrap();
+        let path = format!("SET search_path TO {schema_name}");
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .after_connect(move |c, _| {
+                let path = path.clone();
+                Box::pin(async move { sqlx::query(&path).execute(c).await.map(|_| ()) })
+            })
+            .connect(&url)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE articles (id text PRIMARY KEY, nom text NOT NULL, tenant_id text NOT NULL)").execute(&db).await.unwrap();
+        sqlx::query("INSERT INTO articles VALUES ('1','un','t'),('2','deux','t'),('3','trois','t'),('4','autre','u')").execute(&db).await.unwrap();
+
+        let e = endpoint(true, 8, 200);
+        let run = |tenant: &str, roles: Vec<String>, q: &str| {
+            let (db, e, tenant, q) = (db.clone(), &e, tenant.to_owned(), q.to_owned());
+            async move { e.execute(db, Some(tenant), roles, serde_json::json!({ "query": q })).await }
+        };
+        let admin_role = || vec!["admin".to_owned()];
+
+        // A page, its cursor, the next page.
+        let first = run("t", admin_role(), "{ articlesConnection(first: 2) { edges { node { id nom } cursor } pageInfo { hasNextPage endCursor } } }").await;
+        assert_eq!(first["data"]["articlesConnection"]["edges"].as_array().map(Vec::len), Some(2), "{first}");
+        assert_eq!(first["data"]["articlesConnection"]["pageInfo"]["hasNextPage"], true, "{first}");
+        let end = first["data"]["articlesConnection"]["pageInfo"]["endCursor"].as_str().unwrap().to_owned();
+        let next = run("t", admin_role(), &format!("{{ articlesConnection(first: 2, after: \"{end}\") {{ edges {{ node {{ nom }} }} pageInfo {{ hasNextPage }} }} }}")).await;
+        assert_eq!(next["data"]["articlesConnection"]["edges"][0]["node"]["nom"], "trois", "{next}");
+        assert_eq!(next["data"]["articlesConnection"]["pageInfo"]["hasNextPage"], false, "{next}");
+
+        // The tenant: the other tenant's row is never seen, by list or by key.
+        let other = run("t", admin_role(), "{ articles(id: \"4\") { nom } }").await;
+        assert!(other["data"]["articles"].is_null(), "{other}");
+        let own = run("u", admin_role(), "{ articlesConnection { edges { node { nom } } } }").await;
+        assert_eq!(own["data"]["articlesConnection"]["edges"].as_array().map(Vec::len), Some(1), "{own}");
+
+        // A relation (the table points at itself through `again`).
+        let rel = run("t", admin_role(), "{ articles(id: \"2\") { nom again { edges { node { nom } } } } }").await;
+        assert_eq!(rel["data"]["articles"]["again"]["edges"][0]["node"]["nom"], "deux", "{rel}");
+
+        // The role of the table.
+        let denied = run("t", vec![], "{ articlesConnection { edges { node { nom } } } }").await;
+        assert_eq!(denied["errors"][0]["extensions"]["code"], "ACCES_REFUSE", "{denied}");
+
+        sqlx::query(&format!("DROP SCHEMA {schema_name} CASCADE")).execute(&admin).await.unwrap();
+    }
+
     fn endpoint(introspection: bool, depth: usize, complexity: usize) -> Endpoint {
         Endpoint { schema: schema(TABLES, MUTATIONS, depth, complexity, introspection).unwrap(), tables: TABLES }
     }

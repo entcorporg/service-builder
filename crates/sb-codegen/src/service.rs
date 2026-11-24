@@ -2939,6 +2939,22 @@ fn steps(
                     }
                 }
             }
+            Step::RefreshRevoke { token, subject, .. } => {
+                let text = TypeRef::scalar(FieldType::String);
+                let token = lower(project, scope, token, &text)?;
+                let subject = match subject {
+                    Some(subject) => {
+                        format!(
+                            "Some(({}).as_str())",
+                            lower(project, scope, subject, &text)?
+                        )
+                    }
+                    None => "None".to_string(),
+                };
+                c.line(format!(
+                    "eda_runtime::refresh::revoke(&mut tx, &({token}), {subject}).await?;"
+                ));
+            }
             Step::Flag {
                 key,
                 subject,
@@ -4410,6 +4426,7 @@ fn describe(step: &Step) -> String {
         } => {
             format!("start a refresh token family into {bind}")
         }
+        Step::RefreshRevoke { .. } => "revoke a refresh token family".into(),
         Step::RefreshRotate { bind, .. } => format!("rotate a refresh token into {bind}"),
         Step::Meter { key, .. } => format!("meter {key}"),
         Step::CheckQuota { key, .. } => format!("check the quota of {key}"),

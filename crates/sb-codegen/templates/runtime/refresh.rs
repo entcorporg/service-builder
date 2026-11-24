@@ -123,6 +123,24 @@ pub async fn rotate(tx: &mut sqlx::PgConnection, presented: &str, ttl_secs: u32)
     Ok(Rotation::Rotated(Rotated { token, subject }))
 }
 
+/// A logout: revokes the family of the presented token (and of no other). Nothing is an error: a token that is empty, unknown,
+/// already revoked or of another `subject` changes nothing, so that a logout can be repeated and says nothing about what exists.
+/// Returns whether a family was revoked.
+pub async fn revoke(tx: &mut sqlx::PgConnection, presented: &str, subject: Option<&str>) -> Result<bool> {
+    if presented.trim().is_empty() {
+        return Ok(false);
+    }
+    let done = sqlx::query(
+        "UPDATE refresh_tokens SET revoked_at = now() WHERE revoked_at IS NULL AND family_id IN \
+         (SELECT family_id FROM refresh_tokens WHERE token_hash = $1 AND ($2::TEXT IS NULL OR subject = $2))",
+    )
+    .bind(hash(presented))
+    .bind(subject)
+    .execute(tx)
+    .await?;
+    Ok(done.rows_affected() > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +216,28 @@ mod tests {
         assert_eq!(status(rotate(&mut tx, &second.token, 3600).await.unwrap_err()), 401);
         // Another family of the same subject is not touched.
         let other = start(&mut tx, &subject, 3600).await.unwrap();
+        assert!(matches!(rotate(&mut tx, &other, 3600).await.unwrap(), Rotation::Rotated(_)));
+        tx.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs EDA_TEST_DATABASE_URL"]
+    async fn a_logout_revokes_its_family_only_and_is_repeatable() {
+        let db = database().await;
+        let subject = format!("account-{:08x}", rand::random::<u32>());
+        let mut tx = db.begin().await.unwrap();
+        let first = start(&mut tx, &subject, 3600).await.unwrap();
+        let Rotation::Rotated(second) = rotate(&mut tx, &first, 3600).await.unwrap() else { panic!("rotated") };
+        let other = start(&mut tx, &subject, 3600).await.unwrap();
+        // Another subject cannot end this family.
+        assert!(!revoke(&mut tx, &second.token, Some("someone-else")).await.unwrap());
+        assert!(revoke(&mut tx, &second.token, Some(&subject)).await.unwrap());
+        assert_eq!(status(rotate(&mut tx, &second.token, 3600).await.unwrap_err()), 401);
+        // Repeating, or giving rubbish, is not an error.
+        assert!(!revoke(&mut tx, &second.token, None).await.unwrap());
+        assert!(!revoke(&mut tx, "", None).await.unwrap());
+        assert!(!revoke(&mut tx, "garbage", None).await.unwrap());
+        // The other family of the subject lives on.
         assert!(matches!(rotate(&mut tx, &other, 3600).await.unwrap(), Rotation::Rotated(_)));
         tx.rollback().await.unwrap();
     }

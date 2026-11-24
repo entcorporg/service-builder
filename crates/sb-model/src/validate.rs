@@ -4463,6 +4463,21 @@ impl<'a> Checker<'a> {
                 self.check_on_fail(env, path, "onReplay", on_replay, scope);
                 false
             }
+            Step::RefreshRevoke { token, subject, .. } => {
+                if !matches!(env.handler, Handler::Route { .. }) {
+                    self.error(
+                        "E_REFRESH_OUTSIDE_ROUTE",
+                        path,
+                        "a logout answers an HTTP client: it only makes sense in an HTTP route",
+                    );
+                }
+                let text = TypeRef::scalar(FieldType::String);
+                self.check_expr(scope, token, Some(&text), &format!("{path}/token"));
+                if let Some(subject) = subject {
+                    self.check_expr(scope, subject, Some(&text), &format!("{path}/subject"));
+                }
+                false
+            }
             Step::ApiKeyRevoke { key_id, owner, .. } => {
                 if !matches!(env.handler, Handler::Route { .. }) {
                     self.error(
@@ -7980,6 +7995,18 @@ mod tests {
         for code in ["E_REFRESH_BIND", "E_REFRESH_REPLAY", "E_ON_FAIL_EMPTY"] {
             assert!(start.contains(&code.to_string()), "{code} in {start:?}");
         }
+        // A logout is a route step, and its token is a text.
+        let logout = codes(&|s| {
+            *s = Step::RefreshRevoke {
+                id: "r1".into(),
+                token: Expr::Literal { value: "x".into() },
+                subject: None,
+            };
+        });
+        assert!(
+            !logout.contains(&"E_REFRESH_OUTSIDE_ROUTE".to_string()),
+            "{logout:?}"
+        );
         let ttl = codes(&|s| {
             if let Step::RefreshRotate { ttl_secs, .. } = s {
                 *ttl_secs = 0;

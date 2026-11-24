@@ -164,6 +164,12 @@ fn steps(base: &str, list: &[Step], out: &mut Vec<Diagnostic>) {
                     expr(subject, &format!("{path}/subject"), out);
                 }
             }
+            Step::RefreshRevoke { token, subject, .. } => {
+                expr(token, &format!("{path}/token"), out);
+                if let Some(subject) = subject {
+                    expr(subject, &format!("{path}/subject"), out);
+                }
+            }
             Step::ApiKeyRevoke { key_id, owner, .. } => {
                 expr(key_id, &format!("{path}/keyId"), out);
                 if let Some(owner) = owner {
