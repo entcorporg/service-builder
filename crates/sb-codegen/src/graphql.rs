@@ -190,6 +190,7 @@ fn gateway_sdl(service: &Service) -> String {
             .iter()
             .map(|a| match &a.default {
                 Some(d) => format!("{}: {} = {}", a.name, scalar(a.ty), sdl_default(a.ty, d)),
+                None if a.optional => format!("{}: {}", a.name, scalar(a.ty)),
                 None => format!("{}: {}!", a.name, scalar(a.ty)),
             })
             .collect();
@@ -544,10 +545,11 @@ fn gateway_transport_rs(service: &Service, source: &str, issuer: &str) -> String
         c.line("args: &[");
         for a in &root.args {
             c.line(format!(
-                "    Arg {{ name: {:?}, scalar: {:?}, default: {} }},",
+                "    Arg {{ name: {:?}, scalar: {:?}, default: {}, optional: {} }},",
                 a.name,
                 scalar(a.ty),
-                opt(a.default.as_deref())
+                opt(a.default.as_deref()),
+                a.optional
             ));
         }
         c.line("],");

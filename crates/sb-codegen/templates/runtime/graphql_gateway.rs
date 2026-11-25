@@ -153,6 +153,8 @@ pub struct Arg {
     pub name: &'static str,
     pub scalar: &'static str,
     pub default: Option<&'static str>,
+    /// Without a default: nullable, and left out of the query parameters when the caller omits it.
+    pub optional: bool,
 }
 
 /// A field of a root: the first row (or the rows) of `source`, asked with query parameters taken from the arguments.
@@ -446,8 +448,18 @@ impl Context {
                 out.insert(v.clone(), Arc::new(rows));
             }
         } else {
+            // The relation points at the key of the target: its route reads one row at `GET <path>/<key>`, no filter needed.
+            let by_key = target.key.as_ref().is_some_and(|k| k.name == relation.target_field);
             let calls = values.iter().map(|v| async move {
                 let mut query = base_query();
+                if by_key {
+                    let Ok(segment) = crate::http_client::segment(v) else {
+                        return (v.clone(), Ok(Vec::new()));
+                    };
+                    let path = format!("{}/{segment}", target.path);
+                    let found = get(target, cookie, &path, query, false).await;
+                    return (v.clone(), found.map(|row| row.filter(Json::is_object).into_iter().collect()));
+                }
                 query.set(relation.target_field, v.as_str());
                 (v.clone(), rows_for(target, cookie, query).await)
             });
@@ -760,6 +772,7 @@ pub fn schema(
         for a in root.args {
             let input = match a.default {
                 Some(text) => InputValue::new(a.name, TypeRef::named(a.scalar)).default_value(default_value(a.scalar, text)),
+                None if a.optional => InputValue::new(a.name, TypeRef::named(a.scalar)),
                 None => InputValue::new(a.name, TypeRef::named_nn(a.scalar)),
             };
             field = field.argument(input);
@@ -965,7 +978,16 @@ mod tests {
                     Prop { name: "quantite", field: "quantite", scalar: "Int", nullable: false, values: &[] },
                 ],
                 key: None,
-                relations: &[],
+                // Without `batch_param`, towards the key of Article: one `GET /articles/<id>` per distinct id.
+                relations: Box::leak(Box::new([Relation {
+                    field: "article",
+                    target: "Article",
+                    via: "article_id",
+                    target_field: "id",
+                    many: false,
+                    batch_param: None,
+                    fixed_params: &[],
+                }])),
                 computed: &[],
             },
         ]))
@@ -1034,6 +1056,20 @@ mod tests {
         assert_eq!(list[1]["mouvements"].as_array().unwrap().len(), 1);
         assert_eq!(list[2]["mouvements"].as_array().unwrap().len(), 0);
         assert_eq!(fake.movement_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_relation_to_a_key_without_batch_parameter_reads_the_row_by_its_path() {
+        let q = "{ mouvementList { id article { nom } } }";
+        let (fake, out) = run("EDA_TEST_GW_BYKEY", None, q).await;
+        let list = out["data"]["mouvementList"].as_array().unwrap();
+        assert_eq!(list.len(), 3, "{out}");
+        assert_eq!(list[0]["article"]["nom"], "Vis", "{out}");
+        assert_eq!(list[1]["article"]["nom"], "Vis", "{out}");
+        // a2 is unknown to GET /articles/a2 (404): null, no error.
+        assert!(list[2]["article"].is_null(), "{out}");
+        assert!(out.get("errors").is_none(), "{out}");
+        assert_eq!(fake.article_calls.load(Ordering::SeqCst), 0, "the collection is not read, only the rows by key");
     }
 
     #[tokio::test]
@@ -1128,12 +1164,14 @@ mod tests {
             field: "tableauDeBord",
             ty: "TableauDeBord",
             args: Box::leak(Box::new([
-                Arg { name: "entrepotId", scalar: "ID", default: None },
-                Arg { name: "limit", scalar: "Int", default: Some("2") },
+                Arg { name: "entrepotId", scalar: "ID", default: None, optional: false },
+                Arg { name: "limit", scalar: "Int", default: Some("2"), optional: false },
+                // Left out by the query below: nullable, and the parameter it feeds is not sent.
+                Arg { name: "recherche", scalar: "String", default: None, optional: true },
             ])),
             guard: Some(Guard { source: "Article", path: "/entrepots/{entrepotId}" }),
             blocks: Box::leak(Box::new([
-                Block { field: "articles", source: "Article", many: true, params: &[("limit", "limit")], fixed_params: &[], path: None },
+                Block { field: "articles", source: "Article", many: true, params: &[("limit", "limit"), ("q", "recherche")], fixed_params: &[], path: None },
                 Block { field: "lots", source: "Lot", many: true, params: &[], fixed_params: &[], path: None },
                 Block { field: "mouvements", source: "Mouvement", many: true, params: &[], fixed_params: &[], path: None },
             ])),
@@ -1182,7 +1220,7 @@ mod tests {
         let roots: &'static [Root] = Box::leak(Box::new([Root {
             field: "capacite",
             ty: "Capacite",
-            args: Box::leak(Box::new([Arg { name: "entrepotId", scalar: "ID", default: None }])),
+            args: Box::leak(Box::new([Arg { name: "entrepotId", scalar: "ID", default: None, optional: false }])),
             guard: None,
             blocks: Box::leak(Box::new([Block {
                 field: "cap",

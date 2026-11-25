@@ -566,6 +566,10 @@ pub struct GraphqlArg {
     /// Without a default, the argument is `Type!`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
+    /// Without a default, the argument is nullable (`Type`): when the caller leaves it out, the query parameters it feeds
+    /// are not sent. Not for an argument used in a `guard` or block `path` (`{arg}`), which must have a value.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub optional: bool,
 }
 
 /// `GET <path>` on the service of `source`, `{arg}` standing for the value of an argument of the root.

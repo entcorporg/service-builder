@@ -440,11 +440,13 @@ fn dashboard() -> sb_model::Project {
                 name: "entrepotId".into(),
                 ty: ColumnType::Uuid,
                 default: None,
+                optional: false,
             },
             GraphqlArg {
                 name: "limit".into(),
                 ty: ColumnType::Int32,
                 default: Some("6".into()),
+                optional: false,
             },
         ],
         guard: Some(GraphqlGuard {
@@ -495,7 +497,7 @@ fn a_gateway_declares_roots_with_arguments_blocks_a_guard_and_computed_fields() 
     assert!(sdl.contains("  taux: Float"), "{sdl}");
     let code = find(&files, "services/orders/src/transport/graphql.rs").expect("endpoint");
     for wanted in [
-        "Arg { name: \"limit\", scalar: \"Int\", default: Some(\"6\") }",
+        "Arg { name: \"limit\", scalar: \"Int\", default: Some(\"6\"), optional: false }",
         "guard: Some(Guard { source: \"Article\", path: \"/entrepots/{entrepotId}\" })",
         "Block { field: \"articles\", source: \"Article\", many: true, params: &[(\"limit\", \"limit\")], fixed_params: &[(\"archive\", \"tous\")], path: None }",
         "static FORWARD: &[&str] = &[];",
@@ -666,6 +668,40 @@ fn a_field_maps_its_values_to_an_enumeration_and_a_date_gives_the_days_left() {
     ] {
         assert!(code.contains(wanted), "{wanted} in {code}");
     }
+    // An optional argument is nullable in the SDL and flagged in the runtime table; with a default it is refused.
+    let mut optional = p.clone();
+    optional.services[0].graphql_roots[0]
+        .args
+        .push(sb_model::GraphqlArg {
+            name: "recherche".into(),
+            ty: ColumnType::String,
+            default: None,
+            optional: true,
+        });
+    let out = generate(&optional).unwrap();
+    let sdl = sdl_file(&out).expect("sdl written");
+    assert!(
+        sdl.contains("recherche: String)") || sdl.contains("recherche: String,"),
+        "{sdl}"
+    );
+    let code = find(&out, "services/orders/src/transport/graphql.rs").expect("endpoint");
+    assert!(
+        code.contains(
+            "Arg { name: \"recherche\", scalar: \"String\", default: None, optional: true }"
+        ),
+        "{code}"
+    );
+    assert!(
+        sb_model::validate(&optional)
+            .iter()
+            .all(|d| d.code != "E_GRAPHQL_ROOT_ARG")
+    );
+    optional.services[0].graphql_roots[0].args[2].default = Some("x".into());
+    assert!(
+        sb_model::validate(&optional)
+            .iter()
+            .any(|d| d.code == "E_GRAPHQL_ROOT_ARG")
+    );
     let again = generate(&p).unwrap();
     assert_eq!(files, again);
     // Refused: a bad enumeration name, a date field that does not exist.

@@ -5677,6 +5677,23 @@ impl<'a> Checker<'a> {
                     ColumnType::Jsonb => false,
                     _ => true,
                 });
+                let in_path = a.optional
+                    && (r
+                        .guard
+                        .as_ref()
+                        .is_some_and(|g| g.path.contains(&format!("{{{}}}", a.name)))
+                        || r.blocks.iter().any(|b| {
+                            b.path
+                                .as_ref()
+                                .is_some_and(|p| p.contains(&format!("{{{}}}", a.name)))
+                        }));
+                if a.optional && (a.default.is_some() || in_path) {
+                    self.error(
+                        "E_GRAPHQL_ROOT_ARG",
+                        format!("{at}/args/{j}/optional"),
+                        "an optional argument has no default and is not used in a guard or block path",
+                    );
+                }
                 if !is_lower_camel(&a.name) || !args.insert(a.name.as_str()) || !ok_default {
                     self.error(
                         "E_GRAPHQL_ROOT_ARG",
