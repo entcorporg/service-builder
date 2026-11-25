@@ -5442,6 +5442,18 @@ impl<'a> Checker<'a> {
         let mut names = HashSet::new();
         for (i, src) in s.graphql_sources.iter().enumerate() {
             let at = format!("{base}/graphqlSources/{i}");
+            let mut seen_roles = HashSet::new();
+            if src
+                .roles
+                .iter()
+                .any(|r| r.trim().is_empty() || !seen_roles.insert(r.as_str()))
+            {
+                self.error(
+                    "E_GRAPHQL_ROLE",
+                    format!("{at}/roles"),
+                    "a role is a non-empty name, listed once",
+                );
+            }
             if !is_pascal_ident(&src.name) || !names.insert(src.name.as_str()) {
                 self.error(
                     "E_GRAPHQL_SOURCE_NAME",

@@ -155,6 +155,7 @@ fn source(name: &str, path: &str, fields: &[(&str, ColumnType)]) -> sb_model::Gr
         key: Some("id".into()),
         relations: vec![],
         computed: vec![],
+        roles: vec![],
     }
 }
 
@@ -236,6 +237,23 @@ fn a_gateway_writes_its_schema_and_reads_the_services_behind_it() {
         find(&again, "services/orders/src/transport/graphql.rs"),
         Some(code)
     );
+}
+
+#[test]
+fn the_roles_of_a_source_are_in_the_generated_code_and_checked() {
+    let mut p = gateway();
+    p.services[0].graphql_sources[1].roles = vec!["admin".into(), "stock".into()];
+    let files = generate(&p).unwrap();
+    let code = find(&files, "services/orders/src/transport/graphql.rs").expect("endpoint");
+    assert!(code.contains("roles: &[\"admin\", \"stock\"],"), "{code}");
+    assert!(code.contains("roles: &[],"), "{code}");
+    assert!(
+        code.contains("Gateway") && code.contains("roles, forwarded"),
+        "{code}"
+    );
+    p.services[0].graphql_sources[1].roles = vec!["admin".into(), "admin".into()];
+    let codes: Vec<String> = sb_model::validate(&p).into_iter().map(|d| d.code).collect();
+    assert!(codes.iter().any(|c| c == "E_GRAPHQL_ROLE"), "{codes:?}");
 }
 
 #[test]
@@ -665,4 +683,28 @@ fn a_field_maps_its_values_to_an_enumeration_and_a_date_gives_the_days_left() {
     for wanted in ["E_GRAPHQL_SOURCE_VALUES", "E_GRAPHQL_COMPUTED"] {
         assert!(codes.iter().any(|c| c == wanted), "{wanted} in {codes:?}");
     }
+}
+
+/// Keeps an export with a GraphQL endpoint under `target/export-graphql`, to run the runtime tests on a real Postgres:
+/// `cargo test -p sb-codegen --ignored keeps_a_graphql_export`, then
+/// `TEST_DATABASE_URL=postgres://… cargo test -p eda-runtime graphql_on_a_real_database` in that directory.
+#[test]
+#[ignore]
+fn keeps_a_gateway_export() {
+    let mut p = gateway();
+    p.services[0].graphql_sources[1].roles = vec!["admin".into()];
+    let files = generate(&p).unwrap();
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/export-gateway");
+    let _ = std::fs::remove_dir_all(&dir);
+    crate::write_to_dir(&files, &dir).unwrap();
+}
+
+/// Keeps an export with a GraphQL endpoint under `target/export-graphql` (see above).
+#[test]
+#[ignore]
+fn keeps_a_graphql_export() {
+    let files = generate(&served()).unwrap();
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/export-graphql");
+    let _ = std::fs::remove_dir_all(&dir);
+    crate::write_to_dir(&files, &dir).unwrap();
 }

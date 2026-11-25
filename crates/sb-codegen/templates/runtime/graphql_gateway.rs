@@ -198,6 +198,8 @@ pub struct Source {
     pub path: &'static str,
     /// The name of the query: `<query>(<key>: ID!)` and `<query>List(first: Int)`.
     pub query: &'static str,
+    /// The roles allowed to read the type; empty: any signed-in caller.
+    pub roles: &'static [&'static str],
     pub props: &'static [Prop],
     pub key: Option<Prop>,
     pub relations: &'static [Relation],
@@ -227,6 +229,21 @@ fn refuse(code: &str, message: &str) -> Error {
     Error::new(message).extend_with(move |_, e| e.set("code", code))
 }
 
+/// Whether the caller holds one of the roles of the type (no role asked: anyone).
+fn allowed(req: &Context, src: &Source) -> Result<(), Failure> {
+    if src.roles.is_empty() || src.roles.iter().any(|r| req.roles.iter().any(|h| h == r)) {
+        Ok(())
+    } else {
+        Err(Failure::new("ACCES_REFUSE", "your role does not give access to this data"))
+    }
+}
+
+/// A refused field alone is `null` (or an empty list), with its error at its path: the rest of the query is answered.
+fn deny(ctx: &ResolverContext<'_>, f: Failure) {
+    let server = ctx.ctx.set_error_path(into_error(f).into_server_error(ctx.ctx.item.pos));
+    ctx.ctx.add_error(server);
+}
+
 fn text_of(v: &Json) -> Option<String> {
     match v {
         Json::Null => None,
@@ -250,6 +267,7 @@ struct Caller {
 struct Context {
     sources: &'static [Source],
     caller: Caller,
+    roles: Vec<String>,
     loader: Mutex<Loader>,
     /// The rows of the blocks already asked, by block and arguments.
     blocks: Mutex<HashMap<(usize, String), Arc<tokio::sync::OnceCell<Rows>>>>,
@@ -502,6 +520,7 @@ async fn block_rows(ctx: &ResolverContext<'_>, b: &'static Block) -> Rows {
 
 async fn fetch_block(req: &Context, args: &Json, b: &'static Block) -> Result<Vec<Json>, Failure> {
     let target = source(req.sources, b.source).ok_or_else(|| Failure::new("ERREUR_INTERNE", "internal error"))?;
+    allowed(req, target)?;
     let mut q = Fields::default();
     for (param, value) in b.fixed_params {
         q.set(*param, *value);
@@ -581,6 +600,10 @@ pub fn schema(
                     let Some(value) = parent_json(&ctx)?.get(r.via).and_then(text_of) else {
                         return Ok(if r.many { Some(FieldValue::list(Vec::<FieldValue>::new())) } else { None });
                     };
+                    if let Err(f) = allowed(context(&ctx)?, target) {
+                        deny(&ctx, f);
+                        return Ok(if r.many { Some(FieldValue::list(Vec::<FieldValue>::new())) } else { None });
+                    }
                     let rows = context(&ctx)?.load(si, ri, value).await?;
                     Ok(if r.many {
                         Some(FieldValue::list(rows.into_iter().map(object)))
@@ -613,6 +636,12 @@ pub fn schema(
                             let ri = s.relations.iter().position(|r| r.field == *relation);
                             match (ri, ri.and_then(|ri| parent.get(s.relations[ri].via).and_then(text_of).map(|v| (ri, v)))) {
                                 (Some(_), Some((ri, via))) => {
+                                    let req = context(&ctx)?;
+                                    let denied = source(sources, s.relations[ri].target).and_then(|t| allowed(req, t).err());
+                                    if let Some(f) = denied {
+                                        deny(&ctx, f);
+                                        return Ok(None);
+                                    }
                                     let rows = context(&ctx)?.load(si, ri, via).await?;
                                     sum_rows(&rows, field, *times).map(Json::from)
                                 }
@@ -632,6 +661,7 @@ pub fn schema(
                 FieldFuture::new(async move {
                     let req = context(&ctx)?;
                     let target = &req.sources[si];
+                    allowed(req, target).map_err(into_error)?;
                     let value = ctx.args.try_get(key.field)?;
                     let value = value.string().map(str::to_owned).or_else(|_| value.i64().map(|n| n.to_string()))?;
                     let segment = crate::http_client::segment(&value)
@@ -648,6 +678,7 @@ pub fn schema(
             FieldFuture::new(async move {
                 let req = context(&ctx)?;
                 let target = &req.sources[si];
+                allowed(req, target).map_err(into_error)?;
                 let mut q = Fields::default();
                 if let Some(first) = ctx.args.get("first") {
                     let first = first.i64()?;
@@ -762,12 +793,12 @@ impl Gateway {
 
     /// Runs the request of a client; `token` is the `access_token` the services behind receive, `headers` the ones the project
     /// forwards with it.
-    pub async fn execute(&self, token: Option<String>, headers: Vec<(String, String)>, body: Json) -> Json {
+    pub async fn execute(&self, token: Option<String>, roles: Vec<String>, headers: Vec<(String, String)>, body: Json) -> Json {
         let request: Request = match serde_json::from_value(body) {
             Ok(r) => r,
             Err(_) => return crate::graphql::error_body("REQUETE_INVALIDE", "the body is not a GraphQL request"),
         };
-        let data = Context { sources: self.sources, caller: Caller { cookie: token, headers }, loader: Mutex::new(Loader::default()), blocks: Mutex::default() };
+        let data = Context { sources: self.sources, caller: Caller { cookie: token, headers }, roles, loader: Mutex::new(Loader::default()), blocks: Mutex::default() };
         let response = self.schema.execute(request.data(data)).await;
         let mut out = serde_json::to_value(&response).unwrap_or_else(|_| Json::Object(Map::new()));
         add_codes(&mut out);
@@ -891,6 +922,11 @@ mod tests {
     }
 
     fn sources(env: &'static str, batch_param: Option<&'static str>) -> &'static [Source] {
+        sources_for(env, batch_param, &[])
+    }
+
+    /// The same sources, the movements being reserved to `movement_roles`.
+    fn sources_for(env: &'static str, batch_param: Option<&'static str>, movement_roles: &'static [&'static str]) -> &'static [Source] {
         let relations: &'static [Relation] = Box::leak(Box::new([Relation {
             field: "mouvements",
             target: "Mouvement",
@@ -906,6 +942,7 @@ mod tests {
                 base_url_env: env,
                 path: "/articles",
                 query: "article",
+                roles: &[],
                 props: &[
                     Prop { name: "id", field: "id", scalar: "ID", nullable: false, values: &[] },
                     Prop { name: "nom", field: "nom", scalar: "String", nullable: false, values: &[] },
@@ -921,6 +958,7 @@ mod tests {
                 base_url_env: env,
                 path: "/mouvements",
                 query: "mouvement",
+                roles: movement_roles,
                 props: &[
                     Prop { name: "id", field: "id", scalar: "ID", nullable: false, values: &[] },
                     Prop { name: "article_id", field: "articleId", scalar: "ID", nullable: false, values: &[] },
@@ -939,7 +977,7 @@ mod tests {
         let (fake, url) = upstream_api().await;
         unsafe { std::env::set_var(env, url) };
         let gateway = Gateway::from_env(sources(env, batch), &[]).unwrap();
-        let out = gateway.execute(Some("tok".into()), Vec::new(), serde_json::json!({ "query": query })).await;
+        let out = gateway.execute(Some("tok".into()), Vec::new(), Vec::new(), serde_json::json!({ "query": query })).await;
         (fake, out)
     }
 
@@ -1010,8 +1048,32 @@ mod tests {
     async fn a_service_that_is_down_is_a_coded_error() {
         unsafe { std::env::set_var("EDA_TEST_GW_DOWN", "http://127.0.0.1:1") };
         let gateway = Gateway::from_env(sources("EDA_TEST_GW_DOWN", None), &[]).unwrap();
-        let out = gateway.execute(None, Vec::new(), serde_json::json!({ "query": "{ articleList { nom } }" })).await;
+        let out = gateway.execute(None, Vec::new(), Vec::new(), serde_json::json!({ "query": "{ articleList { nom } }" })).await;
         assert_eq!(out["errors"][0]["extensions"]["code"], "SERVICE_INDISPONIBLE");
+    }
+
+    #[tokio::test]
+    async fn a_type_with_roles_is_null_with_an_error_at_its_path_for_a_caller_without_one() {
+        let (_, url) = upstream_api().await;
+        unsafe { std::env::set_var("EDA_TEST_GW_ROLES", url) };
+        let gateway = Gateway::from_env(sources_for("EDA_TEST_GW_ROLES", None, &["admin"]), &[]).unwrap();
+        let run = |roles: Vec<String>, q: &str| {
+            let (g, q) = (&gateway, q.to_owned());
+            async move { g.execute(Some("tok".into()), roles, Vec::new(), serde_json::json!({ "query": q })).await }
+        };
+        // The articles are open, the movements nested in them are not: the rows come back, the relation is empty and refused.
+        let out = run(vec!["support".into()], NESTED).await;
+        assert_eq!(out["data"]["articleList"].as_array().unwrap().len(), 3, "{out}");
+        assert!(out["data"]["articleList"][0]["mouvements"].as_array().unwrap().is_empty(), "{out}");
+        assert_eq!(out["errors"][0]["extensions"]["code"], "ACCES_REFUSE", "{out}");
+        assert_eq!(out["errors"][0]["path"][0], "articleList", "{out}");
+        // A listing of the type itself is refused too.
+        let out = run(Vec::new(), "{ mouvementList { quantite } }").await;
+        assert_eq!(out["errors"][0]["extensions"]["code"], "ACCES_REFUSE", "{out}");
+        // The role opens it.
+        let out = run(vec!["admin".into()], NESTED).await;
+        assert!(out.get("errors").is_none(), "{out}");
+        assert_eq!(out["data"]["articleList"][0]["mouvements"].as_array().unwrap().len(), 2, "{out}");
     }
 
     /// Articles with their stock value, the movements and the broken lots, behind a root with arguments and a guard.
@@ -1032,6 +1094,7 @@ mod tests {
                 base_url_env: env,
                 path: "/articles",
                 query: "article",
+                roles: &[],
                 props: Box::leak(Box::new([id()])),
                 key: None,
                 relations,
@@ -1045,6 +1108,7 @@ mod tests {
                 base_url_env: env,
                 path: "/mouvements",
                 query: "mouvement",
+                roles: &[],
                 props: Box::leak(Box::new([
                     id(),
                     Prop { name: "quantite", field: "quantite", scalar: "Int", nullable: false, values: &[] },
@@ -1058,7 +1122,7 @@ mod tests {
                     Computed { field: "sansDenominateur", kind: Kind::Ratio("quantite", "absent") },
                 ])),
             },
-            Source { name: "Lot", base_url_env: env, path: "/lots", query: "lot", props: Box::leak(Box::new([id()])), key: None, relations: &[], computed: &[] },
+            Source { name: "Lot", base_url_env: env, path: "/lots", query: "lot", roles: &[], props: Box::leak(Box::new([id()])), key: None, relations: &[], computed: &[] },
         ]));
         let roots: &'static [Root] = Box::leak(Box::new([Root {
             field: "tableauDeBord",
@@ -1086,7 +1150,7 @@ mod tests {
         unsafe { std::env::set_var(env, url) };
         let (sources, roots) = dashboard(env);
         let gateway = Gateway::from_env(sources, roots).unwrap();
-        let out = gateway.execute(Some("tok".into()), Vec::new(), serde_json::json!({ "query": query })).await;
+        let out = gateway.execute(Some("tok".into()), Vec::new(), Vec::new(), serde_json::json!({ "query": query })).await;
         (fake, out)
     }
 
@@ -1133,7 +1197,7 @@ mod tests {
         let gateway = Gateway::from_env(sources, roots).unwrap();
         let q = r#"{ capacite(entrepotId: "w1") { cap { id } } }"#;
         let headers = vec![("x-frontend-id".to_string(), "front-7".to_string())];
-        let out = gateway.execute(Some("tok".into()), headers, serde_json::json!({ "query": q })).await;
+        let out = gateway.execute(Some("tok".into()), Vec::new(), headers, serde_json::json!({ "query": q })).await;
         assert_eq!(out["data"]["capacite"]["cap"]["id"], "w1|front-7|tous", "{out}");
     }
 

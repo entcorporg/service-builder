@@ -484,6 +484,10 @@ pub struct GraphqlSource {
     /// Fields computed from the row (or from the rows of a relation), declared rather than coded.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub computed: Vec<GraphqlComputed>,
+    /// The roles allowed to read this type (claims `roles` / `role` of the JWT); empty: any signed-in caller.
+    /// A caller without one of them gets the field `null` and an `ACCES_REFUSE` error at its path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<String>,
 }
 
 /// A field computed from integers of a row. A missing operand makes the field `null`.

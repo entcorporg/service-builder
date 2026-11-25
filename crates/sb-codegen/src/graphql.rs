@@ -446,6 +446,14 @@ fn gateway_transport_rs(service: &Service, source: &str, issuer: &str) -> String
         c.line(format!("base_url_env: {:?},", s.base_url_env));
         c.line(format!("path: {:?},", s.path));
         c.line(format!("query: {:?},", camel(&s.name)));
+        c.line(format!(
+            "roles: &[{}],",
+            s.roles
+                .iter()
+                .map(|r| format!("{r:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
         c.line("props: &[");
         for f in &s.fields {
             c.line(format!("    {},", source_prop(&s.name, f)));
@@ -616,16 +624,26 @@ fn gateway_transport_rs(service: &Service, source: &str, issuer: &str) -> String
     c.line("return refused(StatusCode::UNAUTHORIZED, \"NON_AUTHENTIFIE\", \"not signed in\");");
     c.close_with(";");
     c.line(format!(
-        "if eda_runtime::jwt::verify({source}, {issuer}, &token).await.is_err() {{"
+        "let claims = match eda_runtime::jwt::verify({source}, {issuer}, &token).await {{"
     ));
-    c.line("    return refused(StatusCode::UNAUTHORIZED, \"NON_AUTHENTIFIE\", \"invalid token\");");
+    c.line("    Ok(claims) => claims,");
+    c.line("    Err(_) => return refused(StatusCode::UNAUTHORIZED, \"NON_AUTHENTIFIE\", \"invalid token\"),");
+    c.line("};");
+    c.line("// The roles of the caller: the claim `roles` (a list) or `role` (a string).");
+    c.line("let mut roles: Vec<String> = claims");
+    c.line("    .get(\"roles\")");
+    c.line("    .and_then(|v| v.as_array())");
+    c.line("    .map(|a| a.iter().filter_map(|r| r.as_str().map(str::to_owned)).collect())");
+    c.line("    .unwrap_or_default();");
+    c.line("if let Some(role) = claims.get(\"role\").and_then(|v| v.as_str()) {");
+    c.line("    roles.push(role.to_owned());");
     c.line("}");
     c.open("let gateway = match gateway()");
     c.line("Ok(g) => g,");
     c.line("Err(message) => return refused(StatusCode::INTERNAL_SERVER_ERROR, \"ERREUR_INTERNE\", message),");
     c.close_with(";");
     c.line("let forwarded = FORWARD.iter().filter_map(|n| headers.get(*n).and_then(|v| v.to_str().ok()).map(|v| ((*n).to_string(), v.to_string()))).collect();");
-    c.line("Json(gateway.execute(Some(token), forwarded, request).await).into_response()");
+    c.line("Json(gateway.execute(Some(token), roles, forwarded, request).await).into_response()");
     c.close();
     c.finish()
 }
