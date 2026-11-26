@@ -5831,7 +5831,8 @@ impl<'a> Checker<'a> {
                     );
                 }
                 if !block.is_some_and(|b| b.many)
-                    || !numeric(&sm.field)
+                    || (sm.field.is_empty() && sm.times.is_some())
+                    || (!sm.field.is_empty() && !numeric(&sm.field))
                     || !sm.times.as_deref().is_none_or(numeric)
                 {
                     self.error(

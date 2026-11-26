@@ -551,6 +551,8 @@ pub struct GraphqlRootSum {
     pub name: String,
     /// The `field` of a block of the root, which must be `many`.
     pub block: String,
+    /// Left out (or empty): the total counts the rows of the block, without `times`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub field: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub times: Option<String>,

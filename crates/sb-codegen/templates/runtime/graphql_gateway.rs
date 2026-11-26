@@ -138,6 +138,10 @@ fn num(row: &Json, k: &str) -> Option<Num> {
 
 /// `sum(field [* times])` over `rows`, each term rounded to a `Long`; `None` when a row lacks an operand or it overflows.
 fn sum_rows(rows: &[Json], field: &str, times: Option<&str>) -> Option<i64> {
+    // No field: the total counts the rows.
+    if field.is_empty() {
+        return i64::try_from(rows.len()).ok();
+    }
     rows.iter().try_fold(0i64, |acc, row| {
         let n = num(row, field)?;
         let n = match times {
@@ -1177,8 +1181,7 @@ mod tests {
             ])),
             sums: &[
                 RootSum { field: "valeurTotale", block: "mouvements", value: "quantite", times: Some("cout") },
-                RootSum { field: "totalLots", block: "lots", value: "quantite", times: None },
-            ],
+                RootSum { field: "totalLots", block: "lots", value: "quantite", times: None },            ],
         }]));
         (sources, roots)
     }

@@ -611,6 +611,36 @@ fn a_root_total_sums_a_many_block_and_a_double_operand_is_accepted() {
         code.contains("RootSum { field: \"valeurTotale\", block: \"mouvements\", value: \"quantite\", times: Some(\"cout_unitaire\") }"),
         "{code}"
     );
+    // Without a field, a total counts the rows of the block.
+    let mut counted = p.clone();
+    counted.services[0].graphql_roots[0]
+        .sums
+        .push(sb_model::GraphqlRootSum {
+            name: "nbMouvements".into(),
+            block: "mouvements".into(),
+            field: String::new(),
+            times: None,
+        });
+    let errors: Vec<_> = sb_model::validate(&counted)
+        .into_iter()
+        .filter(|d| d.severity == sb_model::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    let files = generate(&counted).unwrap();
+    let code = find(&files, "services/orders/src/transport/graphql.rs").expect("endpoint");
+    assert!(
+        code.contains(
+            "RootSum { field: \"nbMouvements\", block: \"mouvements\", value: \"\", times: None }"
+        ),
+        "{code}"
+    );
+    // Counting takes no `times`.
+    counted.services[0].graphql_roots[0].sums[1].times = Some("quantite".into());
+    assert!(
+        sb_model::validate(&counted)
+            .iter()
+            .any(|d| d.code == "E_GRAPHQL_ROOT_SUM")
+    );
     // A total over a block that is not a list, or over a non-numeric field, is refused.
     let mut bad = p.clone();
     bad.services[0].graphql_roots[0].sums[0].block = "premierMouvement".into();
